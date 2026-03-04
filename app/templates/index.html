@@ -1,0 +1,980 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{ title }}</title>
+    <script>
+      (() => {
+        const saved = localStorage.getItem("agenthub-theme");
+        const theme = (saved === "dark" || saved === "light")
+          ? saved
+          : (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+        document.documentElement.setAttribute("data-theme", theme);
+      })();
+    </script>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <main class="container">
+      <header class="page-head">
+        <div class="page-head-row">
+          <h1>AgentHub 작업 대시보드</h1>
+          <button id="theme-toggle" class="theme-toggle" type="button" aria-label="테마 전환">
+            <span class="theme-icons" aria-hidden="true">
+              <span class="icon-sun">☀</span>
+              <span class="icon-moon">☾</span>
+            </span>
+            <span class="theme-label">라이트</span>
+          </button>
+        </div>
+        <p class="hint">라벨 <code>agent:run</code> 이벤트를 실시간으로 추적합니다.</p>
+      </header>
+
+      <nav class="menu-tabs">
+        <button type="button" class="menu-tab active" data-tab="jobs">
+          <span class="tab-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" focusable="false"><path d="M4 6h16v3H4V6zm0 5h16v3H4v-3zm0 5h16v3H4v-3z"/></svg>
+          </span>
+          <span>리스트</span>
+        </button>
+        <button type="button" class="menu-tab" data-tab="settings">
+          <span class="tab-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" focusable="false"><path d="M19.14 12.94a7.43 7.43 0 0 0 .05-.94 7.43 7.43 0 0 0-.05-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.14 7.14 0 0 0-1.63-.94l-.36-2.54A.5.5 0 0 0 13.9 2h-3.8a.5.5 0 0 0-.49.42l-.36 2.54a7.14 7.14 0 0 0-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.71 8.48a.5.5 0 0 0 .12.64l2.03 1.58a7.43 7.43 0 0 0-.05.94 7.43 7.43 0 0 0 .05.94l-2.03 1.58a.5.5 0 0 0-.12.64l1.92 3.32a.5.5 0 0 0 .6.22l2.39-.96c.5.39 1.05.71 1.63.94l.36 2.54a.5.5 0 0 0 .49.42h3.8a.5.5 0 0 0 .49-.42l.36-2.54c.58-.23 1.13-.55 1.63-.94l2.39.96a.5.5 0 0 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58zM12 15.2A3.2 3.2 0 1 1 12 8.8a3.2 3.2 0 0 1 0 6.4z"/></svg>
+          </span>
+          <span>설정</span>
+        </button>
+      </nav>
+
+      <section id="panel-jobs" class="tab-panel active">
+        <section class="stats" id="stats-cards">
+          <article class="stat-card"><h2>전체</h2><p id="stat-total">0</p></article>
+          <article class="stat-card"><h2>대기</h2><p id="stat-queued">0</p></article>
+          <article class="stat-card"><h2>실행</h2><p id="stat-running">0</p></article>
+          <article class="stat-card"><h2>완료</h2><p id="stat-done">0</p></article>
+          <article class="stat-card"><h2>실패</h2><p id="stat-failed">0</p></article>
+        </section>
+
+        <table class="jobs-table">
+          <thead>
+            <tr>
+              <th>작업 ID</th>
+              <th>앱/트랙</th>
+              <th>상태</th>
+              <th>단계</th>
+              <th>이슈</th>
+              <th>PR</th>
+              <th>갱신 시각</th>
+            </tr>
+          </thead>
+          <tbody id="jobs-table-body">
+            {% for job in jobs %}
+            <tr>
+              <td><a href="/jobs/{{ job.job_id }}">{{ job.job_id[:8] }}</a></td>
+              <td><code>{{ job.app_code or "default" }}</code> / <code>{{ job.track or "new" }}</code></td>
+              <td><span class="badge status-{{ job.status }}">{{ job.status }}</span></td>
+              <td>{{ job.stage }}</td>
+              <td><a href="{{ job.issue_url }}" target="_blank" rel="noreferrer">#{{ job.issue_number }}</a></td>
+              <td>
+                {% if job.pr_url %}
+                <a href="{{ job.pr_url }}" target="_blank" rel="noreferrer">PR</a>
+                {% else %}
+                -
+                {% endif %}
+              </td>
+              <td class="js-time" data-utc="{{ job.updated_at }}">{{ job.updated_at }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+
+        <p class="hint" id="last-updated">마지막 갱신: -</p>
+      </section>
+
+      <section id="panel-settings" class="tab-panel">
+        <nav class="settings-tabs">
+          <button type="button" class="settings-tab active" data-settings-tab="issue">
+            <span class="tab-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" focusable="false"><path d="M4 4h16v16H4V4zm3 3v2h10V7H7zm0 4v2h10v-2H7zm0 4v2h7v-2H7z"/></svg>
+            </span>
+            <span>이슈 등록</span>
+          </button>
+          <button type="button" class="settings-tab" data-settings-tab="apps">
+            <span class="tab-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" focusable="false"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5s-3 1.34-3 3 1.34 3 3 3zM8 11c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5C15 14.17 10.33 13 8 13zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.94 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>
+            </span>
+            <span>앱 관리</span>
+          </button>
+          <button type="button" class="settings-tab" data-settings-tab="agents">
+            <span class="tab-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" focusable="false"><path d="M12 2a3 3 0 0 1 3 3v1h2a2 2 0 0 1 2 2v3h-2V8h-2v3H9V8H7v3H5V8a2 2 0 0 1 2-2h2V5a3 3 0 0 1 3-3zm1 4V5a1 1 0 1 0-2 0v1h2zM5 13h14v2H5v-2zm2 4h10v5H7v-5z"/></svg>
+            </span>
+            <span>에이전트</span>
+          </button>
+        </nav>
+
+        <section class="quick-panel settings-section active" data-settings-section="issue">
+          <div class="quick-panel-head">
+            <div>
+              <h2>작업 이슈 등록</h2>
+              <p class="hint">등록하면 GitHub 이슈 생성 후 즉시 작업 큐에 들어갑니다.</p>
+            </div>
+          </div>
+          <form id="issue-form" class="issue-form">
+            <label for="issue-app-code">대상 앱</label>
+            <select id="issue-app-code" name="app_code">
+              {% for app in apps %}
+              <option value="{{ app.code }}">{{ app.name }} ({{ app.code }})</option>
+              {% endfor %}
+            </select>
+
+            <label for="issue-track">작업 유형</label>
+            <select id="issue-track" name="track">
+              <option value="new">new</option>
+              <option value="enhance">enhance</option>
+              <option value="bug">bug</option>
+              <option value="long">long</option>
+              <option value="ultra">ultra</option>
+            </select>
+
+            <label for="issue-title">제목</label>
+            <input id="issue-title" name="title" type="text" maxlength="200" placeholder="예: 대시보드 필터 추가" required />
+
+            <label for="issue-body">설명</label>
+            <textarea
+              id="issue-body"
+              name="body"
+              rows="4"
+              maxlength="20000"
+              placeholder="요구사항, 범위, 완료 조건을 간단히 적어주세요."
+            ></textarea>
+
+            <div class="issue-form-actions">
+              <button type="submit" id="issue-submit" class="action-button">작업 이슈 등록하기</button>
+              <p id="issue-submit-result" class="hint"></p>
+            </div>
+          </form>
+        </section>
+
+        <section class="quick-panel settings-section" data-settings-section="apps">
+          <div class="quick-panel-head">
+            <div>
+              <h2>앱 등록 관리</h2>
+              <p class="hint">앱 코드를 먼저 등록하면 이슈 등록 드롭다운과 라벨 자동부착에 사용됩니다.</p>
+            </div>
+          </div>
+          <form id="app-config-form" class="issue-form">
+            <label for="app-code">앱 코드</label>
+            <input id="app-code" type="text" maxlength="32" placeholder="예: mvp-a" />
+
+            <label for="app-name">앱 표시명</label>
+            <input id="app-name" type="text" maxlength="80" placeholder="예: MVP A" />
+
+            <div class="issue-form-actions">
+              <button type="submit" id="app-config-submit" class="action-button">앱 등록/수정</button>
+              <p id="app-config-result" class="hint"></p>
+            </div>
+
+            <div id="app-list-box" class="cli-check-box hint">앱 목록 불러오는 중...</div>
+          </form>
+        </section>
+
+        <section class="quick-panel settings-section" data-settings-section="agents">
+          <div class="quick-panel-head">
+            <div>
+              <h2>에이전트 템플릿 설정</h2>
+              <p class="hint">쉬운 입력으로 안전한 템플릿을 만들고, 필요하면 상세 문자열을 직접 편집하세요.</p>
+            </div>
+          </div>
+          <form id="agent-config-form" class="issue-form">
+            <div class="sub-tabs">
+              <button type="button" class="sub-tab active" data-agent-mode="easy">쉬운 입력</button>
+              <button type="button" class="sub-tab" data-agent-mode="raw">상세 문자열</button>
+            </div>
+
+            <section id="agent-panel-easy" class="config-panel active">
+              <div class="issue-form-actions">
+                <button type="button" id="apply-safe-template" class="action-button">안전한 템플릿 적용</button>
+                <p class="hint">역할별 에이전트 선택 + 경로/옵션 입력값으로 명령 문자열을 생성합니다.</p>
+              </div>
+
+              <div class="field-grid">
+                <label for="easy-planner-agent">Planner 에이전트</label>
+                <select id="easy-planner-agent">
+                  <option value="gemini">gemini</option>
+                  <option value="codex">codex</option>
+                  <option value="claude">claude</option>
+                </select>
+
+                <label for="easy-coder-agent">Coder 에이전트</label>
+                <select id="easy-coder-agent">
+                  <option value="codex">codex</option>
+                  <option value="gemini">gemini</option>
+                  <option value="claude">claude</option>
+                </select>
+
+                <label for="easy-reviewer-agent">Reviewer 에이전트</label>
+                <select id="easy-reviewer-agent">
+                  <option value="gemini">gemini</option>
+                  <option value="codex">codex</option>
+                  <option value="claude">claude</option>
+                </select>
+
+                <label for="easy-escalation-agent">Escalation 에이전트</label>
+                <select id="easy-escalation-agent">
+                  <option value="claude">claude</option>
+                  <option value="gemini">gemini</option>
+                  <option value="codex">codex</option>
+                </select>
+
+                <label for="easy-node-path">Node 실행 경로</label>
+                <input id="easy-node-path" type="text" />
+
+                <label for="easy-gemini-path">Gemini CLI 경로</label>
+                <input id="easy-gemini-path" type="text" />
+
+                <label for="easy-codex-path">Codex CLI 경로</label>
+                <input id="easy-codex-path" type="text" />
+
+                <label for="easy-claude-path">Claude CLI 경로</label>
+                <input id="easy-claude-path" type="text" />
+
+                <label for="easy-approval-mode">Approval Mode</label>
+                <select id="easy-approval-mode">
+                  <option value="yolo">yolo</option>
+                  <option value="default">default</option>
+                </select>
+
+                <label for="easy-gemini-extra">Gemini 추가 옵션</label>
+                <input id="easy-gemini-extra" type="text" placeholder="예: --output-format text" />
+
+                <label for="easy-codex-extra">Codex 추가 옵션</label>
+                <input id="easy-codex-extra" type="text" placeholder="예: --dangerously-bypass-approvals-and-sandbox --color never" />
+
+                <label for="easy-claude-extra">Claude 추가 옵션</label>
+                <input id="easy-claude-extra" type="text" placeholder="예: --print" />
+              </div>
+
+              <div class="preview-box">
+                <p class="hint">Planner 미리보기</p>
+                <pre id="preview-planner"></pre>
+                <p class="hint">Coder 미리보기</p>
+                <pre id="preview-coder"></pre>
+                <p class="hint">Reviewer 미리보기</p>
+                <pre id="preview-reviewer"></pre>
+                <p class="hint">Escalation 미리보기</p>
+                <pre id="preview-escalation"></pre>
+              </div>
+            </section>
+
+            <section id="agent-panel-raw" class="config-panel">
+              <label for="tpl-planner">Planner</label>
+              <textarea id="tpl-planner" rows="3" maxlength="4000" placeholder="예: gemini ..."></textarea>
+
+              <label for="tpl-coder">Coder</label>
+              <textarea id="tpl-coder" rows="3" maxlength="4000" placeholder="예: codex ..."></textarea>
+
+              <label for="tpl-reviewer">Reviewer</label>
+              <textarea id="tpl-reviewer" rows="3" maxlength="4000" placeholder="예: gemini review ..."></textarea>
+
+              <label for="tpl-escalation">Escalation</label>
+              <textarea id="tpl-escalation" rows="3" maxlength="4000" placeholder="실패 시 실행할 보조 템플릿 명령"></textarea>
+            </section>
+
+            <label class="toggle-row" for="enable-escalation">
+              <input id="enable-escalation" type="checkbox" />
+              <span>Escalation 활성화</span>
+            </label>
+
+            <div class="issue-form-actions">
+              <button type="submit" id="agent-config-submit" class="action-button">템플릿 저장</button>
+              <button type="button" id="agent-cli-check" class="action-button">CLI 연결 확인</button>
+              <button type="button" id="agent-model-check" class="action-button">적용 모델 확인</button>
+              <p id="agent-config-result" class="hint"></p>
+            </div>
+            <div id="agent-cli-check-result" class="cli-check-box hint">확인 전</div>
+            <div id="agent-model-check-result" class="cli-check-box hint">확인 전</div>
+          </form>
+        </section>
+      </section>
+    </main>
+
+    <script>
+      function esc(value) {
+        return String(value ?? "")
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;")
+          .replace(/'/g, "&#39;");
+      }
+
+      function getPreferredTheme() {
+        const saved = localStorage.getItem("agenthub-theme");
+        if (saved === "dark" || saved === "light") return saved;
+        return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      }
+
+      function applyTheme(theme) {
+        document.documentElement.setAttribute("data-theme", theme);
+        localStorage.setItem("agenthub-theme", theme);
+        const button = document.getElementById("theme-toggle");
+        if (button) {
+          const label = button.querySelector(".theme-label");
+          const nextTheme = theme === "dark" ? "light" : "dark";
+          if (label) {
+            label.textContent = nextTheme === "light" ? "라이트" : "다크";
+          }
+          button.setAttribute(
+            "aria-label",
+            `현재 ${theme === "dark" ? "다크" : "라이트"} 모드, ${nextTheme === "light" ? "라이트" : "다크"} 모드로 전환`
+          );
+        }
+      }
+
+      function initThemeToggle() {
+        const initial = getPreferredTheme();
+        applyTheme(initial);
+        const button = document.getElementById("theme-toggle");
+        if (!button) return;
+        button.addEventListener("click", () => {
+          const current = document.documentElement.getAttribute("data-theme") || "dark";
+          applyTheme(current === "dark" ? "light" : "dark");
+        });
+      }
+
+      const KST_FORMATTER = new Intl.DateTimeFormat("ko-KR", {
+        timeZone: "Asia/Seoul",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        weekday: "short",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false,
+      });
+
+      function formatKstDateTime(value) {
+        if (!value) return "-";
+        const parsed = new Date(value);
+        if (Number.isNaN(parsed.getTime())) return String(value);
+        return `${KST_FORMATTER.format(parsed)} KST`;
+      }
+
+      function hydrateRenderedTimes() {
+        document.querySelectorAll(".js-time").forEach((node) => {
+          const utc = node.getAttribute("data-utc") || "";
+          node.textContent = formatKstDateTime(utc);
+        });
+      }
+
+      function renderStats(summary) {
+        document.getElementById("stat-total").textContent = summary.total ?? 0;
+        document.getElementById("stat-queued").textContent = summary.queued ?? 0;
+        document.getElementById("stat-running").textContent = summary.running ?? 0;
+        document.getElementById("stat-done").textContent = summary.done ?? 0;
+        document.getElementById("stat-failed").textContent = summary.failed ?? 0;
+      }
+
+      function renderJobs(jobs) {
+        const body = document.getElementById("jobs-table-body");
+        body.innerHTML = jobs
+          .map((job) => {
+            const prCell = job.pr_url
+              ? `<a href="${esc(job.pr_url)}" target="_blank" rel="noreferrer">PR</a>`
+              : "-";
+            const appCode = job.app_code || "default";
+            const track = job.track || "new";
+            return `
+            <tr>
+              <td><a href="/jobs/${esc(job.job_id)}">${esc(String(job.job_id).slice(0, 8))}</a></td>
+              <td><code>${esc(appCode)}</code> / <code>${esc(track)}</code></td>
+              <td><span class="badge status-${esc(job.status)}">${esc(job.status)}</span></td>
+              <td>${esc(job.stage)}</td>
+              <td><a href="${esc(job.issue_url)}" target="_blank" rel="noreferrer">#${esc(job.issue_number)}</a></td>
+              <td>${prCell}</td>
+              <td>${esc(formatKstDateTime(job.updated_at))}</td>
+            </tr>`;
+          })
+          .join("");
+      }
+
+      function setIssueSubmitResult(message, isError = false) {
+        const node = document.getElementById("issue-submit-result");
+        node.textContent = message;
+        node.classList.toggle("text-error", isError);
+      }
+
+      function setAgentConfigResult(message, isError = false) {
+        const node = document.getElementById("agent-config-result");
+        node.textContent = message;
+        node.classList.toggle("text-error", isError);
+      }
+
+      function setAppConfigResult(message, isError = false) {
+        const node = document.getElementById("app-config-result");
+        if (!node) return;
+        node.textContent = message;
+        node.classList.toggle("text-error", isError);
+      }
+
+      function renderAppOptions(apps) {
+        const appSelect = document.getElementById("issue-app-code");
+        if (!appSelect) return;
+        const previous = appSelect.value;
+        appSelect.innerHTML = (apps || [])
+          .map((app) => `<option value="${esc(app.code)}">${esc(app.name)} (${esc(app.code)})</option>`)
+          .join("");
+        if ((apps || []).some((item) => item.code === previous)) {
+          appSelect.value = previous;
+        }
+      }
+
+      function renderAppList(apps) {
+        const box = document.getElementById("app-list-box");
+        if (!box) return;
+        if (!apps || apps.length === 0) {
+          box.textContent = "등록된 앱 없음";
+          return;
+        }
+        const rows = apps
+          .map((app) => {
+            const deletable = app.code !== "default";
+            const deleteButton = deletable
+              ? `<button type="button" class="action-button app-delete" data-app-code="${esc(app.code)}" aria-label="${esc(app.code)} 앱 삭제" title="삭제">
+                  <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true"><path d="M9 3h6l1 2h4v2H4V5h4l1-2zm1 6h2v8h-2V9zm4 0h2v8h-2V9zM7 9h2v8H7V9z"/></svg>
+                </button>`
+              : "-";
+            return `<tr>
+              <td>${esc(app.name)}</td>
+              <td><code>${esc(app.code)}</code></td>
+              <td>${esc(app.repository || "-")}</td>
+              <td>${deleteButton}</td>
+            </tr>`;
+          })
+          .join("");
+        box.innerHTML = `<div class="app-table-wrap">
+          <table class="app-table">
+            <thead>
+              <tr>
+                <th>앱명</th>
+                <th>코드</th>
+                <th>저장소</th>
+                <th>삭제</th>
+              </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>`;
+      }
+
+      async function loadApps() {
+        try {
+          const response = await fetch("/api/apps", { cache: "no-store" });
+          if (!response.ok) return;
+          const payload = await response.json();
+          const apps = payload.apps || [];
+          renderAppOptions(apps);
+          renderAppList(apps);
+        } catch {
+          setAppConfigResult("앱 목록을 불러오지 못했습니다.", true);
+        }
+      }
+
+      function renderCliCheckResult(payload) {
+        const box = document.getElementById("agent-cli-check-result");
+        if (!box) return;
+        const order = ["gemini", "codex", "claude"];
+        box.innerHTML = order
+          .map((name) => {
+            const item = payload?.[name] || {};
+            const ok = Boolean(item.ok);
+            const status = ok ? "OK" : "FAIL";
+            return `<div class="cli-row">
+              <span class="cli-name">${name.toUpperCase()}</span>
+              <span class="cli-status ${ok ? "ok" : "fail"}">${status}</span>
+              <code>${esc(item.command || "-")}</code>
+              <span class="cli-output">${esc(item.output || "")}</span>
+            </div>`;
+          })
+          .join("");
+      }
+
+      function renderModelCheckResult(payload) {
+        const box = document.getElementById("agent-model-check-result");
+        if (!box) return;
+        const order = ["gemini", "codex", "claude"];
+        box.innerHTML = order
+          .map((name) => {
+            const item = payload?.[name] || {};
+            const model = item.model || "(미설정)";
+            const source = item.source || "not_found";
+            const key = item.template_key ? ` / template:${item.template_key}` : "";
+            return `<div class="cli-row">
+              <span class="cli-name">${name.toUpperCase()}</span>
+              <span class="cli-status ${model === "(미설정)" ? "fail" : "ok"}">${model === "(미설정)" ? "N/A" : "SET"}</span>
+              <code>${esc(model)}</code>
+              <span class="cli-output">${esc(source + key)}</span>
+            </div>`;
+          })
+          .join("");
+      }
+
+      function safeTemplateDefaults() {
+        return {
+          plannerAgent: "gemini",
+          coderAgent: "codex",
+          reviewerAgent: "gemini",
+          escalationAgent: "gemini",
+          nodePath: "/root/.nvm/versions/node/v24.14.0/bin/node",
+          geminiPath: "/root/.nvm/versions/node/v24.14.0/bin/gemini",
+          codexPath: "/root/.nvm/versions/node/v24.14.0/bin/codex",
+          claudePath: "/root/.local/bin/claude",
+          approvalMode: "yolo",
+          geminiExtra: "--model gemini-3.1-pro-preview --output-format text",
+          codexExtra: "--dangerously-bypass-approvals-and-sandbox --color never",
+          claudeExtra: "--print",
+        };
+      }
+
+      function readEasyFields() {
+        return {
+          plannerAgent: document.getElementById("easy-planner-agent").value,
+          coderAgent: document.getElementById("easy-coder-agent").value,
+          reviewerAgent: document.getElementById("easy-reviewer-agent").value,
+          escalationAgent: document.getElementById("easy-escalation-agent").value,
+          nodePath: document.getElementById("easy-node-path").value.trim(),
+          geminiPath: document.getElementById("easy-gemini-path").value.trim(),
+          codexPath: document.getElementById("easy-codex-path").value.trim(),
+          claudePath: document.getElementById("easy-claude-path").value.trim(),
+          approvalMode: document.getElementById("easy-approval-mode").value,
+          geminiExtra: document.getElementById("easy-gemini-extra").value.trim(),
+          codexExtra: document.getElementById("easy-codex-extra").value.trim(),
+          claudeExtra: document.getElementById("easy-claude-extra").value.trim(),
+        };
+      }
+
+      function normalizeOptions(raw) {
+        return raw ? ` ${raw}` : "";
+      }
+
+      function roleTargetPath(role) {
+        if (role === "planner") return "{plan_path}";
+        if (role === "reviewer") return "{review_path}";
+        return "";
+      }
+
+      function buildRoleCommand(agent, role, fields) {
+        const targetPath = roleTargetPath(role);
+        const geminiFlags = `-p '' --approval-mode ${fields.approvalMode}${normalizeOptions(fields.geminiExtra)}`;
+        const codexFlags = `exec - -C {work_dir}${normalizeOptions(fields.codexExtra)}`;
+        const claudeFlags = fields.claudeExtra || "--print";
+
+        if (agent === "gemini") {
+          const base = `cat {prompt_file} | ${fields.nodePath} ${fields.geminiPath} ${geminiFlags}`;
+          return targetPath ? `${base} > ${targetPath}` : base;
+        }
+        if (agent === "codex") {
+          const base = `cat {prompt_file} | ${fields.nodePath} ${fields.codexPath} ${codexFlags}`;
+          return targetPath ? `${base} > ${targetPath}` : base;
+        }
+
+        // claude
+        const usesPromptFile = claudeFlags.includes("{prompt_file}");
+        const base = usesPromptFile
+          ? `${fields.claudePath} ${claudeFlags}`
+          : `cat {prompt_file} | ${fields.claudePath} ${claudeFlags}`;
+        return targetPath ? `${base} > ${targetPath}` : base;
+      }
+
+      function buildCommandsFromEasy(fields) {
+        const planner = buildRoleCommand(fields.plannerAgent, "planner", fields);
+        const coder = buildRoleCommand(fields.coderAgent, "coder", fields);
+        const reviewer = buildRoleCommand(fields.reviewerAgent, "reviewer", fields);
+        const escalationBase = buildRoleCommand(fields.escalationAgent, "escalation", fields);
+        const escalation = `${escalationBase} > ESCALATION.md`;
+        return { planner, coder, reviewer, escalation };
+      }
+
+      function renderEasyPreview() {
+        const fields = readEasyFields();
+        const commands = buildCommandsFromEasy(fields);
+        document.getElementById("preview-planner").textContent = commands.planner;
+        document.getElementById("preview-coder").textContent = commands.coder;
+        document.getElementById("preview-reviewer").textContent = commands.reviewer;
+        document.getElementById("preview-escalation").textContent = commands.escalation;
+        return commands;
+      }
+
+      function applySafeTemplateToEasyFields() {
+        const defaults = safeTemplateDefaults();
+        document.getElementById("easy-planner-agent").value = defaults.plannerAgent;
+        document.getElementById("easy-coder-agent").value = defaults.coderAgent;
+        document.getElementById("easy-reviewer-agent").value = defaults.reviewerAgent;
+        document.getElementById("easy-escalation-agent").value = defaults.escalationAgent;
+        document.getElementById("easy-node-path").value = defaults.nodePath;
+        document.getElementById("easy-gemini-path").value = defaults.geminiPath;
+        document.getElementById("easy-codex-path").value = defaults.codexPath;
+        document.getElementById("easy-claude-path").value = defaults.claudePath;
+        document.getElementById("easy-approval-mode").value = defaults.approvalMode;
+        document.getElementById("easy-gemini-extra").value = defaults.geminiExtra;
+        document.getElementById("easy-codex-extra").value = defaults.codexExtra;
+        document.getElementById("easy-claude-extra").value = defaults.claudeExtra;
+        renderEasyPreview();
+      }
+
+      function currentAgentMode() {
+        return document.querySelector(".sub-tab.active")?.dataset.agentMode || "easy";
+      }
+
+      function setAgentMode(mode) {
+        document.querySelectorAll(".sub-tab").forEach((button) => {
+          button.classList.toggle("active", button.dataset.agentMode === mode);
+        });
+        document.getElementById("agent-panel-easy").classList.toggle("active", mode === "easy");
+        document.getElementById("agent-panel-raw").classList.toggle("active", mode === "raw");
+        localStorage.setItem("agent-config-mode", mode);
+      }
+
+      function bindAgentModeTabs() {
+        const saved = localStorage.getItem("agent-config-mode");
+        setAgentMode(saved === "raw" ? "raw" : "easy");
+        document.querySelectorAll(".sub-tab").forEach((button) => {
+          button.addEventListener("click", () => setAgentMode(button.dataset.agentMode || "easy"));
+        });
+      }
+
+      function bindIssueForm() {
+        const form = document.getElementById("issue-form");
+        const submit = document.getElementById("issue-submit");
+        if (!form || !submit) return;
+
+        form.addEventListener("submit", async (event) => {
+          event.preventDefault();
+          const appCode = document.getElementById("issue-app-code").value;
+          const track = document.getElementById("issue-track").value;
+          const title = document.getElementById("issue-title").value.trim();
+          const body = document.getElementById("issue-body").value.trim();
+          if (!title) {
+            setIssueSubmitResult("제목을 입력해주세요.", true);
+            return;
+          }
+
+          submit.disabled = true;
+          setIssueSubmitResult("등록 중...");
+
+          try {
+            const response = await fetch("/api/issues/register", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ title, body, app_code: appCode, track }),
+            });
+            const payload = await response.json();
+            if (!response.ok) {
+              setIssueSubmitResult(payload.detail || "등록 중 오류가 발생했습니다.", true);
+              return;
+            }
+
+            if (payload.job_id) {
+              setIssueSubmitResult(
+                `등록 완료: 이슈 #${payload.issue_number}, 작업 ${String(payload.job_id).slice(0, 8)} 생성`,
+                false
+              );
+            } else {
+              setIssueSubmitResult("이미 실행 중인 작업이 있어 기존 작업으로 연결되었습니다.");
+            }
+
+            form.reset();
+            await refreshJobs();
+          } catch {
+            setIssueSubmitResult("네트워크 오류로 등록에 실패했습니다.", true);
+          } finally {
+            submit.disabled = false;
+          }
+        });
+      }
+
+      function bindAppConfigForm() {
+        const form = document.getElementById("app-config-form");
+        const submit = document.getElementById("app-config-submit");
+        const list = document.getElementById("app-list-box");
+        if (!form || !submit || !list) return;
+
+        list.addEventListener("click", async (event) => {
+          const target = event.target;
+          if (!(target instanceof Element)) return;
+          const button = target.closest(".app-delete");
+          if (!(button instanceof HTMLButtonElement)) return;
+          const appCode = button.getAttribute("data-app-code") || "";
+          if (!appCode) return;
+          button.setAttribute("disabled", "disabled");
+          try {
+            const response = await fetch(`/api/apps/${encodeURIComponent(appCode)}`, { method: "DELETE" });
+            const payload = await response.json();
+            if (!response.ok || !payload.deleted) {
+              setAppConfigResult(payload.detail || "앱 삭제에 실패했습니다.", true);
+              return;
+            }
+            setAppConfigResult(`앱 삭제 완료: ${appCode}`);
+            renderAppOptions(payload.apps || []);
+            renderAppList(payload.apps || []);
+          } catch {
+            setAppConfigResult("네트워크 오류로 삭제 실패", true);
+          } finally {
+            button.removeAttribute("disabled");
+          }
+        });
+
+        form.addEventListener("submit", async (event) => {
+          event.preventDefault();
+          const code = document.getElementById("app-code").value.trim();
+          const name = document.getElementById("app-name").value.trim();
+          if (!code || !name) {
+            setAppConfigResult("앱 코드와 표시명을 모두 입력해주세요.", true);
+            return;
+          }
+          submit.disabled = true;
+          setAppConfigResult("저장 중...");
+          try {
+            const response = await fetch("/api/apps", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ code, name }),
+            });
+            const payload = await response.json();
+            if (!response.ok || !payload.saved) {
+              setAppConfigResult(payload.detail || "앱 저장 실패", true);
+              return;
+            }
+            setAppConfigResult(`저장 완료: ${code}`);
+            renderAppOptions(payload.apps || []);
+            renderAppList(payload.apps || []);
+            document.getElementById("app-code").value = "";
+            document.getElementById("app-name").value = "";
+          } catch {
+            setAppConfigResult("네트워크 오류로 저장 실패", true);
+          } finally {
+            submit.disabled = false;
+          }
+        });
+      }
+
+      function setMainTab(tabName) {
+        document.querySelectorAll(".menu-tab").forEach((button) => {
+          button.classList.toggle("active", button.dataset.tab === tabName);
+        });
+        document.getElementById("panel-jobs").classList.toggle("active", tabName === "jobs");
+        document.getElementById("panel-settings").classList.toggle("active", tabName === "settings");
+        localStorage.setItem("agenthub-main-tab", tabName);
+      }
+
+      function bindMainTabs() {
+        const saved = localStorage.getItem("agenthub-main-tab");
+        const initial = saved === "settings" ? "settings" : "jobs";
+        setMainTab(initial);
+
+        document.querySelectorAll(".menu-tab").forEach((button) => {
+          button.addEventListener("click", () => {
+            setMainTab(button.dataset.tab || "jobs");
+          });
+        });
+      }
+
+      function setSettingsTab(tabName) {
+        document.querySelectorAll(".settings-tab").forEach((button) => {
+          button.classList.toggle("active", button.dataset.settingsTab === tabName);
+        });
+        document.querySelectorAll(".settings-section").forEach((section) => {
+          section.classList.toggle("active", section.dataset.settingsSection === tabName);
+        });
+        localStorage.setItem("agenthub-settings-tab", tabName);
+      }
+
+      function bindSettingsTabs() {
+        const saved = localStorage.getItem("agenthub-settings-tab");
+        const initial = saved || "issue";
+        setSettingsTab(initial);
+        document.querySelectorAll(".settings-tab").forEach((button) => {
+          button.addEventListener("click", () => {
+            setSettingsTab(button.dataset.settingsTab || "issue");
+          });
+        });
+      }
+
+      async function loadAgentConfig() {
+        try {
+          const response = await fetch("/api/agents/config", { cache: "no-store" });
+          if (!response.ok) return;
+          const payload = await response.json();
+          document.getElementById("tpl-planner").value = payload.planner || "";
+          document.getElementById("tpl-coder").value = payload.coder || "";
+          document.getElementById("tpl-reviewer").value = payload.reviewer || "";
+          document.getElementById("tpl-escalation").value = payload.escalation || "";
+          document.getElementById("enable-escalation").checked = Boolean(payload.enable_escalation);
+          renderEasyPreview();
+        } catch {
+          setAgentConfigResult("템플릿을 불러오지 못했습니다.", true);
+        }
+      }
+
+      function bindAgentConfigForm() {
+        const form = document.getElementById("agent-config-form");
+        const submit = document.getElementById("agent-config-submit");
+        const checkButton = document.getElementById("agent-cli-check");
+        const modelCheckButton = document.getElementById("agent-model-check");
+        if (!form || !submit) return;
+
+        document.getElementById("apply-safe-template").addEventListener("click", () => {
+          applySafeTemplateToEasyFields();
+          setAgentConfigResult("안전한 템플릿을 적용했습니다.");
+        });
+
+        checkButton?.addEventListener("click", async () => {
+          checkButton.disabled = true;
+          renderCliCheckResult({});
+          const box = document.getElementById("agent-cli-check-result");
+          if (box) box.textContent = "확인 중...";
+          try {
+            const response = await fetch("/api/agents/check", { cache: "no-store" });
+            const payload = await response.json();
+            if (!response.ok) {
+              if (box) box.textContent = payload.detail || "CLI 확인 실패";
+              return;
+            }
+            renderCliCheckResult(payload);
+          } catch {
+            if (box) box.textContent = "네트워크 오류로 확인 실패";
+          } finally {
+            checkButton.disabled = false;
+          }
+        });
+
+        modelCheckButton?.addEventListener("click", async () => {
+          modelCheckButton.disabled = true;
+          renderModelCheckResult({});
+          const box = document.getElementById("agent-model-check-result");
+          if (box) box.textContent = "확인 중...";
+          try {
+            const response = await fetch("/api/agents/models", { cache: "no-store" });
+            const payload = await response.json();
+            if (!response.ok) {
+              if (box) box.textContent = payload.detail || "모델 확인 실패";
+              return;
+            }
+            renderModelCheckResult(payload);
+          } catch {
+            if (box) box.textContent = "네트워크 오류로 확인 실패";
+          } finally {
+            modelCheckButton.disabled = false;
+          }
+        });
+
+        [
+          "easy-planner-agent",
+          "easy-coder-agent",
+          "easy-reviewer-agent",
+          "easy-escalation-agent",
+          "easy-node-path",
+          "easy-gemini-path",
+          "easy-codex-path",
+          "easy-claude-path",
+          "easy-approval-mode",
+          "easy-gemini-extra",
+          "easy-codex-extra",
+          "easy-claude-extra",
+        ]
+          .forEach((id) => {
+            const element = document.getElementById(id);
+            element?.addEventListener("input", renderEasyPreview);
+            element?.addEventListener("change", renderEasyPreview);
+          });
+
+        form.addEventListener("submit", async (event) => {
+          event.preventDefault();
+          let planner = document.getElementById("tpl-planner").value.trim();
+          let coder = document.getElementById("tpl-coder").value.trim();
+          let reviewer = document.getElementById("tpl-reviewer").value.trim();
+          let escalation = document.getElementById("tpl-escalation").value.trim();
+          if (currentAgentMode() === "easy") {
+            const fields = readEasyFields();
+            if (!fields.nodePath || !fields.geminiPath || !fields.codexPath || !fields.claudePath) {
+              setAgentConfigResult("쉬운 입력의 경로 필드를 모두 입력해주세요.", true);
+              return;
+            }
+            const generated = buildCommandsFromEasy(fields);
+            planner = generated.planner;
+            coder = generated.coder;
+            reviewer = generated.reviewer;
+            escalation = generated.escalation;
+            document.getElementById("tpl-planner").value = planner;
+            document.getElementById("tpl-coder").value = coder;
+            document.getElementById("tpl-reviewer").value = reviewer;
+            document.getElementById("tpl-escalation").value = escalation;
+          }
+          const enableEscalation = document.getElementById("enable-escalation").checked;
+          if (!planner || !coder || !reviewer) {
+            setAgentConfigResult("planner/coder/reviewer를 모두 입력해주세요.", true);
+            return;
+          }
+          if (enableEscalation && !escalation) {
+            setAgentConfigResult("Escalation 활성화 시 escalation 명령을 입력해주세요.", true);
+            return;
+          }
+
+          submit.disabled = true;
+          setAgentConfigResult("저장 중...");
+          try {
+            const response = await fetch("/api/agents/config", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                planner,
+                coder,
+                reviewer,
+                escalation,
+                enable_escalation: enableEscalation,
+              }),
+            });
+            const payload = await response.json();
+            if (!response.ok || !payload.saved) {
+              setAgentConfigResult(payload.detail || "저장에 실패했습니다.", true);
+              return;
+            }
+            setAgentConfigResult("저장 완료: 다음 작업부터 즉시 적용됩니다.");
+          } catch {
+            setAgentConfigResult("네트워크 오류로 저장에 실패했습니다.", true);
+          } finally {
+            submit.disabled = false;
+          }
+        });
+      }
+
+      async function refreshJobs() {
+        try {
+          const response = await fetch("/api/jobs", { cache: "no-store" });
+          if (!response.ok) return;
+          const payload = await response.json();
+          renderStats(payload.summary || {});
+          renderJobs(payload.jobs || []);
+          document.getElementById("last-updated").textContent = `마지막 갱신: ${formatKstDateTime(new Date().toISOString())}`;
+        } catch {
+        }
+      }
+
+      initThemeToggle();
+      bindMainTabs();
+      bindSettingsTabs();
+      bindIssueForm();
+      bindAppConfigForm();
+      bindAgentModeTabs();
+      bindAgentConfigForm();
+      hydrateRenderedTimes();
+      applySafeTemplateToEasyFields();
+      loadApps();
+      loadAgentConfig();
+      refreshJobs();
+      setInterval(refreshJobs, 3000);
+    </script>
+  </body>
+</html>

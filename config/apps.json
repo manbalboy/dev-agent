@@ -1,0 +1,50 @@
+[
+  {
+    "code": "app1-mvp",
+    "name": "app1-mvp",
+    "repository": "manbalboy/agent-hub",
+    "workflow_id": "default_linear_v1"
+  },
+  {
+    "code": "default",
+    "name": "Default",
+    "repository": "manbalboy/agent-hub",
+    "workflow_id": "default_linear_v1"
+  },
+  {
+    "code": "mvp-1",
+    "name": "MVP 1",
+    "repository": "manbalboy/agent-hub",
+    "workflow_id": "default_linear_v1"
+  },
+  {
+    "code": "test-1",
+    "name": "테스트 앱",
+    "repository": "manbalboy/agent-hub",
+    "workflow_id": "default_quality_gate_v2"
+  },
+  {
+    "code": "test-2",
+    "name": "ai 성격분석",
+    "repository": "manbalboy/agent-hub",
+    "workflow_id": "default_quality_gate_v2"
+  },
+  {
+    "code": "test-3",
+    "name": "mz가 좋아할만한 웹 사이트",
+    "repository": "manbalboy/agent-hub",
+    "workflow_id": "default_quality_gate_v2"
+  },
+  {
+    "code": "test-4",
+    "name": "개발자가 사용하기에 편리한 도구 웹",
+    "repository": "manbalboy/agent-hub",
+    "workflow_id": "default_quality_gate_v2"
+  },
+  {
+    "code": "test-5",
+    "name": "main 고도화",
+    "repository": "manbalboy/agent-hub",
+    "workflow_id": "default_quality_gate_v2"
+  }
+]

@@ -1,0 +1,19 @@
+{
+  "job_id": "26d868f9-7bba-4862-bc88-cf090a878cc0",
+  "attempt": 1,
+  "stage": "write_spec",
+  "created_at": "2026-03-03T22:58:48.988456+00:00",
+  "changed_files": [
+    "?? SPEC.md"
+  ],
+  "md_files": [
+    {
+      "path": "README.md",
+      "content": "# agent-hub\n"
+    },
+    {
+      "path": "SPEC.md",
+      "content": "# SPEC\n\n       - Repository: manbalboy/agent-hub\n       - Issue: #44\n       - URL: https://github.com/manbalboy/agent-hub/issues/44\n       - Title: [초장기][고도화][test-5] 기존 AgentHub 대시보드 로그 가시성 개선 2차\n\n       ## 원본 요청\n\n       ## 목적\n - 기존 구현을 이어서 고도화한다. (신규 앱 아님)\n\n- 현재 동작/한계:\n   - (예: 로그는 보이지만 단계/에이전트 행동 흐름이 약함)\n\n       ## Rule Of Engagement\n\n       - 오케스트레이터가 단계 순서와 재시도 정책을 결정합니다.\n       - AI 도구는 컨트롤러가 아니라 작업자(worker)입니다.\n       - 변경 범위는 MVP에 맞게 최소화합니다.\n       - 구현 단계에서 로컬 실행 포트가 필요하면 충돌 방지를 고려합니다.\n\n       ## Deployment & Preview Requirements\n\n       - 1회 실행 사이클의 결과물은 Docker 실행 가능 상태를 목표로 구현합니다.\n       - Preview 외부 노출 포트는 7000-7099 범위를 사용합니다.\n       - Preview 외부 기준 도메인/호스트: http://ssh.manbalboy.com:7000\n       - CORS 허용 대상은 manbalboy.com 계열 또는 localhost 계열로 제한합니다.\n       - 허용 origin 정책(기준값): https://manbalboy.com,http://manbalboy.com,https://localhost,http://localhost,https://127.0.0.1,http://127.0.0.1\n       - PR 본문에는 Docker Preview 정보(컨테이너/포트/URL)를 포함합니다.\n"
+    }
+  ]
+}

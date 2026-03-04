@@ -1,0 +1,12 @@
+{
+  "chat.tools.terminal.autoApprove": {
+    "/^cd /home/docker/agentHub; python3 - <<'PY'\nimport json\nfrom pathlib import Path\njobs=json\\.loads\\(Path\\('data/jobs\\.json'\\)\\.read_text\\(\\)\\)\nfor j in jobs\\.values\\(\\):\n    print\\(j\\['job_id'\\], j\\['status'\\], j\\['stage'\\], 'attempt', j\\['attempt'\\], 'pr', bool\\(j\\.get\\('pr_url'\\)\\)\\)\nprint\\('queue', json\\.loads\\(Path\\('data/queue\\.json'\\)\\.read_text\\(\\)\\)\\)\nPY$/": {
+      "approve": true,
+      "matchCommandLine": true
+    },
+    "/^cd /home/docker/agentHub; python3 - <<'PY'\nimport json\nfrom pathlib import Path\njobs_path=Path\\('data/jobs\\.json'\\)\nqueue_path=Path\\('data/queue\\.json'\\)\njobs=json\\.loads\\(jobs_path\\.read_text\\(\\)\\)\nqueue=json\\.loads\\(queue_path\\.read_text\\(\\)\\)\nseen=set\\(\\)\nnew=\\[\\]\nfor job_id in queue:\n    if job_id in seen:\n        continue\n    seen\\.add\\(job_id\\)\n    job=jobs\\.get\\(job_id\\)\n    if not job:\n        continue\n    if job\\.get\\('status'\\)=='queued':\n        new\\.append\\(job_id\\)\nqueue_path\\.write_text\\(json\\.dumps\\(new, ensure_ascii=False, indent=2\\)\\+'\\\\n'\\)\nprint\\('old_queue_size', len\\(queue\\)\\)\nprint\\('new_queue_size', len\\(new\\)\\)\nprint\\('new_queue', new\\)\nPY$/": {
+      "approve": true,
+      "matchCommandLine": true
+    }
+  }
+}

@@ -1,0 +1,15 @@
+[Unit]
+Description=AgentHub FastAPI API server
+After=network.target
+
+[Service]
+Type=simple
+User=docker
+WorkingDirectory=/home/docker/agentHub
+EnvironmentFile=/home/docker/agentHub/.env
+ExecStart=/home/docker/agentHub/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8321
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,915 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{ title }}</title>
+    <script>
+      (() => {
+        const saved = localStorage.getItem("agenthub-theme");
+        const theme = (saved === "dark" || saved === "light")
+          ? saved
+          : (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+        document.documentElement.setAttribute("data-theme", theme);
+      })();
+    </script>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <main class="container">
+      <header class="page-head">
+        <p class="back-link"><a href="/">&larr; 목록으로</a></p>
+        <div class="page-head-row">
+          <h1>작업 상세 · {{ job.job_id }}</h1>
+          <div class="row">
+            <button id="job-stop" class="action-button" type="button">정지 요청(라운드 종료 후)</button>
+            <button id="theme-toggle" class="theme-toggle" type="button" aria-label="테마 전환">
+              <span class="theme-icons" aria-hidden="true">
+                <span class="icon-sun">☀</span>
+                <span class="icon-moon">☾</span>
+              </span>
+              <span class="theme-label">라이트</span>
+            </button>
+          </div>
+        </div>
+        <p id="stop-state" class="hint"></p>
+      </header>
+
+      <dl class="meta-grid">
+        <dt>상태</dt><dd id="job-status">{{ job.status }}</dd>
+        <dt>단계</dt><dd id="job-stage">{{ job.stage }}</dd>
+        <dt>앱</dt><dd id="job-app">{{ job.app_code or "default" }}</dd>
+        <dt>트랙</dt><dd id="job-track">{{ job.track or "new" }}</dd>
+        <dt>시도 횟수</dt><dd id="job-attempt">{{ job.attempt }} / {{ job.max_attempts }}</dd>
+        <dt>저장소</dt><dd id="job-repo">{{ job.repository }}</dd>
+        <dt>이슈</dt><dd id="job-issue"><a href="{{ job.issue_url }}" target="_blank" rel="noreferrer">#{{ job.issue_number }} - {{ job.issue_title }}</a></dd>
+        <dt>브랜치</dt><dd id="job-branch">{{ job.branch_name }}</dd>
+        <dt>PR</dt>
+        <dd id="job-pr">
+          {% if job.pr_url %}
+          <a href="{{ job.pr_url }}" target="_blank" rel="noreferrer">{{ job.pr_url }}</a>
+          {% else %}
+          아직 없음
+          {% endif %}
+        </dd>
+        <dt>오류</dt><dd id="job-error">{{ job.error_message or "-" }}</dd>
+        <dt>로그</dt><dd><a href="/logs/{{ job.log_file }}" target="_blank" rel="noreferrer">{{ job.log_file }}</a></dd>
+        <dt>생성</dt><dd id="job-created" class="js-time" data-utc="{{ job.created_at }}">{{ job.created_at }}</dd>
+        <dt>시작</dt><dd id="job-started" class="js-time" data-utc="{{ job.started_at or '' }}">{{ job.started_at or "-" }}</dd>
+        <dt>종료</dt><dd id="job-finished" class="js-time" data-utc="{{ job.finished_at or '' }}">{{ job.finished_at or "-" }}</dd>
+      </dl>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>실시간 터미널 로그</h2>
+          <p id="terminal-updated" class="hint">마지막 갱신: -</p>
+        </div>
+        <div id="failure-summary" class="failure-summary"></div>
+        <div class="terminal-wrap">
+          <div class="terminal-topbar">
+            <span class="terminal-dot red"></span>
+            <span class="terminal-dot yellow"></span>
+            <span class="terminal-dot green"></span>
+            <span class="terminal-title">agenthub / {{ job.log_file }}</span>
+          </div>
+          <div id="terminal-log" class="terminal-log">로그를 불러오는 중...</div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>워크플로 인사이트</h2>
+          <p class="hint">단계 순서, 실행 주체, 행동량, 소요 시간을 요약합니다.</p>
+        </div>
+        <div id="workflow-summary" class="workflow-summary">분석 준비 중...</div>
+        <div id="workflow-stage-graph" class="workflow-stage-graph"></div>
+        <div id="workflow-actor-graph" class="workflow-actor-graph"></div>
+      </section>
+    </main>
+
+    <script>
+      const JOB_ID = "{{ job.job_id }}";
+      const LOG_FILE = "{{ job.log_file }}";
+      let lastLogText = "";
+      let firstLogLoaded = false;
+      let stageSnapshotMap = new Map();
+
+      function esc(value) {
+        return String(value ?? "")
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;")
+          .replace(/'/g, "&#39;");
+      }
+
+      function getPreferredTheme() {
+        const saved = localStorage.getItem("agenthub-theme");
+        if (saved === "dark" || saved === "light") return saved;
+        return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      }
+
+      function applyTheme(theme) {
+        document.documentElement.setAttribute("data-theme", theme);
+        localStorage.setItem("agenthub-theme", theme);
+        const button = document.getElementById("theme-toggle");
+        if (button) {
+          const label = button.querySelector(".theme-label");
+          const nextTheme = theme === "dark" ? "light" : "dark";
+          if (label) {
+            label.textContent = nextTheme === "light" ? "라이트" : "다크";
+          }
+          button.setAttribute(
+            "aria-label",
+            `현재 ${theme === "dark" ? "다크" : "라이트"} 모드, ${nextTheme === "light" ? "라이트" : "다크"} 모드로 전환`
+          );
+        }
+      }
+
+      function initThemeToggle() {
+        const initial = getPreferredTheme();
+        applyTheme(initial);
+        const button = document.getElementById("theme-toggle");
+        if (!button) return;
+        button.addEventListener("click", () => {
+          const current = document.documentElement.getAttribute("data-theme") || "dark";
+          applyTheme(current === "dark" ? "light" : "dark");
+        });
+      }
+
+      const KST_FORMATTER = new Intl.DateTimeFormat("ko-KR", {
+        timeZone: "Asia/Seoul",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        weekday: "short",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false,
+      });
+
+      function formatKstDateTime(value) {
+        if (!value) return "-";
+        const parsed = new Date(value);
+        if (Number.isNaN(parsed.getTime())) return String(value);
+        return `${KST_FORMATTER.format(parsed)} KST`;
+      }
+
+      function hydrateRenderedTimes() {
+        document.querySelectorAll(".js-time").forEach((node) => {
+          const utc = node.getAttribute("data-utc") || "";
+          node.textContent = formatKstDateTime(utc);
+        });
+      }
+
+      function updateMeta(job) {
+        document.getElementById("job-status").textContent = job.status;
+        document.getElementById("job-stage").textContent = job.stage;
+        document.getElementById("job-app").textContent = job.app_code || "default";
+        document.getElementById("job-track").textContent = job.track || "new";
+        document.getElementById("job-attempt").textContent = `${job.attempt} / ${job.max_attempts}`;
+        document.getElementById("job-repo").textContent = job.repository;
+        document.getElementById("job-branch").textContent = job.branch_name;
+        document.getElementById("job-error").textContent = job.error_message || "-";
+        document.getElementById("job-created").textContent = formatKstDateTime(job.created_at);
+        document.getElementById("job-started").textContent = formatKstDateTime(job.started_at);
+        document.getElementById("job-finished").textContent = formatKstDateTime(job.finished_at);
+
+        const issue = document.getElementById("job-issue");
+        issue.innerHTML = `<a href="${esc(job.issue_url)}" target="_blank" rel="noreferrer">#${esc(job.issue_number)} - ${esc(job.issue_title)}</a>`;
+
+        const pr = document.getElementById("job-pr");
+        if (job.pr_url) {
+          pr.innerHTML = `<a href="${esc(job.pr_url)}" target="_blank" rel="noreferrer">${esc(job.pr_url)}</a>`;
+        } else {
+          pr.textContent = "아직 없음";
+        }
+
+        const stopButton = document.getElementById("job-stop");
+        if (stopButton) {
+          stopButton.disabled = !(job.status === "queued" || job.status === "running");
+        }
+      }
+
+      function isNearBottom(element) {
+        const threshold = 40;
+        return element.scrollHeight - element.scrollTop - element.clientHeight < threshold;
+      }
+
+      function isNearTop(element) {
+        return element.scrollTop < 40;
+      }
+
+      function parseLogEntries(logText) {
+        const lines = (logText || "").split("\n");
+        const entries = [];
+        let current = null;
+        let activeActor = "ORCHESTRATOR";
+        const tsLine = /^\[(?<ts>[^\]]+)\]\s(?<msg>.*)$/;
+
+        for (const line of lines) {
+          const matched = line.match(tsLine);
+          if (matched) {
+            if (current) {
+              entries.push(current);
+            }
+            const message = matched.groups?.msg || "";
+            const parsed = parseActorTaggedMessage(message);
+            const inferred = parsed.actor || inferActorFromMessage(parsed.message, activeActor);
+            if (parsed.message.startsWith("[RUN] ")) {
+              activeActor = inferred;
+            } else if (parsed.message.startsWith("[STDOUT]") || parsed.message.startsWith("[STDERR]") || parsed.message.startsWith("[DONE]")) {
+              activeActor = inferred;
+            }
+            const ts = matched.groups?.ts || "";
+            current = {
+              timestamp: ts,
+              message: parsed.message,
+              actor: inferred,
+              raw: `[${ts}] ${parsed.message}`,
+            };
+          } else if (current) {
+            current.raw += `\n${line}`;
+          } else if (line.trim()) {
+            current = {
+              timestamp: "",
+              message: line,
+              actor: "ORCHESTRATOR",
+              raw: line,
+            };
+          }
+        }
+
+        if (current) {
+          entries.push(current);
+        }
+
+        return entries;
+      }
+
+      function parseActorTaggedMessage(message) {
+        const matched = String(message || "").match(/^\[ACTOR:(?<actor>[A-Z_]+)\]\s*(?<rest>.*)$/);
+        if (!matched) {
+          return { actor: null, message: String(message || "") };
+        }
+        return {
+          actor: matched.groups?.actor || null,
+          message: matched.groups?.rest || "",
+        };
+      }
+
+      function inferActorFromRunCommand(command) {
+        const lowered = String(command || "").toLowerCase();
+        if ((lowered.includes("plann") || lowered.includes("planner")) && lowered.includes("gemini")) return "PLANNER";
+        if ((lowered.includes("review") || lowered.includes("reviewer")) && lowered.includes("gemini")) return "REVIEWER";
+        if (lowered.includes("codex")) return "CODER";
+        if (lowered.startsWith("gh ") || lowered.includes(" gh ")) return "GITHUB";
+        if (lowered.startsWith("git ") || lowered.includes(" git ")) return "GIT";
+        if (
+          lowered.includes("systemctl")
+          || lowered.includes("service ")
+          || lowered.includes("journalctl")
+          || lowered.includes("docker ")
+          || lowered.includes("kubectl ")
+        ) {
+          return "SYSTEM";
+        }
+        if (
+          lowered.includes("bash -lc")
+          || lowered.includes("sh -c")
+          || lowered.startsWith("python ")
+          || lowered.startsWith("python3 ")
+        ) {
+          return "SHELL";
+        }
+        return "ORCHESTRATOR";
+      }
+
+      function inferActorFromMessage(message, activeActor) {
+        const msg = String(message || "");
+        if (msg.startsWith("[RUN] ")) {
+          const command = msg.replace("[RUN] ", "");
+          return inferActorFromRunCommand(command);
+        }
+        if (msg.startsWith("[STDOUT]") || msg.startsWith("[STDERR]") || msg.startsWith("[DONE]")) {
+          return activeActor || "ORCHESTRATOR";
+        }
+        if (msg.startsWith("[STAGE] ") || msg.startsWith("Attempt ") || msg.startsWith("Starting job ")) {
+          return "ORCHESTRATOR";
+        }
+        return activeActor || "ORCHESTRATOR";
+      }
+
+      function classifyLogEntry(entry) {
+        const msg = String(entry.message || "");
+        if (msg.startsWith("Attempt ") && msg.includes(" failed:")) return "error";
+        if (msg.includes("Maximum retry count reached")) return "error";
+        if (msg.startsWith("Attempt ")) return "attempt";
+        if (msg.startsWith("[STAGE] ")) return "stage";
+        if (msg.startsWith("[RUN] ")) return "run";
+        if (msg.startsWith("[DONE] ")) {
+          const matched = msg.match(/exit_code=(\d+)/);
+          if (matched && Number(matched[1]) !== 0) return "error";
+          return "done";
+        }
+        if (msg.startsWith("[STDERR]")) return "warn";
+        return "info";
+      }
+
+      function displayLabel(type) {
+        if (type === "attempt") return "시도";
+        if (type === "stage") return "단계";
+        if (type === "run") return "실행";
+        if (type === "done") return "완료";
+        if (type === "warn") return "주의";
+        if (type === "error") return "오류";
+        return "정보";
+      }
+
+      function stageDisplayName(stageCode) {
+        const value = String(stageCode || "").trim().toLowerCase();
+        const map = {
+          queued: "큐 대기",
+          prepare_repo: "저장소 준비",
+          read_issue: "이슈 읽기",
+          write_spec: "스펙 작성",
+          plan_with_gemini: "플랜 작성",
+          design_with_codex: "디자인 설계",
+          implement_with_codex: "구현",
+          summarize_code_changes: "코드 변경 요약",
+          test_after_implement: "구현 후 테스트",
+          ux_e2e_review: "UX E2E 검수",
+          review_with_gemini: "리뷰",
+          fix_with_codex: "수정",
+          test_after_fix: "E2E/수정 테스트",
+          commit_implement: "구현 커밋",
+          commit_fix: "수정 커밋",
+          push_branch: "브랜치 푸시",
+          create_pr: "PR 생성",
+          finalize: "최종 정리",
+          done: "완료",
+          failed: "실패",
+        };
+        return map[value] || value || "단계 미상";
+      }
+
+      function actorDisplayName(actor) {
+        const key = String(actor || "ORCHESTRATOR").toUpperCase();
+        const map = {
+          ORCHESTRATOR: "오케스트레이터",
+          CODER: "코더",
+          PLANNER: "플래너",
+          REVIEWER: "리뷰어",
+          DESIGNER: "디자이너",
+          TESTER_GPT: "테스터(gpt)",
+          TESTER_GEMINI: "테스터(gemini)",
+          TESTER: "테스터",
+          GITHUB: "깃허브",
+          GIT: "깃",
+          SYSTEM: "시스템",
+          SHELL: "쉘",
+          COPILOT: "코파일럿",
+          CLAUDE: "클로드",
+        };
+        return map[key] || key.toLowerCase();
+      }
+
+      function humanizeLogMessage(message) {
+        const msg = String(message || "");
+        const stageMatch = msg.match(/^\[STAGE\]\s+([a-zA-Z0-9_:-]+)/);
+        if (stageMatch) {
+          return `단계 전환: ${stageDisplayName(stageMatch[1])}`;
+        }
+
+        const attemptStart = msg.match(/^Attempt\s+(\d+)\/(\d+)\s+started$/);
+        if (attemptStart) {
+          return `시도 ${attemptStart[1]}/${attemptStart[2]} 시작`;
+        }
+        const attemptFail = msg.match(/^Attempt\s+(\d+)\s+failed:\s*(.*)$/);
+        if (attemptFail) {
+          return `시도 ${attemptFail[1]} 실패: ${attemptFail[2] || "(상세 로그 참조)"}`;
+        }
+
+        if (msg.startsWith("[RUN] ")) {
+          const command = msg.replace("[RUN] ", "").trim();
+          return `명령 실행: ${command}`;
+        }
+        if (msg.startsWith("[STDOUT]")) {
+          return msg.replace("[STDOUT]", "").trim() || "(stdout)";
+        }
+        if (msg.startsWith("[STDERR]")) {
+          return `stderr: ${msg.replace("[STDERR]", "").trim() || "(empty)"}`;
+        }
+        if (msg.startsWith("[DONE]")) {
+          return msg.replace("[DONE]", "명령 종료").trim();
+        }
+        return msg;
+      }
+
+      function summarizeGroup(group) {
+        const latest = group.entries[0];
+        const stage = stageDisplayName((latest.stage || "unknown").replace(/^stage:/, ""));
+        const attempt = (latest.attempt || "1").replace(/^attempt:/, "");
+        return `시도 ${attempt} · ${stage} · ${group.entries.length}줄`;
+      }
+
+      function parseEpochMillis(rawTs) {
+        if (!rawTs) return null;
+        const ms = new Date(rawTs).getTime();
+        if (Number.isNaN(ms)) return null;
+        return ms;
+      }
+
+      function formatDuration(seconds) {
+        const sec = Math.max(0, Math.floor(Number(seconds || 0)));
+        const h = Math.floor(sec / 3600);
+        const m = Math.floor((sec % 3600) / 60);
+        const s = sec % 60;
+        if (h > 0) return `${h}h ${m}m ${s}s`;
+        if (m > 0) return `${m}m ${s}s`;
+        return `${s}s`;
+      }
+
+      const COST_ASSUMPTIONS = {
+        usdToKrw: 1350,
+        humanHourlyKrw: 70000,
+        humanMultiplierLow: 3.0,
+        humanMultiplierBase: 4.5,
+        humanMultiplierHigh: 6.0,
+      };
+
+      function actorTokenRateRangeUsdPer1M(actor) {
+        const key = String(actor || "").toUpperCase();
+        if (["CODER", "DESIGNER", "TESTER_GPT"].includes(key)) {
+          return { min: 1.25, max: 10.0, label: "OpenAI 계열 추정" };
+        }
+        if (["PLANNER", "REVIEWER", "TESTER_GEMINI"].includes(key)) {
+          return { min: 2.0, max: 12.0, label: "Gemini 계열 추정" };
+        }
+        if (key === "CLAUDE") {
+          return { min: 3.0, max: 15.0, label: "Claude 계열 추정" };
+        }
+        if (key === "COPILOT") {
+          return { min: 2.0, max: 12.0, label: "Copilot 경유 모델 추정" };
+        }
+        return { min: 0, max: 0, label: "비과금/미집계" };
+      }
+
+      function formatUsd(value) {
+        return `$${Number(value || 0).toFixed(2)}`;
+      }
+
+      function formatKrw(value) {
+        return `₩${Math.round(Number(value || 0)).toLocaleString()}`;
+      }
+
+      function parseTokenNumber(value) {
+        const normalized = String(value || "").replace(/,/g, "").trim().toLowerCase();
+        if (!normalized) return null;
+        const matched = normalized.match(/^(\d+(?:\.\d+)?)([km])?$/i);
+        if (!matched) return null;
+        const base = Number(matched[1]);
+        if (!Number.isFinite(base) || base < 0) return null;
+        const unit = (matched[2] || "").toLowerCase();
+        const multiplier = unit === "k" ? 1000 : (unit === "m" ? 1000000 : 1);
+        return Math.floor(base * multiplier);
+      }
+
+      function extractTokenUsage(entry) {
+        const text = String((entry && entry.raw) || (entry && entry.message) || "");
+        if (!text) return 0;
+
+        const usedMatch = text.match(/tokens?\s+used[\s\S]{0,40}?(\d[\d,]*)/i);
+        if (usedMatch) {
+          return parseTokenNumber(usedMatch[1]) || 0;
+        }
+
+        const totalMatch = text.match(/(?:total|combined)\s+tokens?\s*[:=]\s*(\d[\d,]*)/i)
+          || text.match(/tokens?\s*[:=]\s*(\d[\d,]*)/i);
+        if (totalMatch) {
+          return parseTokenNumber(totalMatch[1]) || 0;
+        }
+
+        let inOutSum = 0;
+        const inOutPattern = /(\d+(?:\.\d+)?[kKmM]?)\s+in,\s*(\d+(?:\.\d+)?[kKmM]?)\s+out/g;
+        for (const matched of text.matchAll(inOutPattern)) {
+          inOutSum += (parseTokenNumber(matched[1]) || 0) + (parseTokenNumber(matched[2]) || 0);
+        }
+        if (inOutSum > 0) {
+          return inOutSum;
+        }
+
+        const inputMatch = text.match(/(?:input|prompt|in)[_\s]*tokens?\s*[:=]\s*(\d[\d,.kKmM]*)/i);
+        const outputMatch = text.match(/(?:output|completion|out|candidates)[_\s]*tokens?\s*[:=]\s*(\d[\d,.kKmM]*)/i);
+        if (inputMatch || outputMatch) {
+          return (parseTokenNumber(inputMatch && inputMatch[1]) || 0)
+            + (parseTokenNumber(outputMatch && outputMatch[1]) || 0);
+        }
+
+        return 0;
+      }
+
+      function buildWorkflowInsights(entriesNewestFirst) {
+        const chronological = [...entriesNewestFirst].reverse();
+        const stages = [];
+        const actorTotals = new Map();
+        const actorTokenTotals = new Map();
+        let totalTokens = 0;
+        let currentStage = null;
+        let lastSeenMs = null;
+        let firstSeenMs = null;
+
+        for (const entry of chronological) {
+          const ms = parseEpochMillis(entry.timestamp || "");
+          if (ms !== null) {
+            if (firstSeenMs === null) {
+              firstSeenMs = ms;
+            }
+            lastSeenMs = ms;
+          }
+          const actor = String(entry.actor || "ORCHESTRATOR");
+          actorTotals.set(actor, (actorTotals.get(actor) || 0) + 1);
+          const tokens = extractTokenUsage(entry);
+          if (tokens > 0) {
+            totalTokens += tokens;
+            actorTokenTotals.set(actor, (actorTokenTotals.get(actor) || 0) + tokens);
+          }
+
+          const stageMatch = String(entry.message || "").match(/^\[STAGE\]\s+([a-zA-Z0-9_:-]+)/);
+          if (stageMatch) {
+            const nextStageCode = stageMatch[1];
+            if (currentStage) {
+              const endMs = ms ?? currentStage.startMs ?? lastSeenMs ?? null;
+              const durationSec = (endMs !== null && currentStage.startMs !== null)
+                ? Math.max(0, (endMs - currentStage.startMs) / 1000)
+                : 0;
+              currentStage.durationSec = durationSec;
+              stages.push(currentStage);
+            }
+            currentStage = {
+              code: nextStageCode,
+              label: stageDisplayName(nextStageCode),
+              startMs: ms,
+              durationSec: 0,
+              actions: 0,
+              actors: new Map(),
+            };
+            continue;
+          }
+
+          if (currentStage) {
+            currentStage.actions += 1;
+            currentStage.actors.set(actor, (currentStage.actors.get(actor) || 0) + 1);
+          }
+        }
+
+        if (currentStage) {
+          const endMs = lastSeenMs ?? currentStage.startMs ?? null;
+          currentStage.durationSec = (endMs !== null && currentStage.startMs !== null)
+            ? Math.max(0, (endMs - currentStage.startMs) / 1000)
+            : 0;
+          stages.push(currentStage);
+        }
+
+        return {
+          stages,
+          actorTotals,
+          actorTokenTotals,
+          totalTokens,
+          firstSeenMs,
+          lastSeenMs,
+        };
+      }
+
+      function renderWorkflowInsights(entriesNewestFirst) {
+        const summaryNode = document.getElementById("workflow-summary");
+        const stageNode = document.getElementById("workflow-stage-graph");
+        const actorNode = document.getElementById("workflow-actor-graph");
+        if (!summaryNode || !stageNode || !actorNode) return;
+
+        const insights = buildWorkflowInsights(entriesNewestFirst);
+        const stages = insights.stages;
+        const actorTotals = insights.actorTotals;
+        const actorTokenTotals = insights.actorTokenTotals;
+        const totalTokens = Number(insights.totalTokens || 0);
+        let aiCostMin = 0;
+        let aiCostMax = 0;
+        for (const [actor, tokensRaw] of actorTokenTotals.entries()) {
+          const tokens = Number(tokensRaw || 0);
+          if (tokens <= 0) continue;
+          const rate = actorTokenRateRangeUsdPer1M(actor);
+          aiCostMin += (tokens / 1_000_000) * rate.min;
+          aiCostMax += (tokens / 1_000_000) * rate.max;
+        }
+
+        if (!stages.length) {
+          summaryNode.innerHTML = `<p class="hint">단계 로그가 아직 없습니다.</p>`;
+          stageNode.innerHTML = "";
+          actorNode.innerHTML = "";
+          return;
+        }
+
+        const totalActions = stages.reduce((acc, item) => acc + Number(item.actions || 0), 0);
+        const totalDuration = stages.reduce((acc, item) => acc + Number(item.durationSec || 0), 0);
+        const maxDuration = Math.max(1, ...stages.map((item) => Number(item.durationSec || 0)));
+        const automationHours = Math.max(0, totalDuration / 3600);
+        const humanHoursLow = automationHours * COST_ASSUMPTIONS.humanMultiplierLow;
+        const humanHoursBase = automationHours * COST_ASSUMPTIONS.humanMultiplierBase;
+        const humanHoursHigh = automationHours * COST_ASSUMPTIONS.humanMultiplierHigh;
+        const humanCostLow = humanHoursLow * COST_ASSUMPTIONS.humanHourlyKrw;
+        const humanCostBase = humanHoursBase * COST_ASSUMPTIONS.humanHourlyKrw;
+        const humanCostHigh = humanHoursHigh * COST_ASSUMPTIONS.humanHourlyKrw;
+        const aiCostKrwMin = aiCostMin * COST_ASSUMPTIONS.usdToKrw;
+        const aiCostKrwMax = aiCostMax * COST_ASSUMPTIONS.usdToKrw;
+
+        summaryNode.innerHTML = `
+          <div class="workflow-kpis">
+            <span class="workflow-kpi">총 단계 <strong>${stages.length}</strong></span>
+            <span class="workflow-kpi">총 행동 <strong>${totalActions}</strong></span>
+            <span class="workflow-kpi">추정 소요 <strong>${formatDuration(totalDuration)}</strong></span>
+            <span class="workflow-kpi">총 토큰 <strong>${totalTokens.toLocaleString()}</strong></span>
+            <span class="workflow-kpi">AI 예상비용 <strong>${formatUsd(aiCostMin)} ~ ${formatUsd(aiCostMax)}</strong></span>
+            <span class="workflow-kpi">사람 추정시간 <strong>${humanHoursLow.toFixed(1)}h ~ ${humanHoursHigh.toFixed(1)}h</strong></span>
+          </div>
+          <div class="workflow-cost-notes">
+            <p>단가 가정: OpenAI 1.25~10$/1M, Gemini 2~12$/1M, Claude 3~15$/1M, Copilot 경유 2~12$/1M.</p>
+            <p>사람 인건비 가정: 시급 ${formatKrw(COST_ASSUMPTIONS.humanHourlyKrw)}, 자동화 시간 대비 3.0~6.0배(기준 4.5배).</p>
+            <p>예상 인건비: ${formatKrw(humanCostLow)} ~ ${formatKrw(humanCostHigh)} (기준 ${formatKrw(humanCostBase)}). AI 비용 원화 환산: ${formatKrw(aiCostKrwMin)} ~ ${formatKrw(aiCostKrwMax)}.</p>
+          </div>
+        `;
+
+        stageNode.innerHTML = stages
+          .map((item, idx) => {
+            const width = Math.max(8, Math.round((Number(item.durationSec || 0) / maxDuration) * 100));
+            const topActors = [...item.actors.entries()]
+              .sort((a, b) => b[1] - a[1])
+              .slice(0, 2)
+              .map(([actor, count]) => `${actorDisplayName(actor)} ${count}`)
+              .join(" · ");
+            return `
+              <article class="workflow-stage-item">
+                <div class="workflow-stage-head">
+                  <span class="workflow-stage-index">${idx + 1}</span>
+                  <span class="workflow-stage-name">${esc(item.label)}</span>
+                  <span class="workflow-stage-meta">${formatDuration(item.durationSec)} / 행동 ${item.actions}</span>
+                </div>
+                <div class="workflow-stage-bar-wrap">
+                  <div class="workflow-stage-bar" style="width:${width}%"></div>
+                </div>
+                <p class="workflow-stage-actors">${esc(topActors || "주요 실행 주체 정보 없음")}</p>
+              </article>
+            `;
+          })
+          .join("");
+
+        const actorRows = [...actorTotals.entries()]
+          .sort((a, b) => b[1] - a[1])
+          .map(([actor, count]) => {
+            const tokenCount = Number(actorTokenTotals.get(actor) || 0);
+            return `
+            <li class="workflow-actor-item">
+              <span class="workflow-actor-name">${esc(actorDisplayName(actor))}</span>
+              <span class="workflow-actor-count">행동 ${count} · 토큰 ${tokenCount.toLocaleString()}</span>
+            </li>
+          `;
+          })
+          .join("");
+        actorNode.innerHTML = `
+          <h3>에이전트 행동량</h3>
+          <ul class="workflow-actor-list">${actorRows}</ul>
+        `;
+      }
+
+      function buildStageSnapshotMap(snapshots) {
+        const map = new Map();
+        for (const item of snapshots || []) {
+          const attempt = Number(item.attempt || 0);
+          const stage = String(item.stage || "").trim();
+          if (!attempt || !stage) continue;
+          const key = `attempt:${attempt}|stage:${stage}`;
+          map.set(key, item);
+        }
+        return map;
+      }
+
+      function renderGroupSnapshot(group) {
+        const key = `${group.attempt}|${group.stage}`;
+        const snapshot = stageSnapshotMap.get(key);
+        if (!snapshot) return "";
+
+        const files = Array.isArray(snapshot.md_files) ? snapshot.md_files : [];
+        const changed = Array.isArray(snapshot.changed_files) ? snapshot.changed_files : [];
+        const changedHtml = changed.length
+          ? `<pre class="snapshot-changed">${esc(changed.join("\n"))}</pre>`
+          : `<p class="snapshot-empty">이 단계에서 감지된 md 변경 목록이 없습니다.</p>`;
+
+        const filesHtml = files.length
+          ? files.map((file) => {
+              const name = String(file.path || "unknown.md");
+              const content = String(file.content || "");
+              return `<details class="snapshot-file">
+                <summary>${esc(name)}</summary>
+                <pre class="snapshot-content">${esc(content)}</pre>
+              </details>`;
+            }).join("")
+          : `<p class="snapshot-empty">보관된 md 파일 내용이 없습니다.</p>`;
+
+        return `
+          <section class="stage-snapshot">
+            <h4>해당 단계 md 스냅샷</h4>
+            <p class="hint">스냅샷 시각: ${esc(formatKstDateTime(snapshot.created_at || ""))}</p>
+            <details class="snapshot-file">
+              <summary>변경 감지 목록</summary>
+              ${changedHtml}
+            </details>
+            ${filesHtml}
+          </section>
+        `;
+      }
+
+      function buildGroupedEntries(entriesNewestFirst) {
+        const chronological = [...entriesNewestFirst].reverse();
+        let currentAttempt = "attempt:0";
+        let currentStage = "stage:queued";
+
+        for (const entry of chronological) {
+          const attemptMatch = String(entry.message || "").match(/^Attempt\s+(\d+)/);
+          if (attemptMatch) {
+            currentAttempt = `attempt:${attemptMatch[1]}`;
+          }
+          const stageMatch = String(entry.message || "").match(/^\[STAGE\]\s+([a-zA-Z0-9_:-]+)/);
+          if (stageMatch) {
+            currentStage = `stage:${stageMatch[1]}`;
+          }
+          entry.attempt = currentAttempt;
+          entry.stage = currentStage;
+        }
+
+        const grouped = [];
+        const map = new Map();
+        for (const entry of entriesNewestFirst) {
+          const key = `${entry.attempt}|${entry.stage}`;
+          if (!map.has(key)) {
+            const group = { key, attempt: entry.attempt, stage: entry.stage, entries: [] };
+            map.set(key, group);
+            grouped.push(group);
+          }
+          map.get(key).entries.push(entry);
+        }
+        return grouped;
+      }
+
+      function renderFailureSummary(entriesNewestFirst) {
+        const box = document.getElementById("failure-summary");
+        if (!box) return;
+
+        const highlights = entriesNewestFirst
+          .map((entry) => ({ ...entry, type: classifyLogEntry(entry) }))
+          .filter((entry) => entry.type === "error" || entry.type === "warn")
+          .slice(0, 3);
+
+        if (highlights.length === 0) {
+          box.innerHTML = `<p class="failure-empty">최근 실패/경고 신호가 없습니다.</p>`;
+          return;
+        }
+
+        box.innerHTML = `
+          <h3>실패 요약</h3>
+          <ul class="failure-list">
+            ${highlights
+              .map((item) => {
+                const firstLine = String(item.message || "").split("\n")[0];
+                return `<li class="failure-item type-${item.type}">
+                  <span class="failure-type">${displayLabel(item.type)}</span>
+                  <span class="failure-actor">${esc(item.actor || "ORCHESTRATOR")}</span>
+                  <span class="failure-text">${esc(firstLine)}</span>
+                </li>`;
+              })
+              .join("")}
+          </ul>
+        `;
+      }
+
+      function renderTerminalLog(logText) {
+        const terminal = document.getElementById("terminal-log");
+        if (!terminal) return;
+
+        const shouldStickToTop = isNearTop(terminal) || isNearBottom(terminal);
+        if (!logText || !logText.trim()) {
+          renderFailureSummary([]);
+          terminal.textContent = "[로그 대기 중]";
+          return;
+        }
+
+        const entries = parseLogEntries(logText).reverse();
+        renderFailureSummary(entries);
+        renderWorkflowInsights(entries);
+        const groups = buildGroupedEntries(entries);
+        terminal.innerHTML = groups
+          .map((group, index) => {
+            const rows = group.entries
+              .map((entry) => {
+                const type = classifyLogEntry(entry);
+                return `<article class="log-entry type-${type}">
+                  <div class="log-entry-head">
+                    <span class="log-entry-tag">${displayLabel(type)}</span>
+                    <span class="log-entry-actor actor-${esc(String(entry.actor || "ORCHESTRATOR").toLowerCase())}">${esc(actorDisplayName(entry.actor || "ORCHESTRATOR"))}</span>
+                    <span class="log-entry-time">${esc(formatKstDateTime(entry.timestamp || ""))}</span>
+                  </div>
+                  <pre class="log-entry-body">${esc(humanizeLogMessage(entry.message || ""))}</pre>
+                </article>`;
+              })
+              .join("");
+            const snapshotHtml = renderGroupSnapshot(group);
+            return `<details class="log-group" ${index < 2 ? "open" : ""}>
+              <summary>${esc(summarizeGroup(group))}</summary>
+              <div class="log-group-body">${rows}${snapshotHtml}</div>
+            </details>`;
+          })
+          .join("");
+
+        if (shouldStickToTop) {
+          terminal.scrollTop = 0;
+        }
+      }
+
+      async function refreshLog() {
+        try {
+          const url = `/logs/${encodeURIComponent(LOG_FILE)}?t=${Date.now()}`;
+          const response = await fetch(url, { cache: "no-store" });
+          if (response.status === 404) {
+            renderTerminalLog("[로그 파일이 아직 생성되지 않았습니다]");
+            return;
+          }
+          if (!response.ok) {
+            renderTerminalLog("[로그를 읽는 중 오류가 발생했습니다]");
+            return;
+          }
+
+          const text = await response.text();
+          if (!firstLogLoaded || text !== lastLogText) {
+            lastLogText = text;
+            firstLogLoaded = true;
+            renderTerminalLog(text);
+          }
+        } catch {
+          renderTerminalLog("[네트워크 오류로 로그를 읽지 못했습니다]");
+        }
+      }
+
+      async function refreshJob() {
+        try {
+          const response = await fetch(`/api/jobs/${JOB_ID}`, { cache: "no-store" });
+          if (!response.ok) return;
+          const payload = await response.json();
+          updateMeta(payload.job);
+          stageSnapshotMap = buildStageSnapshotMap(payload.stage_md_snapshots || []);
+          const stopState = document.getElementById("stop-state");
+          if (stopState) {
+            if (payload.stop_requested) {
+              stopState.textContent = "정지 요청됨: 현재 라운드 완료 후 작업이 종료됩니다.";
+            } else {
+              stopState.textContent = "";
+            }
+          }
+          document.getElementById("terminal-updated").textContent = `마지막 갱신: ${formatKstDateTime(new Date().toISOString())}`;
+        } catch {
+        }
+      }
+
+      function bindStopButton() {
+        const button = document.getElementById("job-stop");
+        if (!button) return;
+        button.addEventListener("click", async () => {
+          button.disabled = true;
+          try {
+            const response = await fetch(`/api/jobs/${JOB_ID}/stop`, { method: "POST" });
+            const payload = await response.json();
+            const stopState = document.getElementById("stop-state");
+            if (!response.ok) {
+              if (stopState) stopState.textContent = payload.detail || "정지 요청 실패";
+              return;
+            }
+            if (stopState) stopState.textContent = "정지 요청 완료: 현재 라운드가 끝나면 종료됩니다.";
+          } catch {
+            const stopState = document.getElementById("stop-state");
+            if (stopState) stopState.textContent = "네트워크 오류로 정지 요청에 실패했습니다.";
+          } finally {
+            await refreshJob();
+          }
+        });
+      }
+
+      async function refreshAll() {
+        await Promise.all([refreshJob(), refreshLog()]);
+      }
+
+      initThemeToggle();
+      bindStopButton();
+      hydrateRenderedTimes();
+      refreshAll();
+      setInterval(refreshAll, 1500);
+    </script>
+  </body>
+</html>

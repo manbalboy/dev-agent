@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+config/ai_commands.json
+workspaces/
+data/logs/
+node_modules
+dist
+.vite
+.DS_Store
+*.log
+
+*.tsbuildinfo
