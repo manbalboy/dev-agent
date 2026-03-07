@@ -64,7 +64,7 @@ class JobRecord:
     started_at: Optional[str]
     finished_at: Optional[str]
     app_code: str = "default"
-    track: str = "new"
+    track: str = "enhance"
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize to a plain dictionary for JSON storage."""

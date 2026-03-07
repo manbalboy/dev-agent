@@ -9,6 +9,7 @@ Important design principle:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -32,10 +33,20 @@ from app.prompt_builder import (
     build_coder_prompt,
     build_designer_prompt,
     build_planner_prompt,
+    build_publisher_prompt,
     build_pr_summary_prompt,
     build_reviewer_prompt,
+    build_spec_json,
     build_spec_markdown,
     build_status_markdown,
+)
+from app.planner_graph import build_refinement_instruction, evaluate_plan_markdown
+from app.spec_tools import (
+    issue_reader,
+    repo_context_reader,
+    risk_policy_checker,
+    spec_rewriter,
+    spec_schema_validator,
 )
 from app.store import JobStore
 from app.workflow_design import load_workflows, validate_workflow
@@ -87,7 +98,7 @@ class Orchestrator:
         """Run one job with retry policy and final failure handling."""
 
         job = self._require_job(job_id)
-        log_path = self.settings.logs_dir / job.log_file
+        log_path = self.settings.logs_debug_dir / job.log_file
         self._append_actor_log(
             log_path,
             "ORCHESTRATOR",
@@ -102,6 +113,9 @@ class Orchestrator:
             error_message=None,
         )
 
+        if self._is_ultra10_track(job):
+            self._process_ultra_job(job_id, log_path, max_runtime_hours=10, mode_tag="ULTRA10")
+            return
         if self._is_ultra_track(job):
             self._process_ultra_job(job_id, log_path)
             return
@@ -203,20 +217,28 @@ class Orchestrator:
             f"[LONG] Completed all {total_rounds} rounds successfully",
         )
 
-    def _process_ultra_job(self, job_id: str, log_path: Path) -> None:
+    def _process_ultra_job(
+        self,
+        job_id: str,
+        log_path: Path,
+        max_runtime_hours: int = 5,
+        mode_tag: str = "ULTRA",
+    ) -> None:
         """Run ultra-long mode with round loop and graceful stop."""
 
         ultra_started = time.monotonic()
         round_index = 0
         last_error: Optional[str] = None
+        max_runtime_seconds = max_runtime_hours * 60 * 60
 
         while True:
             elapsed = time.monotonic() - ultra_started
-            if elapsed >= 5 * 60 * 60:
+            if elapsed >= max_runtime_seconds:
                 self._append_actor_log(
                     log_path,
                     "ORCHESTRATOR",
-                    "Ultra mode max runtime (5h) reached. Finishing after current rounds.",
+                    f"{mode_tag} mode max runtime ({max_runtime_hours}h) reached. "
+                    "Finishing after current rounds.",
                 )
                 self.store.update_job(
                     job_id,
@@ -248,7 +270,7 @@ class Orchestrator:
             self._append_actor_log(
                 log_path,
                 "ORCHESTRATOR",
-                f"[ULTRA] Round {round_index} started",
+                f"[{mode_tag}] Round {round_index} started",
             )
 
             try:
@@ -257,14 +279,14 @@ class Orchestrator:
                 self._append_actor_log(
                     log_path,
                     "ORCHESTRATOR",
-                    f"[ULTRA] Round {round_index} completed with primary agents.",
+                    f"[{mode_tag}] Round {round_index} completed with primary agents.",
                 )
             except Exception as primary_error:  # noqa: BLE001
                 last_error = str(primary_error)
                 self._append_actor_log(
                     log_path,
                     "ORCHESTRATOR",
-                    f"[ULTRA] Primary agents failed in round {round_index}: {last_error}",
+                    f"[{mode_tag}] Primary agents failed in round {round_index}: {last_error}",
                 )
 
                 if self._is_escalation_enabled() and self.command_templates.has_template("escalation"):
@@ -275,25 +297,25 @@ class Orchestrator:
                     self._append_actor_log(
                         log_path,
                         "ORCHESTRATOR",
-                        f"[ULTRA] Trying fallback agents for round {round_index}.",
+                        f"[{mode_tag}] Trying fallback agents for round {round_index}.",
                     )
                     self._run_single_attempt(job_id, log_path)
                     self._append_actor_log(
                         log_path,
                         "ORCHESTRATOR",
-                        f"[ULTRA] Round {round_index} recovered by fallback agents.",
+                        f"[{mode_tag}] Round {round_index} recovered by fallback agents.",
                     )
                 except Exception as fallback_error:  # noqa: BLE001
                     last_error = str(fallback_error)
                     self._append_actor_log(
                         log_path,
                         "ORCHESTRATOR",
-                        f"[ULTRA] Fallback agents also failed in round {round_index}: {last_error}",
+                        f"[{mode_tag}] Fallback agents also failed in round {round_index}: {last_error}",
                     )
                     self._append_actor_log(
                         log_path,
                         "ORCHESTRATOR",
-                        "[ULTRA] Two-agent failure reached. Ending this ultra job.",
+                        f"[{mode_tag}] Two-agent failure reached. Ending this ultra job.",
                     )
                     self._agent_profile = "primary"
                     self._finalize_failed_job(job_id, log_path, last_error)
@@ -305,7 +327,7 @@ class Orchestrator:
                 self._append_actor_log(
                     log_path,
                     "ORCHESTRATOR",
-                    f"[ULTRA] Stop requested. Ending after round {round_index}.",
+                    f"[{mode_tag}] Stop requested. Ending after round {round_index}.",
                 )
                 self._clear_stop_requested(job_id)
                 self.store.update_job(
@@ -347,12 +369,17 @@ class Orchestrator:
         )
 
         self._stage_plan_with_gemini(job, repository_path, paths, log_path)
+        self._snapshot_plan_variant(repository_path, paths, "general", log_path)
         self._commit_markdown_changes_after_stage(
             job, repository_path, JobStage.PLAN_WITH_GEMINI.value, log_path
         )
         self._stage_design_with_codex(job, repository_path, paths, log_path)
         self._commit_markdown_changes_after_stage(
             job, repository_path, JobStage.DESIGN_WITH_CODEX.value, log_path
+        )
+        self._stage_publish_with_codex(job, repository_path, paths, log_path)
+        self._commit_markdown_changes_after_stage(
+            job, repository_path, "publisher_task", log_path
         )
         self._stage_implement_with_codex(job, repository_path, paths, log_path)
         self._commit_markdown_changes_after_stage(
@@ -362,7 +389,14 @@ class Orchestrator:
         self._commit_markdown_changes_after_stage(
             job, repository_path, JobStage.SUMMARIZE_CODE_CHANGES.value, log_path
         )
-        self._stage_run_tests(job, repository_path, JobStage.TEST_AFTER_IMPLEMENT, log_path)
+        self._run_test_hard_gate(
+            job=job,
+            repository_path=repository_path,
+            paths=paths,
+            log_path=log_path,
+            stage=JobStage.TEST_AFTER_IMPLEMENT,
+            gate_label="after_implement",
+        )
         self._commit_markdown_changes_after_stage(
             job, repository_path, JobStage.TEST_AFTER_IMPLEMENT.value, log_path
         )
@@ -379,7 +413,14 @@ class Orchestrator:
         self._commit_markdown_changes_after_stage(
             job, repository_path, JobStage.FIX_WITH_CODEX.value, log_path
         )
-        self._stage_run_tests(job, repository_path, JobStage.TEST_AFTER_FIX, log_path)
+        self._run_test_hard_gate(
+            job=job,
+            repository_path=repository_path,
+            paths=paths,
+            log_path=log_path,
+            stage=JobStage.TEST_AFTER_FIX,
+            gate_label="after_fix",
+        )
         self._commit_markdown_changes_after_stage(
             job, repository_path, JobStage.TEST_AFTER_FIX.value, log_path
         )
@@ -437,17 +478,57 @@ class Orchestrator:
                 raise CommandExecutionError("Workflow requires paths context before AI/test/git stages.")
 
             if node_type == "gemini_plan":
-                self._stage_plan_with_gemini(job, repository_path, paths, log_path)
+                node_title = str(node.get("title", "")).strip().lower()
+                planning_mode = "general"
+                if "개발 기획" in node_title or "development" in node_title:
+                    planning_mode = "dev_planning"
+                elif "큰틀" in node_title or "big picture" in node_title:
+                    planning_mode = "big_picture"
+                self._stage_plan_with_gemini(
+                    job,
+                    repository_path,
+                    paths,
+                    log_path,
+                    planning_mode=planning_mode,
+                )
+                self._snapshot_plan_variant(repository_path, paths, planning_mode, log_path)
             elif node_type == "designer_task":
-                self._stage_design_with_codex(job, repository_path, paths, log_path)
+                if self._is_design_system_locked(repository_path, paths):
+                    self._set_stage(job.job_id, JobStage.DESIGN_WITH_CODEX, log_path)
+                    self._append_actor_log(
+                        log_path,
+                        "ORCHESTRATOR",
+                        "designer_task skipped by decision lock (_docs/DECISIONS.json).",
+                    )
+                else:
+                    self._stage_design_with_codex(job, repository_path, paths, log_path)
+                    self._lock_design_system_decision(repository_path, paths, log_path)
+            elif node_type == "publisher_task":
+                self._stage_publish_with_codex(job, repository_path, paths, log_path)
             elif node_type == "codex_implement":
                 self._stage_implement_with_codex(job, repository_path, paths, log_path)
             elif node_type == "code_change_summary":
                 self._stage_summarize_code_changes(job, repository_path, log_path)
             elif node_type == "test_after_implement":
-                self._stage_run_tests(job, repository_path, JobStage.TEST_AFTER_IMPLEMENT, log_path)
+                app_type = self._resolve_app_type(repository_path, paths)
+                self._run_test_hard_gate(
+                    job=job,
+                    repository_path=repository_path,
+                    paths=paths,
+                    log_path=log_path,
+                    stage=JobStage.TEST_AFTER_IMPLEMENT,
+                    gate_label=f"after_implement_{app_type}",
+                )
             elif node_type == "tester_task":
-                self._stage_run_tests(job, repository_path, JobStage.TEST_AFTER_IMPLEMENT, log_path)
+                app_type = self._resolve_app_type(repository_path, paths)
+                self._run_test_hard_gate(
+                    job=job,
+                    repository_path=repository_path,
+                    paths=paths,
+                    log_path=log_path,
+                    stage=JobStage.TEST_AFTER_IMPLEMENT,
+                    gate_label=f"tester_task_{app_type}",
+                )
             elif node_type == "commit_implement":
                 self._stage_commit(job, repository_path, JobStage.COMMIT_IMPLEMENT, log_path, "feat")
             elif node_type == "gemini_review":
@@ -457,35 +538,76 @@ class Orchestrator:
             elif node_type == "coder_fix_from_test_report":
                 self._stage_fix_with_codex(job, repository_path, paths, log_path)
             elif node_type == "test_after_fix":
-                passed = self._stage_run_tests(job, repository_path, JobStage.TEST_AFTER_FIX, log_path)
-                previous_type = ""
-                if index > 0:
-                    previous_type = str(ordered_nodes[index - 1].get("type", ""))
-                if (not passed) and previous_type in {"codex_fix", "coder_fix_from_test_report"}:
-                    self._run_fix_retry_loop_after_test_failure(
-                        job=job,
-                        repository_path=repository_path,
-                        paths=paths,
-                        log_path=log_path,
-                    )
+                app_type = self._resolve_app_type(repository_path, paths)
+                self._run_test_hard_gate(
+                    job=job,
+                    repository_path=repository_path,
+                    paths=paths,
+                    log_path=log_path,
+                    stage=JobStage.TEST_AFTER_FIX,
+                    gate_label=f"after_fix_{app_type}",
+                )
             elif node_type == "tester_run_e2e":
-                passed = self._stage_run_tests(job, repository_path, JobStage.TEST_AFTER_FIX, log_path)
-                previous_type = ""
-                if index > 0:
-                    previous_type = str(ordered_nodes[index - 1].get("type", ""))
-                if (not passed) and previous_type in {"codex_fix", "coder_fix_from_test_report"}:
-                    self._run_fix_retry_loop_after_test_failure(
+                app_type = self._resolve_app_type(repository_path, paths)
+                if app_type == "web":
+                    self._run_test_hard_gate(
                         job=job,
                         repository_path=repository_path,
                         paths=paths,
                         log_path=log_path,
+                        stage=JobStage.TEST_AFTER_FIX,
+                        gate_label="tester_run_e2e_web",
+                    )
+                else:
+                    self._append_actor_log(
+                        log_path,
+                        "ORCHESTRATOR",
+                        f"tester_run_e2e routed for app_type={app_type}. Running non-web hard gate tests.",
+                    )
+                    self._run_test_hard_gate(
+                        job=job,
+                        repository_path=repository_path,
+                        paths=paths,
+                        log_path=log_path,
+                        stage=JobStage.TEST_AFTER_FIX,
+                        gate_label=f"tester_nonweb_{app_type}",
                     )
             elif node_type == "ux_e2e_review":
-                self._stage_ux_e2e_review(job, repository_path, paths, log_path)
+                app_type = self._resolve_app_type(repository_path, paths)
+                if app_type == "web":
+                    self._stage_ux_e2e_review(job, repository_path, paths, log_path)
+                else:
+                    self._stage_skip_ux_review_for_non_web(job, repository_path, paths, log_path, app_type=app_type)
             elif node_type == "test_after_fix_final":
-                self._stage_run_tests(job, repository_path, JobStage.TEST_AFTER_FIX, log_path)
+                app_type = self._resolve_app_type(repository_path, paths)
+                self._run_test_hard_gate(
+                    job=job,
+                    repository_path=repository_path,
+                    paths=paths,
+                    log_path=log_path,
+                    stage=JobStage.TEST_AFTER_FIX,
+                    gate_label=f"after_fix_final_{app_type}",
+                )
             elif node_type == "tester_retest_e2e":
-                self._stage_run_tests(job, repository_path, JobStage.TEST_AFTER_FIX, log_path)
+                app_type = self._resolve_app_type(repository_path, paths)
+                if app_type == "web":
+                    self._run_test_hard_gate(
+                        job=job,
+                        repository_path=repository_path,
+                        paths=paths,
+                        log_path=log_path,
+                        stage=JobStage.TEST_AFTER_FIX,
+                        gate_label="tester_retest_e2e_web",
+                    )
+                else:
+                    self._run_test_hard_gate(
+                        job=job,
+                        repository_path=repository_path,
+                        paths=paths,
+                        log_path=log_path,
+                        stage=JobStage.TEST_AFTER_FIX,
+                        gate_label=f"tester_retest_nonweb_{app_type}",
+                    )
             elif node_type == "commit_fix":
                 self._stage_commit(job, repository_path, JobStage.COMMIT_FIX, log_path, "fix")
             elif node_type == "push_branch":
@@ -715,11 +837,17 @@ class Orchestrator:
     ) -> Dict[str, Path]:
         self._set_stage(job.job_id, JobStage.WRITE_SPEC, log_path)
 
-        spec_path = repository_path / "SPEC.md"
-        plan_path = repository_path / "PLAN.md"
-        review_path = repository_path / "REVIEW.md"
-        design_path = repository_path / "DESIGN_SYSTEM.md"
-        status_path = repository_path / "STATUS.md"
+        spec_path = self._docs_file(repository_path, "SPEC.md")
+        spec_json_path = self._docs_file(repository_path, "SPEC.json")
+        spec_quality_path = self._docs_file(repository_path, "SPEC_QUALITY.json")
+        plan_path = self._docs_file(repository_path, "PLAN.md")
+        review_path = self._docs_file(repository_path, "REVIEW.md")
+        design_path = self._docs_file(repository_path, "DESIGN_SYSTEM.md")
+        design_tokens_path = self._docs_file(repository_path, "DESIGN_TOKENS.json")
+        token_handoff_path = self._docs_file(repository_path, "TOKEN_HANDOFF.md")
+        publish_checklist_path = self._docs_file(repository_path, "PUBLISH_CHECKLIST.md")
+        publish_handoff_path = self._docs_file(repository_path, "PUBLISH_HANDOFF.md")
+        status_path = self._docs_file(repository_path, "STATUS.md")
 
         spec_content = build_spec_markdown(
             repository=job.repository,
@@ -733,7 +861,90 @@ class Orchestrator:
             preview_cors_origins=self.settings.docker_preview_cors_origins,
         )
         spec_path.write_text(spec_content, encoding="utf-8")
+        spec_json = build_spec_json(
+            repository=job.repository,
+            issue_number=job.issue_number,
+            issue_url=issue.url,
+            issue_title=issue.title,
+            issue_body=issue.body,
+        )
+        issue_context = issue_reader(
+            issue_title=issue.title,
+            issue_body=issue.body,
+            issue_url=issue.url,
+        )
+        repo_context = repo_context_reader(repository_path)
+        risk_report = risk_policy_checker(spec_json)
+        validation = spec_schema_validator(spec_json)
+        rewrites: List[Dict[str, Any]] = []
+        max_rewrite_rounds = 2
+        for round_index in range(1, max_rewrite_rounds + 1):
+            if validation.get("passed"):
+                break
+            revised, actions = spec_rewriter(spec_json, validation)
+            if not actions:
+                break
+            rewrites.append(
+                {
+                    "round": round_index,
+                    "actions": actions,
+                    "reject_codes": validation.get("reject_codes", []),
+                }
+            )
+            spec_json = revised
+            validation = spec_schema_validator(spec_json)
+
+        spec_json["_quality"] = {
+            "validation": validation,
+            "rewrites": rewrites,
+            "risk_report": risk_report,
+            "issue_context": {
+                "keywords": issue_context.get("keywords", []),
+                "line_count": issue_context.get("line_count", 0),
+            },
+            "repo_context": {
+                "stack": repo_context.get("stack", []),
+                "has_readme_excerpt": bool(repo_context.get("readme_excerpt", "")),
+            },
+        }
+        spec_json_path.write_text(
+            json.dumps(spec_json, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        spec_quality_path.write_text(
+            json.dumps(
+                {
+                    "job_id": job.job_id,
+                    "issue_number": job.issue_number,
+                    "validation": validation,
+                    "rewrites": rewrites,
+                    "risk_report": risk_report,
+                    "issue_context": issue_context,
+                    "repo_context": repo_context,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ) + "\n",
+            encoding="utf-8",
+        )
         self._append_actor_log(log_path, "ORCHESTRATOR", f"Wrote SPEC.md at {spec_path}")
+        self._append_actor_log(log_path, "ORCHESTRATOR", f"Wrote SPEC.json at {spec_json_path}")
+        self._append_actor_log(log_path, "ORCHESTRATOR", f"Wrote SPEC_QUALITY.json at {spec_quality_path}")
+        self._append_actor_log(
+            log_path,
+            "ORCHESTRATOR",
+            (
+                "SPEC quality check: "
+                f"passed={validation.get('passed')} score={validation.get('score')} "
+                f"reject_codes={','.join(validation.get('reject_codes', [])) or '-'}"
+            ),
+        )
+        if not bool(validation.get("passed")):
+            self._append_actor_log(
+                log_path,
+                "ORCHESTRATOR",
+                "SPEC quality gate not passed, but continuing by non-blocking assist policy.",
+            )
 
         # Keep job metadata in sync with canonical issue data.
         self.store.update_job(
@@ -744,9 +955,15 @@ class Orchestrator:
 
         return {
             "spec": spec_path,
+            "spec_json": spec_json_path,
+            "spec_quality": spec_quality_path,
             "plan": plan_path,
             "review": review_path,
             "design": design_path,
+            "design_tokens": design_tokens_path,
+            "token_handoff": token_handoff_path,
+            "publish_checklist": publish_checklist_path,
+            "publish_handoff": publish_handoff_path,
             "status": status_path,
         }
 
@@ -756,10 +973,40 @@ class Orchestrator:
         repository_path: Path,
         paths: Dict[str, Path],
         log_path: Path,
+        planning_mode: str = "general",
     ) -> None:
         self._set_stage(job.job_id, JobStage.PLAN_WITH_GEMINI, log_path)
 
-        planner_prompt_path = repository_path / "PLANNER_PROMPT.md"
+        if not self._planner_graph_enabled():
+            self._append_actor_log(
+                log_path,
+                "ORCHESTRATOR",
+                "Planner graph MVP disabled by env. Using legacy one-shot planner.",
+            )
+            self._run_planner_legacy_one_shot(job, repository_path, paths, log_path, planning_mode=planning_mode)
+            return
+
+        try:
+            self._run_planner_graph_mvp(job, repository_path, paths, log_path, planning_mode=planning_mode)
+        except Exception as error:  # noqa: BLE001
+            self._append_actor_log(
+                log_path,
+                "ORCHESTRATOR",
+                f"Planner graph MVP failed. Fallback to legacy one-shot planner: {error}",
+            )
+            self._run_planner_legacy_one_shot(job, repository_path, paths, log_path, planning_mode=planning_mode)
+
+    def _run_planner_legacy_one_shot(
+        self,
+        job: JobRecord,
+        repository_path: Path,
+        paths: Dict[str, Path],
+        log_path: Path,
+        planning_mode: str = "general",
+    ) -> None:
+        """Run original single-shot planner flow as safe fallback."""
+
+        planner_prompt_path = self._docs_file(repository_path, "PLANNER_PROMPT.md")
         review_ready = paths["review"].exists() and bool(
             paths["review"].read_text(encoding="utf-8", errors="replace").strip()
         )
@@ -770,25 +1017,375 @@ class Orchestrator:
                 review_path=str(paths["review"]),
                 is_long_term=self._is_long_track(self._require_job(job.job_id)),
                 is_refinement_round=review_ready,
+                planning_mode=planning_mode,
             ),
             encoding="utf-8",
         )
-
         result = self.command_templates.run_template(
             template_name=self._template_for_profile("planner"),
             variables=self._build_template_variables(job, paths, planner_prompt_path),
             cwd=repository_path,
             log_writer=self._actor_log_writer(log_path, "PLANNER"),
         )
-
         if not paths["plan"].exists() and result.stdout.strip():
             paths["plan"].write_text(result.stdout, encoding="utf-8")
-
         if not paths["plan"].exists():
             raise CommandExecutionError(
                 "Planner did not produce PLAN.md. Next action: ensure planner command "
                 "writes to PLAN.md or emits plan content on stdout."
             )
+
+    def _snapshot_plan_variant(
+        self,
+        repository_path: Path,
+        paths: Dict[str, Path],
+        planning_mode: str,
+        log_path: Path,
+    ) -> None:
+        """Preserve plan snapshots so big-picture/dev planning are both traceable."""
+
+        plan_path = paths.get("plan")
+        if not isinstance(plan_path, Path) or not plan_path.exists():
+            return
+        mode = (planning_mode or "general").strip().lower()
+        target_name = ""
+        if mode == "big_picture":
+            target_name = "PLAN_BIG.md"
+        elif mode == "dev_planning":
+            target_name = "PLAN_DEV.md"
+        else:
+            return
+        target_path = self._docs_file(repository_path, target_name)
+        target_path.write_text(
+            plan_path.read_text(encoding="utf-8", errors="replace"),
+            encoding="utf-8",
+        )
+        self._append_actor_log(
+            log_path,
+            "ORCHESTRATOR",
+            f"Plan snapshot saved: {target_path.name}",
+        )
+
+    def _run_planner_graph_mvp(
+        self,
+        job: JobRecord,
+        repository_path: Path,
+        paths: Dict[str, Path],
+        log_path: Path,
+        planning_mode: str = "general",
+    ) -> None:
+        """Run planner through draft->quality-check->refine loop (graph-style MVP)."""
+
+        review_ready = paths["review"].exists() and bool(
+            paths["review"].read_text(encoding="utf-8", errors="replace").strip()
+        )
+        base_prompt = build_planner_prompt(
+            str(paths["spec"]),
+            str(paths["plan"]),
+            review_path=str(paths["review"]),
+            is_long_term=self._is_long_track(self._require_job(job.job_id)),
+            is_refinement_round=review_ready,
+            planning_mode=planning_mode,
+        )
+
+        max_rounds = self._planner_graph_max_rounds()
+        rounds: List[Dict[str, Any]] = []
+        plan_quality_path = self._docs_file(repository_path, "PLAN_QUALITY.json")
+        for round_index in range(1, max_rounds + 1):
+            is_refine = round_index > 1
+            prompt_path = (
+                self._docs_file(
+                    repository_path,
+                    "PLANNER_PROMPT.md" if round_index == 1 else f"PLANNER_PROMPT_REFINE_{round_index}.md",
+                )
+            )
+            prompt_text = base_prompt
+            if is_refine and rounds:
+                prompt_text += build_refinement_instruction(
+                    round_index=round_index,
+                    quality=rounds[-1].get("quality", {}),
+                )
+            tool_context_addendum = ""
+            tool_request_count = 0
+            max_tool_requests = 2
+            while True:
+                prompt_path.write_text(prompt_text + tool_context_addendum, encoding="utf-8")
+
+                result = self.command_templates.run_template(
+                    template_name=self._template_for_profile("planner"),
+                    variables=self._build_template_variables(job, paths, prompt_path),
+                    cwd=repository_path,
+                    log_writer=self._actor_log_writer(log_path, "PLANNER"),
+                )
+                if not paths["plan"].exists() and result.stdout.strip():
+                    paths["plan"].write_text(result.stdout, encoding="utf-8")
+                if not paths["plan"].exists():
+                    raise CommandExecutionError(
+                        "Planner did not produce PLAN.md in graph mode. "
+                        "Next action: verify planner template writes PLAN.md."
+                    )
+
+                plan_text = paths["plan"].read_text(encoding="utf-8", errors="replace")
+                tool_request = self._parse_planner_tool_request(plan_text)
+                if not tool_request:
+                    break
+                if tool_request_count >= max_tool_requests:
+                    self._append_actor_log(
+                        log_path,
+                        "ORCHESTRATOR",
+                        "Planner tool-request loop cap reached. Continuing without further search calls.",
+                    )
+                    break
+                search_outcome = self._execute_planner_tool_request(
+                    job=job,
+                    repository_path=repository_path,
+                    paths=paths,
+                    log_path=log_path,
+                    tool_request=tool_request,
+                )
+                tool_request_count += 1
+                tool_context_addendum += self._build_planner_tool_context_addendum(
+                    tool_request=tool_request,
+                    outcome=search_outcome,
+                )
+                # Planner emitted tool request content. Clear it before re-run.
+                paths["plan"].write_text("", encoding="utf-8")
+
+            plan_text = paths["plan"].read_text(encoding="utf-8", errors="replace")
+            quality = evaluate_plan_markdown(plan_text)
+            rounds.append(
+                {
+                    "round": round_index,
+                    "mode": "refine" if is_refine else "draft",
+                    "tool_requests": tool_request_count,
+                    "quality": quality,
+                }
+            )
+            self._append_actor_log(
+                log_path,
+                "PLANNER",
+                (
+                    f"PlannerGraph round {round_index}/{max_rounds}: "
+                    f"passed={quality.get('passed')} score={quality.get('score')} "
+                    f"missing={','.join(quality.get('missing_sections', [])) or '-'}"
+                ),
+            )
+            if quality.get("passed"):
+                break
+
+        final_quality = rounds[-1]["quality"] if rounds else {"passed": False, "score": 0}
+        plan_quality_path.write_text(
+            json.dumps(
+                {
+                    "job_id": job.job_id,
+                    "issue_number": job.issue_number,
+                    "max_rounds": max_rounds,
+                    "rounds": rounds,
+                    "final": final_quality,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ) + "\n",
+            encoding="utf-8",
+        )
+        self._append_actor_log(
+            log_path,
+            "PLANNER",
+            (
+                "PlannerGraph final quality: "
+                f"passed={final_quality.get('passed')} score={final_quality.get('score')}"
+            ),
+        )
+        if not bool(final_quality.get("passed")):
+            self._append_actor_log(
+                log_path,
+                "ORCHESTRATOR",
+                "PLAN quality gate not passed, but continuing by non-blocking assist policy.",
+            )
+
+    @staticmethod
+    def _planner_graph_max_rounds() -> int:
+        """Read planner graph round cap from env with safe defaults."""
+
+        raw = (os.getenv("AGENTHUB_PLANNER_GRAPH_MAX_ROUNDS", "3") or "").strip()
+        try:
+            value = int(raw)
+        except ValueError:
+            return 3
+        return max(1, min(5, value))
+
+    @staticmethod
+    def _planner_graph_enabled() -> bool:
+        """Enable/disable planner graph MVP by env."""
+
+        raw = (os.getenv("AGENTHUB_PLANNER_GRAPH_ENABLED", "true") or "").strip().lower()
+        return raw not in {"0", "false", "no", "off"}
+
+    @staticmethod
+    def _parse_planner_tool_request(plan_text: str) -> Optional[Dict[str, str]]:
+        """Parse planner TOOL_REQUEST block from PLAN output."""
+
+        text = str(plan_text or "").strip()
+        if not text:
+            return None
+        block_match = re.search(
+            r"\[TOOL_REQUEST\](.*?)\[/TOOL_REQUEST\]",
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        payload = block_match.group(1) if block_match else text
+
+        tool_match = re.search(r"^\s*tool\s*:\s*([a-zA-Z0-9_\-]+)\s*$", payload, flags=re.IGNORECASE | re.MULTILINE)
+        query_match = re.search(r"^\s*query\s*:\s*(.+?)\s*$", payload, flags=re.IGNORECASE | re.MULTILINE)
+        reason_match = re.search(r"^\s*reason\s*:\s*(.+?)\s*$", payload, flags=re.IGNORECASE | re.MULTILINE)
+        if not tool_match or not query_match:
+            return None
+
+        tool = tool_match.group(1).strip().lower()
+        query = query_match.group(1).strip()
+        reason = reason_match.group(1).strip() if reason_match else ""
+        if tool != "research_search" or not query:
+            return None
+        return {"tool": tool, "query": query[:240], "reason": reason[:240]}
+
+    def _execute_planner_tool_request(
+        self,
+        *,
+        job: JobRecord,
+        repository_path: Path,
+        paths: Dict[str, Path],
+        log_path: Path,
+        tool_request: Dict[str, str],
+    ) -> Dict[str, Any]:
+        """Execute planner-requested research_search with robust fallback."""
+
+        query = str(tool_request.get("query", "")).strip()
+        search_context_path = self._docs_file(repository_path, "SEARCH_CONTEXT.md")
+        search_result_path = self._docs_file(repository_path, "SEARCH_RESULT.json")
+        prompt_path = self._docs_file(repository_path, "PLANNER_TOOL_REQUEST.md")
+        prompt_path.write_text(
+            (
+                "# Planner Tool Request\n\n"
+                f"- tool: research_search\n"
+                f"- query: {query}\n"
+                f"- reason: {tool_request.get('reason', '')}\n"
+            ),
+            encoding="utf-8",
+        )
+
+        variables = self._build_template_variables(job, paths, prompt_path)
+        variables["query"] = query
+        try:
+            self.command_templates.run_template(
+                template_name=self._template_for_profile("research_search"),
+                variables=variables,
+                cwd=repository_path,
+                log_writer=self._actor_log_writer(log_path, "PLANNER"),
+            )
+            legacy_context_path = repository_path / "SEARCH_CONTEXT.md"
+            legacy_result_path = repository_path / "SEARCH_RESULT.json"
+            if not search_context_path.exists() and legacy_context_path.exists():
+                search_context_path.write_text(
+                    legacy_context_path.read_text(encoding="utf-8", errors="replace"),
+                    encoding="utf-8",
+                )
+            if not search_result_path.exists() and legacy_result_path.exists():
+                search_result_path.write_text(
+                    legacy_result_path.read_text(encoding="utf-8", errors="replace"),
+                    encoding="utf-8",
+                )
+            context_text = ""
+            if search_context_path.exists():
+                context_text = search_context_path.read_text(encoding="utf-8", errors="replace").strip()
+            if not context_text:
+                context_text = "검색 도구가 실행되었지만 SEARCH_CONTEXT.md 본문이 비어 있습니다."
+            return {
+                "ok": True,
+                "mode": "search_api",
+                "context_path": str(search_context_path),
+                "result_path": str(search_result_path),
+                "context_text": context_text[:20_000],
+            }
+        except Exception as error:  # noqa: BLE001
+            self._append_actor_log(
+                log_path,
+                "ORCHESTRATOR",
+                f"research_search failed. Fallback to local evidence pack: {error}",
+            )
+            fallback = self._build_local_evidence_fallback(repository_path, paths, query, str(error))
+            search_context_path.write_text(fallback["context_text"], encoding="utf-8")
+            search_result_path.write_text(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "mode": "fallback_local",
+                        "query": query,
+                        "error": str(error),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ) + "\n",
+                encoding="utf-8",
+            )
+            return {
+                "ok": False,
+                "mode": "fallback_local",
+                "context_path": str(search_context_path),
+                "result_path": str(search_result_path),
+                "context_text": fallback["context_text"][:20_000],
+            }
+
+    def _build_local_evidence_fallback(
+        self,
+        repository_path: Path,
+        paths: Dict[str, Path],
+        query: str,
+        error_text: str,
+    ) -> Dict[str, str]:
+        """Create fallback evidence payload when external search is unavailable."""
+
+        repo_context = repo_context_reader(repository_path)
+        spec_excerpt = ""
+        spec_path = paths.get("spec")
+        if spec_path and Path(spec_path).exists():
+            spec_excerpt = Path(spec_path).read_text(encoding="utf-8", errors="replace")
+            spec_excerpt = "\n".join(spec_excerpt.splitlines()[:80]).strip()
+
+        readme_excerpt = str(repo_context.get("readme_excerpt", "")).strip()
+        stack = ", ".join(repo_context.get("stack", []) or [])
+        context_text = (
+            "# SEARCH CONTEXT (Fallback Local Evidence)\n\n"
+            f"- query: {query}\n"
+            "- mode: fallback_local\n"
+            f"- reason: external_search_unavailable ({error_text[:400]})\n"
+            f"- detected_stack: {stack or '(none)'}\n\n"
+            "## SPEC excerpt\n\n"
+            f"{spec_excerpt or '(SPEC excerpt unavailable)'}\n\n"
+            "## README excerpt\n\n"
+            f"{readme_excerpt or '(README excerpt unavailable)'}\n"
+        ).strip() + "\n"
+        return {"context_text": context_text}
+
+    @staticmethod
+    def _build_planner_tool_context_addendum(
+        *,
+        tool_request: Dict[str, str],
+        outcome: Dict[str, Any],
+    ) -> str:
+        """Build addendum prompt after tool execution."""
+
+        mode = str(outcome.get("mode", "unknown"))
+        context_path = str(outcome.get("context_path", "SEARCH_CONTEXT.md"))
+        context_text = str(outcome.get("context_text", "")).strip()
+        return (
+            "\n\n[Tool response context]\n"
+            f"- requested_tool: {tool_request.get('tool', '')}\n"
+            f"- query: {tool_request.get('query', '')}\n"
+            f"- mode: {mode}\n"
+            f"- context_file: {context_path}\n"
+            "- 아래 근거를 반영해 TOOL_REQUEST가 아닌 최종 PLAN.md 본문을 작성하세요.\n\n"
+            f"{context_text}\n"
+        )
 
     def _stage_implement_with_codex(
         self,
@@ -799,13 +1396,16 @@ class Orchestrator:
     ) -> None:
         self._set_stage(job.job_id, JobStage.IMPLEMENT_WITH_CODEX, log_path)
 
-        coder_prompt_path = repository_path / "CODER_PROMPT_IMPLEMENT.md"
+        coder_prompt_path = self._docs_file(repository_path, "CODER_PROMPT_IMPLEMENT.md")
         coder_prompt_path.write_text(
             build_coder_prompt(
                 plan_path=str(paths["plan"]),
                 review_path=str(paths["review"]),
                 coding_goal="PLAN.md 기반 MVP 구현",
                 design_path=str(paths.get("design", "")),
+                design_tokens_path=str(paths.get("design_tokens", self._docs_file(repository_path, "DESIGN_TOKENS.json"))),
+                token_handoff_path=str(paths.get("token_handoff", self._docs_file(repository_path, "TOKEN_HANDOFF.md"))),
+                publish_handoff_path=str(paths.get("publish_handoff", self._docs_file(repository_path, "PUBLISH_HANDOFF.md"))),
             ),
             encoding="utf-8",
         )
@@ -826,7 +1426,7 @@ class Orchestrator:
     ) -> None:
         self._set_stage(job.job_id, JobStage.DESIGN_WITH_CODEX, log_path)
 
-        designer_prompt_path = repository_path / "DESIGNER_PROMPT.md"
+        designer_prompt_path = self._docs_file(repository_path, "DESIGNER_PROMPT.md")
         designer_prompt_path.write_text(
             build_designer_prompt(
                 spec_path=str(paths["spec"]),
@@ -851,6 +1451,36 @@ class Orchestrator:
                 "Designer did not produce DESIGN_SYSTEM.md. Next action: ensure designer command "
                 "writes to DESIGN_SYSTEM.md or emits markdown on stdout."
             )
+        self._ensure_design_artifacts(repository_path, paths, log_path)
+
+    def _stage_publish_with_codex(
+        self,
+        job: JobRecord,
+        repository_path: Path,
+        paths: Dict[str, Path],
+        log_path: Path,
+    ) -> None:
+        """Run publisher-specific codex step and enforce handoff artifacts."""
+
+        self._set_stage(job.job_id, JobStage.IMPLEMENT_WITH_CODEX, log_path)
+        prompt_path = self._docs_file(repository_path, "CODER_PROMPT_PUBLISH.md")
+        prompt_path.write_text(
+            build_publisher_prompt(
+                spec_path=str(paths["spec"]),
+                plan_path=str(paths["plan"]),
+                design_path=str(paths["design"]),
+                publish_checklist_path=str(paths.get("publish_checklist", self._docs_file(repository_path, "PUBLISH_CHECKLIST.md"))),
+                publish_handoff_path=str(paths.get("publish_handoff", self._docs_file(repository_path, "PUBLISH_HANDOFF.md"))),
+            ),
+            encoding="utf-8",
+        )
+        self.command_templates.run_template(
+            template_name=self._template_for_profile("coder"),
+            variables=self._build_template_variables(job, paths, prompt_path),
+            cwd=repository_path,
+            log_writer=self._actor_log_writer(log_path, "PUBLISHER"),
+        )
+        self._ensure_publisher_artifacts(repository_path, paths, log_path)
 
     def _stage_run_tests(
         self,
@@ -931,6 +1561,152 @@ class Orchestrator:
             )
             return False
         return True
+
+    def _run_test_hard_gate(
+        self,
+        *,
+        job: JobRecord,
+        repository_path: Path,
+        paths: Dict[str, Path],
+        log_path: Path,
+        stage: JobStage,
+        gate_label: str,
+    ) -> None:
+        """Run test gate with bounded retry/timebox and repeated-error detection."""
+
+        max_attempts = self._hard_gate_max_attempts()
+        timebox_seconds = self._hard_gate_timebox_seconds()
+        start = time.monotonic()
+        signatures: Dict[str, int] = {}
+
+        for attempt in range(1, max_attempts + 1):
+            passed = self._stage_run_tests(job, repository_path, stage, log_path)
+            if passed:
+                self._append_actor_log(
+                    log_path,
+                    "ORCHESTRATOR",
+                    f"[HARD_GATE:{gate_label}] passed on attempt {attempt}/{max_attempts}",
+                )
+                return
+
+            signature = self._latest_test_failure_signature(repository_path, stage)
+            if signature:
+                signatures[signature] = signatures.get(signature, 0) + 1
+
+            elapsed = int(time.monotonic() - start)
+            if elapsed >= timebox_seconds:
+                raise CommandExecutionError(
+                    f"Hard gate '{gate_label}' timed out ({elapsed}s/{timebox_seconds}s). "
+                    "Next action: inspect latest test report and TEST_FAILURE_REASON file."
+                )
+            if signature and signatures.get(signature, 0) >= 2:
+                raise CommandExecutionError(
+                    f"Hard gate '{gate_label}' stopped due to repeated failure signature. "
+                    "Next action: resolve root cause before retrying."
+                )
+            if attempt >= max_attempts:
+                break
+
+            self._append_actor_log(
+                log_path,
+                "ORCHESTRATOR",
+                f"[HARD_GATE:{gate_label}] failed attempt {attempt}/{max_attempts}. Running fix and retry.",
+            )
+            self._stage_fix_with_codex(job, repository_path, paths, log_path)
+            self._commit_markdown_changes_after_stage(
+                job,
+                repository_path,
+                JobStage.FIX_WITH_CODEX.value,
+                log_path,
+            )
+
+        raise CommandExecutionError(
+            f"Hard gate '{gate_label}' failed after {max_attempts} attempts. "
+            "Next action: inspect test reports and apply targeted fix."
+        )
+
+    def _resolve_app_type(self, repository_path: Path, paths: Dict[str, Path]) -> str:
+        """Resolve app_type from SPEC.json with safe fallback."""
+
+        spec_json_path = paths.get("spec_json", self._docs_file(repository_path, "SPEC.json"))
+        if isinstance(spec_json_path, Path) and spec_json_path.exists():
+            try:
+                payload = json.loads(spec_json_path.read_text(encoding="utf-8"))
+                value = str(payload.get("app_type", "")).strip().lower()
+                if value in {"web", "api", "cli", "app"}:
+                    return value
+            except Exception:  # noqa: BLE001
+                pass
+        return "web"
+
+    def _stage_skip_ux_review_for_non_web(
+        self,
+        job: JobRecord,
+        repository_path: Path,
+        paths: Dict[str, Path],
+        log_path: Path,
+        *,
+        app_type: str,
+    ) -> None:
+        """Write skip record when UX E2E stage is not applicable."""
+
+        self._set_stage(job.job_id, JobStage.UX_E2E_REVIEW, log_path)
+        review_path = self._docs_file(repository_path, "UX_REVIEW.md")
+        review_path.write_text(
+            (
+                "# UX REVIEW\n\n"
+                "## Summary\n"
+                f"- Stage: `{JobStage.UX_E2E_REVIEW.value}`\n"
+                "- Verdict: `SKIPPED`\n"
+                f"- Reason: `non-web app_type ({app_type})`\n\n"
+                "## Next Action\n"
+                "- non-web 타입은 UX 스크린샷 E2E를 수행하지 않습니다.\n"
+                "- API/CLI 전용 검증 결과를 우선 확인하세요.\n"
+            ),
+            encoding="utf-8",
+        )
+        self._append_actor_log(
+            log_path,
+            "ORCHESTRATOR",
+            f"ux_e2e_review skipped for app_type={app_type}",
+        )
+
+    @staticmethod
+    def _hard_gate_max_attempts() -> int:
+        """Read hard-gate max attempts from env with safe bounds."""
+
+        raw = (os.getenv("AGENTHUB_HARD_GATE_MAX_ATTEMPTS", "3") or "").strip()
+        try:
+            value = int(raw)
+        except ValueError:
+            return 3
+        return max(1, min(5, value))
+
+    @staticmethod
+    def _hard_gate_timebox_seconds() -> int:
+        """Read hard-gate timebox seconds from env with safe bounds."""
+
+        raw = (os.getenv("AGENTHUB_HARD_GATE_TIMEBOX_SECONDS", "1200") or "").strip()
+        try:
+            value = int(raw)
+        except ValueError:
+            return 1200
+        return max(120, min(7200, value))
+
+    def _latest_test_failure_signature(self, repository_path: Path, stage: JobStage) -> str:
+        """Build compact signature from latest failure reason/report text."""
+
+        reason_path = repository_path / f"TEST_FAILURE_REASON_{stage.value.upper()}.md"
+        text = ""
+        if reason_path.exists():
+            try:
+                text = reason_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                text = ""
+        if not text:
+            return ""
+        normalized = re.sub(r"\s+", " ", text).strip().lower()[:600]
+        return hashlib.sha256(normalized.encode("utf-8", errors="ignore")).hexdigest()[:16]
 
     def _stage_ux_e2e_review(
         self,
@@ -1073,7 +1849,10 @@ class Orchestrator:
                 "",
             ]
         )
-        (repository_path / "UX_REVIEW.md").write_text("\n".join(review_lines), encoding="utf-8")
+        self._docs_file(repository_path, "UX_REVIEW.md").write_text(
+            "\n".join(review_lines),
+            encoding="utf-8",
+        )
 
     @staticmethod
     def _extract_spec_checklist(spec_path: Optional[Path]) -> List[str]:
@@ -1190,7 +1969,7 @@ class Orchestrator:
                 continue
             numstats[parts[2]] = {"added": parts[0], "deleted": parts[1]}
 
-        summary_path = repository_path / "CODE_CHANGE_SUMMARY.md"
+        summary_path = self._docs_file(repository_path, "CODE_CHANGE_SUMMARY.md")
         fallback_lines = [
             "# CODE CHANGE SUMMARY",
             "",
@@ -1238,7 +2017,12 @@ class Orchestrator:
             changed_files=changed_files,
             numstats=numstats,
         )
-        copilot_summary = self._summarize_changes_with_copilot(prompt, repository_path, log_path)
+        copilot_summary = self._summarize_changes_with_copilot(
+            job=job,
+            prompt=prompt,
+            repository_path=repository_path,
+            log_path=log_path,
+        )
         if copilot_summary:
             summary_path.write_text(copilot_summary.rstrip() + "\n", encoding="utf-8")
             self._append_actor_log(
@@ -1294,20 +2078,55 @@ class Orchestrator:
 
     def _summarize_changes_with_copilot(
         self,
+        job: JobRecord,
         prompt: str,
         repository_path: Path,
         log_path: Path,
     ) -> Optional[str]:
         """Try Copilot CLI summary generation and return markdown text."""
 
-        command = f"gh copilot -p {shlex.quote(prompt)}"
-        result = self.shell_executor(
-            command=command,
-            cwd=repository_path,
-            log_writer=self._actor_log_writer(log_path, "COPILOT"),
-            check=False,
-            command_purpose="copilot code change summary",
-        )
+        prompt_path = self._docs_file(repository_path, "COPILOT_SUMMARY_PROMPT.md")
+        prompt_path.write_text(prompt, encoding="utf-8")
+
+        if self.command_templates.has_template("copilot"):
+            template_variables = {
+                "repository": job.repository,
+                "issue_number": str(job.issue_number),
+                "issue_title": job.issue_title,
+                "issue_url": job.issue_url,
+                "branch_name": job.branch_name,
+                "work_dir": str(repository_path),
+                "prompt_file": str(prompt_path),
+            }
+            try:
+                result = self.command_templates.run_template(
+                    template_name=self._template_for_profile("copilot"),
+                    variables=template_variables,
+                    cwd=repository_path,
+                    log_writer=self._actor_log_writer(log_path, "COPILOT"),
+                )
+            except Exception as error:  # noqa: BLE001 - fallback to built-in command
+                self._append_actor_log(
+                    log_path,
+                    "COPILOT",
+                    f"Copilot template failed. Fallback to built-in command: {error}",
+                )
+                result = self.shell_executor(
+                    command=f"gh copilot -p {shlex.quote(prompt)}",
+                    cwd=repository_path,
+                    log_writer=self._actor_log_writer(log_path, "COPILOT"),
+                    check=False,
+                    command_purpose="copilot code change summary fallback",
+                )
+        else:
+            command = f"gh copilot -p {shlex.quote(prompt)}"
+            result = self.shell_executor(
+                command=command,
+                cwd=repository_path,
+                log_writer=self._actor_log_writer(log_path, "COPILOT"),
+                check=False,
+                command_purpose="copilot code change summary",
+            )
         if int(getattr(result, "exit_code", 1)) != 0:
             return None
         output = str(getattr(result, "stdout", "")).strip()
@@ -1518,6 +2337,12 @@ class Orchestrator:
             self._append_log(log_path, f"No changes to commit at stage {stage.value}")
             return
 
+        changed_paths = []
+        for raw_line in status_result.stdout.splitlines():
+            path = self._parse_porcelain_path(raw_line)
+            if path:
+                changed_paths.append(path)
+
         self._run_shell(
             command=f"git -C {shlex.quote(str(repository_path))} add -A",
             cwd=repository_path,
@@ -1525,14 +2350,17 @@ class Orchestrator:
             purpose="git add",
         )
 
-        commit_message = self._prepare_commit_message_with_claude(
+        summary = self._prepare_commit_summary_with_ai(
             job=job,
             repository_path=repository_path,
-            stage=stage,
+            stage_name=stage.value,
             commit_type=commit_type,
+            changed_paths=changed_paths,
             log_path=log_path,
         )
-        if not commit_message:
+        if summary:
+            commit_message = f"{commit_type}: {summary}"
+        else:
             commit_message = f"{commit_type}: apply {stage.value} for issue #{job.issue_number}"
         self._run_shell(
             command=(
@@ -1544,15 +2372,48 @@ class Orchestrator:
             purpose="git commit",
         )
 
-    def _prepare_commit_message_with_claude(
+    def _prepare_commit_summary_with_ai(
         self,
         job: JobRecord,
         repository_path: Path,
-        stage: JobStage,
+        stage_name: str,
+        commit_type: str,
+        changed_paths: List[str],
+        log_path: Path,
+    ) -> str:
+        """Generate one-line commit summary with Copilot-first strategy."""
+
+        summary = self._prepare_commit_summary_with_copilot(
+            job=job,
+            repository_path=repository_path,
+            stage_name=stage_name,
+            commit_type=commit_type,
+            changed_paths=changed_paths,
+            log_path=log_path,
+        )
+        if self._is_usable_commit_summary(summary):
+            return summary
+
+        summary = self._prepare_commit_summary_with_claude(
+            job=job,
+            repository_path=repository_path,
+            stage_name=stage_name,
+            commit_type=commit_type,
+            log_path=log_path,
+        )
+        if self._is_usable_commit_summary(summary):
+            return summary
+        return ""
+
+    def _prepare_commit_summary_with_claude(
+        self,
+        job: JobRecord,
+        repository_path: Path,
+        stage_name: str,
         commit_type: str,
         log_path: Path,
     ) -> str:
-        """Generate one-line Korean commit summary using Claude."""
+        """Generate one-line Korean commit summary using Claude templates."""
 
         template_name = ""
         if self.command_templates.has_template("commit_summary"):
@@ -1564,15 +2425,21 @@ class Orchestrator:
         else:
             return ""
 
-        prompt_path = repository_path / f"COMMIT_MESSAGE_PROMPT_{stage.value.upper()}.md"
-        output_path = repository_path / f"COMMIT_MESSAGE_{stage.value.upper()}.txt"
+        prompt_path = self._docs_file(
+            repository_path,
+            f"COMMIT_MESSAGE_PROMPT_{stage_name.upper()}.md",
+        )
+        output_path = self._docs_file(
+            repository_path,
+            f"COMMIT_MESSAGE_{stage_name.upper()}.txt",
+        )
         prompt_path.write_text(
             build_commit_message_prompt(
-                spec_path=str(repository_path / "SPEC.md"),
-                plan_path=str(repository_path / "PLAN.md"),
-                review_path=str(repository_path / "REVIEW.md"),
-                design_path=str(repository_path / "DESIGN_SYSTEM.md"),
-                stage_name=stage.value,
+                spec_path=str(self._docs_file(repository_path, "SPEC.md")),
+                plan_path=str(self._docs_file(repository_path, "PLAN.md")),
+                review_path=str(self._docs_file(repository_path, "REVIEW.md")),
+                design_path=str(self._docs_file(repository_path, "DESIGN_SYSTEM.md")),
+                stage_name=stage_name,
                 commit_type=commit_type,
             ),
             encoding="utf-8",
@@ -1585,17 +2452,17 @@ class Orchestrator:
                     **self._build_template_variables(
                         job,
                         {
-                            "spec": repository_path / "SPEC.md",
-                            "plan": repository_path / "PLAN.md",
-                            "review": repository_path / "REVIEW.md",
-                            "design": repository_path / "DESIGN_SYSTEM.md",
-                            "status": repository_path / "STATUS.md",
+                            "spec": self._docs_file(repository_path, "SPEC.md"),
+                            "plan": self._docs_file(repository_path, "PLAN.md"),
+                            "review": self._docs_file(repository_path, "REVIEW.md"),
+                            "design": self._docs_file(repository_path, "DESIGN_SYSTEM.md"),
+                            "status": self._docs_file(repository_path, "STATUS.md"),
                         },
                         prompt_path,
                     ),
                     "commit_message_path": str(output_path),
                     "last_error": "",
-                    "pr_summary_path": str(repository_path / "PR_SUMMARY.md"),
+                    "pr_summary_path": str(self._docs_file(repository_path, "PR_SUMMARY.md")),
                 },
                 cwd=repository_path,
                 log_writer=self._actor_log_writer(log_path, "CLAUDE"),
@@ -1613,10 +2480,122 @@ class Orchestrator:
             candidate = output_path.read_text(encoding="utf-8", errors="replace").strip()
         if not candidate:
             return ""
-        first_line = candidate.splitlines()[0].strip().strip("`").strip()
-        if not first_line:
+        return self._sanitize_commit_summary(candidate)
+
+    def _prepare_commit_summary_with_copilot(
+        self,
+        job: JobRecord,
+        repository_path: Path,
+        stage_name: str,
+        commit_type: str,
+        changed_paths: List[str],
+        log_path: Path,
+    ) -> str:
+        """Try to generate one-line commit summary with Copilot."""
+
+        prompt_lines = [
+            "다음 변경사항의 커밋 제목 요약 1줄만 작성하세요.",
+            "규칙:",
+            "- 한국어",
+            "- 12~72자",
+            "- 접두어(feat:, fix:, docs:)는 제외",
+            "- 불필요한 따옴표/코드블록/번호 금지",
+            "",
+            f"메타: issue #{job.issue_number}, stage={stage_name}, type={commit_type}",
+            "변경 파일:",
+        ]
+        unique_paths = []
+        seen = set()
+        for path in changed_paths:
+            key = str(path).strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            unique_paths.append(key)
+            if len(unique_paths) >= 24:
+                break
+        if not unique_paths:
+            prompt_lines.append("- 변경 파일 정보를 찾지 못함")
+        else:
+            for path in unique_paths:
+                prompt_lines.append(f"- {path}")
+        prompt = "\n".join(prompt_lines).strip() + "\n"
+        prompt_path = self._docs_file(repository_path, f"COPILOT_COMMIT_PROMPT_{stage_name.upper()}.md")
+        prompt_path.write_text(prompt, encoding="utf-8")
+
+        if self.command_templates.has_template("copilot"):
+            template_variables = {
+                "repository": job.repository,
+                "issue_number": str(job.issue_number),
+                "issue_title": job.issue_title,
+                "issue_url": job.issue_url,
+                "branch_name": job.branch_name,
+                "work_dir": str(repository_path),
+                "prompt_file": str(prompt_path),
+            }
+            try:
+                result = self.command_templates.run_template(
+                    template_name=self._template_for_profile("copilot"),
+                    variables=template_variables,
+                    cwd=repository_path,
+                    log_writer=self._actor_log_writer(log_path, "COPILOT"),
+                )
+            except Exception as error:  # noqa: BLE001
+                self._append_actor_log(
+                    log_path,
+                    "COPILOT",
+                    f"Copilot commit summary template failed: {error}",
+                )
+                return ""
+        else:
+            result = self.shell_executor(
+                command=f"gh copilot -p {shlex.quote(prompt)}",
+                cwd=repository_path,
+                log_writer=self._actor_log_writer(log_path, "COPILOT"),
+                check=False,
+                command_purpose="copilot commit summary",
+            )
+
+        if int(getattr(result, "exit_code", 1)) != 0:
             return ""
-        return f"{commit_type}: {first_line[:120]}"
+        output = str(getattr(result, "stdout", "")).strip()
+        return self._sanitize_commit_summary(output)
+
+    @staticmethod
+    def _sanitize_commit_summary(raw: str) -> str:
+        """Normalize model output into a clean one-line commit summary."""
+
+        text = str(raw or "").strip()
+        if not text:
+            return ""
+        first = text.splitlines()[0].strip()
+        first = first.strip("`").strip()
+        first = re.sub(r"^\s*[-*#>\d\.\)\(]+\s*", "", first)
+        first = re.sub(r"^\s*(feat|fix|docs|chore|refactor|style|test)\s*:\s*", "", first, flags=re.IGNORECASE)
+        first = re.sub(r"\s+", " ", first).strip()
+        return first[:120]
+
+    @staticmethod
+    def _is_usable_commit_summary(summary: str) -> bool:
+        """Validate summary quality before using it as commit title body."""
+
+        text = str(summary or "").strip()
+        if len(text) < 8:
+            return False
+        lowered = text.lower()
+        blocked = {
+            "n/a",
+            "없음",
+            "none",
+            "commit message",
+            "요약 없음",
+            "변경사항 없음",
+        }
+        if lowered in blocked:
+            return False
+        if "```" in text:
+            return False
+        return True
 
     def _stage_review_with_gemini(
         self,
@@ -1627,7 +2606,7 @@ class Orchestrator:
     ) -> None:
         self._set_stage(job.job_id, JobStage.REVIEW_WITH_GEMINI, log_path)
 
-        reviewer_prompt_path = repository_path / "REVIEWER_PROMPT.md"
+        reviewer_prompt_path = self._docs_file(repository_path, "REVIEWER_PROMPT.md")
         reviewer_prompt_path.write_text(
             build_reviewer_prompt(
                 spec_path=str(paths["spec"]),
@@ -1662,13 +2641,16 @@ class Orchestrator:
     ) -> None:
         self._set_stage(job.job_id, JobStage.FIX_WITH_CODEX, log_path)
 
-        coder_prompt_path = repository_path / "CODER_PROMPT_FIX.md"
+        coder_prompt_path = self._docs_file(repository_path, "CODER_PROMPT_FIX.md")
         coder_prompt_path.write_text(
             build_coder_prompt(
                 plan_path=str(paths["plan"]),
                 review_path=str(paths["review"]),
                 coding_goal="REVIEW.md TODO 반영 및 테스트 안정화",
                 design_path=str(paths.get("design", "")),
+                design_tokens_path=str(paths.get("design_tokens", self._docs_file(repository_path, "DESIGN_TOKENS.json"))),
+                token_handoff_path=str(paths.get("token_handoff", self._docs_file(repository_path, "TOKEN_HANDOFF.md"))),
+                publish_handoff_path=str(paths.get("publish_handoff", self._docs_file(repository_path, "PUBLISH_HANDOFF.md"))),
             ),
             encoding="utf-8",
         )
@@ -1700,7 +2682,7 @@ class Orchestrator:
         refreshed_job = self._require_job(job.job_id)
         preview_info = self._deploy_preview_and_smoke_test(refreshed_job, repository_path, log_path)
 
-        pr_body_path = repository_path / "PR_BODY.md"
+        pr_body_path = self._docs_file(repository_path, "PR_BODY.md")
         generated_summary_path = self._stage_prepare_pr_summary_with_claude(
             refreshed_job,
             repository_path,
@@ -1969,7 +2951,7 @@ class Orchestrator:
     def _write_preview_markdown(self, repository_path: Path, preview_info: Dict[str, str]) -> None:
         """Persist preview metadata inside workspace for audit/debug."""
 
-        path = repository_path / "PREVIEW.md"
+        path = self._docs_file(repository_path, "PREVIEW.md")
         lines = [
             "# PREVIEW",
             "",
@@ -2064,14 +3046,14 @@ class Orchestrator:
             )
             return None
 
-        prompt_path = repository_path / "PR_SUMMARY_PROMPT.md"
-        output_path = repository_path / "PR_SUMMARY.md"
+        prompt_path = self._docs_file(repository_path, "PR_SUMMARY_PROMPT.md")
+        output_path = self._docs_file(repository_path, "PR_SUMMARY.md")
         prompt_path.write_text(
             build_pr_summary_prompt(
                 spec_path=str(paths["spec"]),
                 plan_path=str(paths["plan"]),
                 review_path=str(paths["review"]),
-                design_path=str(paths.get("design", repository_path / "DESIGN_SYSTEM.md")),
+                design_path=str(paths.get("design", self._docs_file(repository_path, "DESIGN_SYSTEM.md"))),
                 issue_title=job.issue_title,
                 issue_number=job.issue_number,
                 is_long_term=self._is_long_track(job),
@@ -2125,12 +3107,24 @@ class Orchestrator:
         stage_name: str,
         log_path: Path,
     ) -> None:
-        """Create a docs-only commit when markdown files changed in a stage."""
+        """Create stage snapshots and docs commit when markdown files changed."""
 
         if not self.settings.enable_stage_md_commits:
             return
 
-        status_result = self._run_shell(
+        status_all = self._run_shell(
+            command=(
+                f"git -C {shlex.quote(str(repository_path))} status --porcelain"
+            ),
+            cwd=repository_path,
+            log_path=log_path,
+            purpose=f"git status all changes ({stage_name})",
+        )
+        changed_lines_all = [line for line in status_all.stdout.splitlines() if line.strip()]
+        if not changed_lines_all:
+            return
+
+        status_md = self._run_shell(
             command=(
                 f"git -C {shlex.quote(str(repository_path))} status --porcelain -- "
                 f"{shlex.quote(':(glob)**/*.md')}"
@@ -2139,12 +3133,32 @@ class Orchestrator:
             log_path=log_path,
             purpose=f"git status md changes ({stage_name})",
         )
-        changed_lines = [line for line in status_result.stdout.splitlines() if line.strip()]
-        if not changed_lines:
-            return
+        changed_lines_md = [line for line in status_md.stdout.splitlines() if line.strip()]
 
         canonical_stage = self._canonical_stage_name(stage_name)
-        self._write_stage_md_snapshot(job, repository_path, canonical_stage, changed_lines, log_path)
+        self._write_stage_md_snapshot(
+            job=job,
+            repository_path=repository_path,
+            stage_name=canonical_stage,
+            changed_lines=changed_lines_md,
+            changed_lines_all=changed_lines_all,
+            log_path=log_path,
+        )
+        if not changed_lines_md:
+            return
+
+        changed_md_paths = [
+            self._parse_porcelain_path(line)
+            for line in changed_lines_md
+            if self._parse_porcelain_path(line)
+        ]
+        if self._should_skip_md_commit(changed_md_paths):
+            self._append_actor_log(
+                log_path,
+                "GIT",
+                f"Skipped markdown commit for stage '{stage_name}' (prompt/temporary docs only).",
+            )
+            return
 
         self._run_shell(
             command=(
@@ -2157,7 +3171,18 @@ class Orchestrator:
         )
 
         display_stage = self._format_stage_display_name(canonical_stage)
-        commit_message = f"docs(stage): {display_stage} (issue #{job.issue_number})"
+        summary = self._prepare_commit_summary_with_ai(
+            job=job,
+            repository_path=repository_path,
+            stage_name=canonical_stage,
+            commit_type="docs(stage)",
+            changed_paths=changed_md_paths,
+            log_path=log_path,
+        )
+        if summary:
+            commit_message = f"docs(stage): {summary}"
+        else:
+            commit_message = f"docs(stage): {display_stage} (issue #{job.issue_number})"
         self._run_shell(
             command=(
                 f"git -C {shlex.quote(str(repository_path))} commit -m "
@@ -2179,9 +3204,10 @@ class Orchestrator:
         repository_path: Path,
         stage_name: str,
         changed_lines: List[str],
+        changed_lines_all: List[str],
         log_path: Path,
     ) -> None:
-        """Persist per-stage markdown snapshot for dashboard stage toggle."""
+        """Persist per-stage markdown + file snapshot for dashboard stage toggle."""
 
         snapshot_root = self.settings.data_dir / "md_snapshots" / job.job_id
         snapshot_root.mkdir(parents=True, exist_ok=True)
@@ -2189,19 +3215,30 @@ class Orchestrator:
         snapshot_path = snapshot_root / f"attempt_{job.attempt}_{safe_stage}.json"
 
         md_files: List[Dict[str, str]] = []
-        for path in sorted(repository_path.glob("*.md")):
+        md_paths: List[Path] = []
+        md_paths.extend(sorted(repository_path.glob("*.md")))
+        docs_dir = repository_path / "_docs"
+        if docs_dir.exists():
+            md_paths.extend(sorted(docs_dir.glob("*.md")))
+        seen_md = set()
+        for path in md_paths:
             if not path.is_file():
                 continue
+            rel = str(path.relative_to(repository_path))
+            if rel in seen_md:
+                continue
+            seen_md.add(rel)
             try:
                 content = path.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
             md_files.append(
                 {
-                    "path": path.name,
+                    "path": rel,
                     "content": content,
                 }
             )
+        file_snapshots = self._collect_stage_file_snapshots(repository_path, changed_lines_all)
 
         payload = {
             "job_id": job.job_id,
@@ -2209,7 +3246,9 @@ class Orchestrator:
             "stage": stage_name,
             "created_at": utc_now_iso(),
             "changed_files": [line.strip() for line in changed_lines],
+            "changed_files_all": [line.strip() for line in changed_lines_all],
             "md_files": md_files,
+            "file_snapshots": file_snapshots,
         }
         snapshot_path.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
@@ -2218,8 +3257,95 @@ class Orchestrator:
         self._append_actor_log(
             log_path,
             "ORCHESTRATOR",
-            f"Stage markdown snapshot saved: {snapshot_path.name}",
+            f"Stage snapshot saved: {snapshot_path.name}",
         )
+
+    def _collect_stage_file_snapshots(
+        self,
+        repository_path: Path,
+        changed_lines_all: List[str],
+    ) -> List[Dict[str, Any]]:
+        """Capture changed file contents at stage boundary for point-in-time audit."""
+
+        snapshots: List[Dict[str, Any]] = []
+        seen_paths = set()
+        max_files = 24
+        max_bytes = 200_000
+
+        for raw in changed_lines_all:
+            if len(snapshots) >= max_files:
+                break
+            status = raw[:2].strip()
+            rel_path = self._parse_porcelain_path(raw)
+            if not rel_path or rel_path in seen_paths:
+                continue
+            seen_paths.add(rel_path)
+            abs_path = (repository_path / rel_path).resolve()
+            if repository_path.resolve() not in abs_path.parents and abs_path != repository_path.resolve():
+                continue
+
+            item: Dict[str, Any] = {
+                "path": rel_path,
+                "status": status or "??",
+                "exists": abs_path.exists() and abs_path.is_file(),
+                "truncated": False,
+                "binary": False,
+                "content": "",
+            }
+            if not item["exists"]:
+                snapshots.append(item)
+                continue
+            try:
+                blob = abs_path.read_bytes()
+            except OSError:
+                snapshots.append(item)
+                continue
+            if b"\x00" in blob:
+                item["binary"] = True
+                snapshots.append(item)
+                continue
+            if len(blob) > max_bytes:
+                blob = blob[:max_bytes]
+                item["truncated"] = True
+            item["content"] = blob.decode("utf-8", errors="replace")
+            snapshots.append(item)
+        return snapshots
+
+    @staticmethod
+    def _parse_porcelain_path(raw_line: str) -> str:
+        """Extract normalized file path from `git status --porcelain` one line."""
+
+        line = str(raw_line or "").rstrip()
+        if len(line) < 4:
+            return ""
+        payload = line[3:].strip()
+        if not payload:
+            return ""
+        if " -> " in payload:
+            payload = payload.split(" -> ", 1)[1].strip()
+        return payload
+
+    @staticmethod
+    def _should_skip_md_commit(changed_md_paths: List[str]) -> bool:
+        """Skip noisy docs commits when only transient prompt files changed."""
+
+        if not changed_md_paths:
+            return True
+        transient_prefixes = (
+            "_docs/PLANNER_PROMPT",
+            "_docs/CODER_PROMPT",
+            "_docs/DESIGNER_PROMPT",
+            "_docs/REVIEWER_PROMPT",
+            "_docs/COPILOT_",
+            "_docs/PR_SUMMARY_PROMPT",
+            "_docs/COMMIT_MESSAGE_PROMPT_",
+            "_docs/PLANNER_TOOL_REQUEST",
+            "_docs/ESCALATION_PROMPT",
+        )
+        normalized = [str(path).strip() for path in changed_md_paths if str(path).strip()]
+        if not normalized:
+            return True
+        return all(any(path.startswith(prefix) for prefix in transient_prefixes) for path in normalized)
 
     @staticmethod
     def _canonical_stage_name(stage_name: str) -> str:
@@ -2230,6 +3356,7 @@ class Orchestrator:
             "write_spec": JobStage.WRITE_SPEC.value,
             "gemini_plan": JobStage.PLAN_WITH_GEMINI.value,
             "designer_task": JobStage.DESIGN_WITH_CODEX.value,
+            "publisher_task": "publisher_task",
             "codex_implement": JobStage.IMPLEMENT_WITH_CODEX.value,
             "code_change_summary": JobStage.SUMMARIZE_CODE_CHANGES.value,
             "test_after_implement": JobStage.TEST_AFTER_IMPLEMENT.value,
@@ -2268,6 +3395,7 @@ class Orchestrator:
             "write_spec": "스펙 문서 작성",
             "gemini_plan": "제미나이 플래너 작성",
             "designer_task": "코덱스 디자이너 작성",
+            "publisher_task": "퍼블리셔 작성",
             "codex_implement": "코덱스 구현자 작성",
             "code_change_summary": "코드 변경 요약 작성",
             "test_after_implement": "구현 후 테스트 리포트 작성",
@@ -2278,8 +3406,8 @@ class Orchestrator:
             "coder_fix_from_test_report": "코덱스 수정자 작성",
             "test_after_fix": "수정 후 테스트 리포트 작성",
             "test_after_fix_final": "수정 후 테스트 리포트 작성",
-            "tester_run_e2e": "수정 후 테스트 리포트 작성",
-            "tester_retest_e2e": "수정 후 테스트 리포트 작성",
+            "tester_run_e2e": "E2E/타입별 검증 리포트 작성",
+            "tester_retest_e2e": "E2E/타입별 재검증 리포트 작성",
             "commit_fix": "수정 커밋 단계 문서 정리",
         }
         return stage_map.get(stage_name, f"{stage_name} 문서 반영")
@@ -2297,7 +3425,7 @@ class Orchestrator:
             )
             return
 
-        escalation_prompt_path = repository_path / "ESCALATION_PROMPT.md"
+        escalation_prompt_path = self._docs_file(repository_path, "ESCALATION_PROMPT.md")
         escalation_prompt_path.write_text(
             (
                 "The main loop failed. Provide a short unblock plan.\n\n"
@@ -2314,11 +3442,11 @@ class Orchestrator:
                     **self._build_template_variables(
                         job,
                         {
-                            "spec": repository_path / "SPEC.md",
-                            "plan": repository_path / "PLAN.md",
-                            "review": repository_path / "REVIEW.md",
-                            "design": repository_path / "DESIGN_SYSTEM.md",
-                            "status": repository_path / "STATUS.md",
+                            "spec": self._docs_file(repository_path, "SPEC.md"),
+                            "plan": self._docs_file(repository_path, "PLAN.md"),
+                            "review": self._docs_file(repository_path, "REVIEW.md"),
+                            "design": self._docs_file(repository_path, "DESIGN_SYSTEM.md"),
+                            "status": self._docs_file(repository_path, "STATUS.md"),
                         },
                         escalation_prompt_path,
                     ),
@@ -2338,7 +3466,7 @@ class Orchestrator:
         self._set_stage(job_id, JobStage.FAILED, log_path)
 
         if repository_path.exists():
-            status_path = repository_path / "STATUS.md"
+            status_path = self._docs_file(repository_path, "STATUS.md")
             status_path.write_text(
                 build_status_markdown(
                     last_error=last_error,
@@ -2442,10 +3570,188 @@ class Orchestrator:
             "spec_path": str(paths["spec"]),
             "plan_path": str(paths["plan"]),
             "review_path": str(paths["review"]),
-            "design_path": str(paths.get("design", Path("DESIGN_SYSTEM.md"))),
+            "design_path": str(paths.get("design", Path("_docs/DESIGN_SYSTEM.md"))),
+            "design_tokens_path": str(paths.get("design_tokens", Path("_docs/DESIGN_TOKENS.json"))),
+            "token_handoff_path": str(paths.get("token_handoff", Path("_docs/TOKEN_HANDOFF.md"))),
+            "publish_checklist_path": str(paths.get("publish_checklist", Path("_docs/PUBLISH_CHECKLIST.md"))),
+            "publish_handoff_path": str(paths.get("publish_handoff", Path("_docs/PUBLISH_HANDOFF.md"))),
             "status_path": str(paths["status"]),
             "prompt_file": str(prompt_file_path),
         }
+
+    def _ensure_design_artifacts(
+        self,
+        repository_path: Path,
+        paths: Dict[str, Path],
+        log_path: Path,
+    ) -> None:
+        """Ensure design token/handoff artifacts exist after design planning step."""
+
+        design_tokens = paths.get("design_tokens", self._docs_file(repository_path, "DESIGN_TOKENS.json"))
+        token_handoff = paths.get("token_handoff", self._docs_file(repository_path, "TOKEN_HANDOFF.md"))
+        if not design_tokens.exists():
+            fallback_tokens = {
+                "meta": {"source": "fallback", "note": "Designer output missing structured tokens"},
+                "theme": {
+                    "light": {"color": {"bg": "#FFFFFF", "fg": "#111827", "primary": "#2563EB"}},
+                    "dark": {"color": {"bg": "#0B1220", "fg": "#E5E7EB", "primary": "#60A5FA"}},
+                },
+                "typography": {"font_family": "Pretendard, sans-serif", "scale": {"body": "16px", "title": "24px"}},
+                "spacing": {"xs": 4, "sm": 8, "md": 12, "lg": 16, "xl": 24},
+            }
+            design_tokens.write_text(
+                json.dumps(fallback_tokens, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            self._append_actor_log(log_path, "ORCHESTRATOR", "Fallback DESIGN_TOKENS.json generated.")
+        if not token_handoff.exists():
+            token_handoff.write_text(
+                (
+                    "# TOKEN HANDOFF\n\n"
+                    "## 적용 대상\n"
+                    "- CSS 변수/테마 파일에 DESIGN_TOKENS.json 매핑\n"
+                    "- 라이트/다크 테마 토큰 동시 반영\n\n"
+                    "## 체크리스트\n"
+                    "- [ ] 색상 토큰 적용\n"
+                    "- [ ] 타이포 토큰 적용\n"
+                    "- [ ] 간격 토큰 적용\n"
+                    "- [ ] 접근성(명도/포커스) 확인\n"
+                ),
+                encoding="utf-8",
+            )
+            self._append_actor_log(log_path, "ORCHESTRATOR", "Fallback TOKEN_HANDOFF.md generated.")
+
+    def _ensure_publisher_artifacts(
+        self,
+        repository_path: Path,
+        paths: Dict[str, Path],
+        log_path: Path,
+    ) -> None:
+        """Ensure publisher checklist/handoff artifacts exist after publishing step."""
+
+        checklist = paths.get("publish_checklist", self._docs_file(repository_path, "PUBLISH_CHECKLIST.md"))
+        handoff = paths.get("publish_handoff", self._docs_file(repository_path, "PUBLISH_HANDOFF.md"))
+        if not checklist.exists():
+            checklist.write_text(
+                (
+                    "# PUBLISH CHECKLIST\n\n"
+                    "- [ ] DESIGN_SYSTEM.md 규칙 반영\n"
+                    "- [ ] DESIGN_TOKENS.json 토큰 연결\n"
+                    "- [ ] 라이트/다크 모드 동작\n"
+                    "- [ ] 반응형(모바일 우선) 확인\n"
+                    "- [ ] 접근성 기본 점검\n"
+                ),
+                encoding="utf-8",
+            )
+            self._append_actor_log(log_path, "ORCHESTRATOR", "Fallback PUBLISH_CHECKLIST.md generated.")
+        if not handoff.exists():
+            handoff.write_text(
+                (
+                    "# PUBLISH HANDOFF\n\n"
+                    "## 변경 요약\n"
+                    "- 퍼블리싱 단계에서 UI 구조/스타일을 반영했습니다.\n\n"
+                    "## 개발자 후속 작업\n"
+                    "- 기능 로직 연결\n"
+                    "- 테스트 케이스 보강\n"
+                    "- 리뷰 코멘트 반영\n\n"
+                    "## 확인 방법\n"
+                    "- 로컬 실행 후 라이트/다크, 모바일/데스크톱 화면 확인\n"
+                ),
+                encoding="utf-8",
+            )
+            self._append_actor_log(log_path, "ORCHESTRATOR", "Fallback PUBLISH_HANDOFF.md generated.")
+
+    def _is_design_system_locked(self, repository_path: Path, paths: Dict[str, Path]) -> bool:
+        """Return True when design-system decision is locked and reusable."""
+
+        payload = self._read_decisions_payload(repository_path)
+        node = payload.get("design_system", {})
+        if not isinstance(node, dict) or not bool(node.get("locked")):
+            return False
+        design_path = paths.get("design")
+        if not isinstance(design_path, Path) or not design_path.exists():
+            return False
+        spec_path = paths.get("spec")
+        plan_path = paths.get("plan")
+        current_spec_hash = self._sha256_file(spec_path) if isinstance(spec_path, Path) else ""
+        current_plan_hash = self._sha256_file(plan_path) if isinstance(plan_path, Path) else ""
+        locked_spec_hash = str(node.get("spec_sha256", "")).strip()
+        locked_plan_hash = str(node.get("plan_sha256", "")).strip()
+        if not locked_spec_hash or not locked_plan_hash:
+            return False
+        if current_spec_hash != locked_spec_hash or current_plan_hash != locked_plan_hash:
+            return False
+        return True
+
+    def _lock_design_system_decision(
+        self,
+        repository_path: Path,
+        paths: Dict[str, Path],
+        log_path: Path,
+    ) -> None:
+        """Persist decision lock so repeated rounds skip design-system regeneration."""
+
+        payload = self._read_decisions_payload(repository_path)
+        spec_path = paths.get("spec")
+        plan_path = paths.get("plan")
+        design_path = paths.get("design")
+        payload["design_system"] = {
+            "locked": True,
+            "locked_at": utc_now_iso(),
+            "spec_sha256": self._sha256_file(spec_path) if isinstance(spec_path, Path) else "",
+            "plan_sha256": self._sha256_file(plan_path) if isinstance(plan_path, Path) else "",
+            "design_path": str(design_path) if isinstance(design_path, Path) else "_docs/DESIGN_SYSTEM.md",
+            "note": "자동 잠금: 디자인 시스템이 1회 생성되면 반복 라운드에서 재생성을 스킵합니다.",
+        }
+        self._write_decisions_payload(repository_path, payload)
+        self._append_actor_log(
+            log_path,
+            "ORCHESTRATOR",
+            "Design-system decision locked at _docs/DECISIONS.json",
+        )
+
+    def _read_decisions_payload(self, repository_path: Path) -> Dict[str, Any]:
+        """Read decisions payload with safe fallback."""
+
+        path = self._docs_file(repository_path, "DECISIONS.json")
+        if not path.exists():
+            return {}
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(loaded, dict):
+            return {}
+        return loaded
+
+    def _write_decisions_payload(self, repository_path: Path, payload: Dict[str, Any]) -> None:
+        """Write decisions payload to _docs/DECISIONS.json."""
+
+        path = self._docs_file(repository_path, "DECISIONS.json")
+        path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    @staticmethod
+    def _sha256_file(path: Optional[Path]) -> str:
+        """Return SHA256 of one file, empty string when unavailable."""
+
+        if path is None or not path.exists() or not path.is_file():
+            return ""
+        try:
+            blob = path.read_bytes()
+        except OSError:
+            return ""
+        return hashlib.sha256(blob).hexdigest()
+
+    @staticmethod
+    def _docs_file(repository_path: Path, name: str) -> Path:
+        """Return a generated-document path under repository '_docs' directory."""
+
+        docs_dir = repository_path / "_docs"
+        docs_dir.mkdir(parents=True, exist_ok=True)
+        return docs_dir / name
 
     def _ref_exists(self, repository_path: Path, ref_name: str, log_path: Path) -> bool:
         """Return True when a git ref exists locally (e.g., origin/branch)."""
@@ -2563,8 +3869,7 @@ class Orchestrator:
             return "GIT"
         return "SYSTEM"
 
-    @staticmethod
-    def _append_actor_log(log_path: Path, actor: str, message: str) -> None:
+    def _append_actor_log(self, log_path: Path, actor: str, message: str) -> None:
         """Append one timestamped actor-tagged line to job log file."""
 
         normalized_actor = (actor or "ORCHESTRATOR").strip().upper()
@@ -2572,7 +3877,48 @@ class Orchestrator:
             tagged = message
         else:
             tagged = f"[ACTOR:{normalized_actor}] {message}"
-        Orchestrator._append_log(log_path, tagged)
+        debug_log_path = self._channel_log_path(log_path, "debug")
+        user_log_path = self._channel_log_path(log_path, "user")
+        self._append_log(debug_log_path, tagged)
+        if self._should_emit_user_log(message):
+            self._append_log(user_log_path, tagged)
+
+    @staticmethod
+    def _channel_log_path(log_path: Path, channel: str) -> Path:
+        """Return channel-specific log path from any legacy/debug/user path."""
+
+        normalized = "user" if channel == "user" else "debug"
+        parent = log_path.parent
+        if parent.name == normalized:
+            return log_path
+        if parent.name in {"debug", "user"}:
+            return parent.parent / normalized / log_path.name
+        return parent / normalized / log_path.name
+
+    @staticmethod
+    def _should_emit_user_log(message: str) -> bool:
+        """Return True when one log message should appear in user-friendly channel."""
+
+        msg = (message or "").strip()
+        if not msg:
+            return False
+        if msg.startswith("[RUN] ") or msg.startswith("[STDOUT]") or msg.startswith("[STDERR]"):
+            return False
+        if msg.startswith("[STAGE] "):
+            return True
+        if msg.startswith("Attempt "):
+            return True
+        if msg.startswith("Starting job ") or msg.startswith("Job finished"):
+            return True
+        if msg.startswith("[DONE] "):
+            return True
+        if msg.startswith("Wrote ") or "snapshot saved" in msg.lower():
+            return True
+        if "failed" in msg.lower() or "error" in msg.lower():
+            return True
+        if msg.startswith("Entering fix/test retry loop") or msg.startswith("[FIX_LOOP]"):
+            return True
+        return False
 
     def _is_escalation_enabled(self) -> bool:
         """Read escalation toggle from .env at runtime (fallback to boot setting)."""
@@ -2618,6 +3964,16 @@ class Orchestrator:
         if track == "ultra":
             return True
         return "[초장기]" in title or "[ultra]" in title
+
+    @staticmethod
+    def _is_ultra10_track(job: JobRecord) -> bool:
+        """Return True when 10-hour ultra-long autonomous round mode is enabled."""
+
+        track = (job.track or "").strip().lower()
+        title = (job.issue_title or "").strip().lower()
+        if track == "ultra10":
+            return True
+        return "[초초장기]" in title or "[ultra10]" in title
 
     def _template_for_profile(self, base_template: str) -> str:
         """Return profile-specific template when fallback profile is active."""

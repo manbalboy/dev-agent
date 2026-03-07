@@ -76,7 +76,7 @@ async def receive_github_issue_webhook(
     issue_url = str(issue.get("html_url", ""))
     labels = issue.get("labels") or []
     app_code = _extract_prefixed_label(labels, "app:", default="default")
-    track = _normalize_track(_extract_prefixed_label(labels, "track:", default="new"))
+    track = _normalize_track(_extract_prefixed_label(labels, "track:", default="enhance"))
     title_track = _detect_title_track(issue_title)
     if title_track:
         track = title_track
@@ -93,7 +93,7 @@ async def receive_github_issue_webhook(
 
     now = utc_now_iso()
     job_id = str(uuid.uuid4())
-    branch_name = f"agenthub/{app_code}/issue-{issue_number}-{job_id[:8]}"
+    branch_name = _build_branch_name(app_code, issue_number, track, job_id)
     log_file = f"{app_code}--{job_id}.log"
 
     job = JobRecord(
@@ -187,4 +187,18 @@ def _normalize_track(value: str) -> str:
         return "long"
     if lowered in {"new", "enhance", "bug"}:
         return lowered
-    return "new"
+    return "enhance"
+
+
+def _build_branch_name(app_code: str, issue_number: int, track: str, job_id: str) -> str:
+    """Build branch name for one job.
+
+    Long-horizon tracks intentionally reuse stable issue branches so follow-up
+    runs continue from previous commits.
+    """
+
+    if track in {"long", "ultra"}:
+        return f"agenthub/{app_code}/issue-{issue_number}"
+    if track == "enhance":
+        return f"agenthub/{app_code}/issue-{issue_number}-enhance"
+    return f"agenthub/{app_code}/issue-{issue_number}-{job_id[:8]}"

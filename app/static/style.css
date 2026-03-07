@@ -320,6 +320,56 @@ code {
   gap: 8px;
 }
 
+.assistant-messages {
+  margin-top: 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px;
+  background: var(--surface-soft);
+  max-height: 460px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.assistant-message {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px 10px;
+  background: var(--surface);
+}
+
+.assistant-message header {
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+
+.assistant-message pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: "JetBrains Mono", "Fira Code", "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.assistant-message.role-user {
+  border-left: 4px solid #3b82f6;
+}
+
+.assistant-message.role-assistant {
+  border-left: 4px solid #16a34a;
+}
+
+.assistant-form {
+  margin-top: 10px;
+  display: grid;
+  gap: 8px;
+}
+
 .field-grid {
   display: grid;
   grid-template-columns: 180px 1fr;
@@ -704,6 +754,18 @@ tbody tr:hover {
   font-size: 18px;
 }
 
+.detail-tabs {
+  margin-top: 10px;
+}
+
+.detail-tab-panel {
+  display: none;
+}
+
+.detail-tab-panel.active {
+  display: block;
+}
+
 .terminal-wrap {
   margin-top: 10px;
   border: 1px solid #2f2f2f;
@@ -1014,6 +1076,78 @@ tbody tr:hover {
   padding: 6px 8px;
   font-size: 11px;
   color: #8f8f8f;
+}
+
+.task-log-board {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 700px;
+  overflow: auto;
+}
+
+.task-log-card {
+  border: 1px solid #262626;
+  border-radius: 10px;
+  background: #090909;
+  padding: 10px;
+}
+
+.task-log-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.task-log-title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.task-log-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-bottom: 8px;
+}
+
+.task-log-line {
+  border: 1px solid #232323;
+  border-left: 4px solid #3a3a3a;
+  border-radius: 8px;
+  background: #0e0e0e;
+  padding: 7px 8px;
+}
+
+.task-log-line-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.task-log-line-body {
+  margin: 0;
+  color: #d6ffd2;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: "JetBrains Mono", "Fira Code", "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+[data-theme="light"] .task-log-card {
+  border-color: #1f1f1f;
+  background: #060606;
+}
+
+[data-theme="light"] .task-log-line {
+  border-color: #1f1f1f;
+  background: #0a0a0a;
 }
 
 [data-theme="light"] .terminal-wrap {

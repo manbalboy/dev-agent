@@ -44,6 +44,12 @@
           </span>
           <span>설정</span>
         </button>
+        <button type="button" class="menu-tab" data-tab="assistant">
+          <span class="tab-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" focusable="false"><path d="M12 2a7 7 0 0 0-7 7v3.2c0 .53-.21 1.04-.59 1.41L3 15v2h4l1 3h8l1-3h4v-2l-1.41-1.39A2 2 0 0 1 19 12.2V9a7 7 0 0 0-7-7zm0 2a5 5 0 0 1 5 5v3.2c0 1.06.42 2.08 1.17 2.83l.24.23V15h-2.2l-1 3H8.79l-1-3H5.6v.23l.23-.23A4 4 0 0 0 7 12.2V9a5 5 0 0 1 5-5zm-2 6h4v2h-4v-2zm0 3h4v2h-4v-2z"/></svg>
+          </span>
+          <span>AI 도우미</span>
+        </button>
       </nav>
 
       <section id="panel-jobs" class="tab-panel active">
@@ -71,7 +77,7 @@
             {% for job in jobs %}
             <tr>
               <td><a href="/jobs/{{ job.job_id }}">{{ job.job_id[:8] }}</a></td>
-              <td><code>{{ job.app_code or "default" }}</code> / <code>{{ job.track or "new" }}</code></td>
+              <td><code>{{ job.app_code or "default" }}</code> / <code>{{ job.track or "enhance" }}</code></td>
               <td><span class="badge status-{{ job.status }}">{{ job.status }}</span></td>
               <td>{{ job.stage }}</td>
               <td><a href="{{ job.issue_url }}" target="_blank" rel="noreferrer">#{{ job.issue_number }}</a></td>
@@ -111,6 +117,12 @@
             </span>
             <span>에이전트</span>
           </button>
+          <button type="button" class="settings-tab" data-settings-tab="roles">
+            <span class="tab-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" focusable="false"><path d="M12 2l3 6 6 .9-4.5 4.4 1 6.2L12 17l-5.5 2.5 1-6.2L3 8.9 9 8l3-6zm0 3.3L10.7 8l-3 .5 2.2 2.2-.5 3.2L12 12.6l2.6 1.3-.5-3.2 2.2-2.2-3-.5L12 5.3z"/></svg>
+            </span>
+            <span>역할 관리</span>
+          </button>
         </nav>
 
         <section class="quick-panel settings-section active" data-settings-section="issue">
@@ -130,11 +142,17 @@
 
             <label for="issue-track">작업 유형</label>
             <select id="issue-track" name="track">
+              <option value="enhance" selected>enhance</option>
               <option value="new">new</option>
-              <option value="enhance">enhance</option>
               <option value="bug">bug</option>
               <option value="long">long</option>
               <option value="ultra">ultra</option>
+              <option value="ultra10">ultra10</option>
+            </select>
+
+            <label for="issue-role-preset">역할 프리셋</label>
+            <select id="issue-role-preset" name="role_preset_id">
+              <option value="">(선택 안 함)</option>
             </select>
 
             <label for="issue-title">제목</label>
@@ -262,6 +280,8 @@
                 <pre id="preview-coder"></pre>
                 <p class="hint">Reviewer 미리보기</p>
                 <pre id="preview-reviewer"></pre>
+                <p class="hint">Copilot 미리보기</p>
+                <pre id="preview-copilot"></pre>
                 <p class="hint">Escalation 미리보기</p>
                 <pre id="preview-escalation"></pre>
               </div>
@@ -276,6 +296,9 @@
 
               <label for="tpl-reviewer">Reviewer</label>
               <textarea id="tpl-reviewer" rows="3" maxlength="4000" placeholder="예: gemini review ..."></textarea>
+
+              <label for="tpl-copilot">Copilot</label>
+              <textarea id="tpl-copilot" rows="3" maxlength="4000" placeholder="예: gh copilot -p &quot;$(cat {prompt_file})&quot;"></textarea>
 
               <label for="tpl-escalation">Escalation</label>
               <textarea id="tpl-escalation" rows="3" maxlength="4000" placeholder="실패 시 실행할 보조 템플릿 명령"></textarea>
@@ -294,6 +317,96 @@
             </div>
             <div id="agent-cli-check-result" class="cli-check-box hint">확인 전</div>
             <div id="agent-model-check-result" class="cli-check-box hint">확인 전</div>
+          </form>
+        </section>
+
+        <section class="quick-panel settings-section" data-settings-section="roles">
+          <div class="quick-panel-head">
+            <div>
+              <h2>역할/프리셋 관리 (MVP)</h2>
+              <p class="hint">역할 정의와 역할 조합 프리셋을 관리하고 이슈 등록에서 선택합니다.</p>
+            </div>
+          </div>
+
+          <form id="role-config-form" class="issue-form">
+            <label for="role-code">역할 코드</label>
+            <input id="role-code" type="text" maxlength="40" placeholder="예: coder" />
+
+            <label for="role-name">역할 이름</label>
+            <input id="role-name" type="text" maxlength="80" placeholder="예: 코더" />
+
+            <label for="role-cli">CLI</label>
+            <input id="role-cli" type="text" maxlength="40" placeholder="예: codex, gemini, claude, gh, bash" />
+
+            <label for="role-template-key">템플릿 키</label>
+            <input id="role-template-key" type="text" maxlength="80" placeholder="예: coder, reviewer, copilot" />
+
+            <label for="role-inputs">입력</label>
+            <input id="role-inputs" type="text" maxlength="400" placeholder="예: SPEC/PLAN" />
+
+            <label for="role-outputs">출력</label>
+            <input id="role-outputs" type="text" maxlength="400" placeholder="예: 코드 변경" />
+
+            <label for="role-objective">목표</label>
+            <textarea id="role-objective" rows="2" maxlength="400"></textarea>
+
+            <label for="role-checklist">체크리스트</label>
+            <textarea id="role-checklist" rows="3" maxlength="1000"></textarea>
+
+            <label class="toggle-row" for="role-enabled">
+              <input id="role-enabled" type="checkbox" checked />
+              <span>활성화</span>
+            </label>
+
+            <div class="issue-form-actions">
+              <button type="submit" id="role-config-submit" class="action-button">역할 저장</button>
+              <p id="role-config-result" class="hint"></p>
+            </div>
+          </form>
+
+          <div id="role-list-box" class="cli-check-box hint">역할 목록 불러오는 중...</div>
+
+          <hr />
+
+          <form id="role-preset-form" class="issue-form">
+            <label for="preset-id">프리셋 ID</label>
+            <input id="preset-id" type="text" maxlength="64" placeholder="예: default-dev" />
+
+            <label for="preset-name">프리셋 이름</label>
+            <input id="preset-name" type="text" maxlength="120" placeholder="예: 기본 개발" />
+
+            <label for="preset-description">설명</label>
+            <input id="preset-description" type="text" maxlength="500" />
+
+            <label for="preset-role-codes">역할 코드(쉼표 구분)</label>
+            <input id="preset-role-codes" type="text" placeholder="예: architect,coder,tester,reviewer" />
+
+            <div class="issue-form-actions">
+              <button type="submit" id="role-preset-submit" class="action-button">프리셋 저장</button>
+              <p id="role-preset-result" class="hint"></p>
+            </div>
+          </form>
+
+          <div id="role-preset-list-box" class="cli-check-box hint">프리셋 목록 불러오는 중...</div>
+        </section>
+      </section>
+
+      <section id="panel-assistant" class="tab-panel">
+        <section class="quick-panel">
+          <div class="quick-panel-head">
+            <div>
+              <h2>시스템 도우미 AI (Codex)</h2>
+              <p class="hint">현재 레포 기준으로 질문하고 답변을 받을 수 있습니다.</p>
+            </div>
+          </div>
+          <div id="assistant-messages" class="assistant-messages"></div>
+          <form id="assistant-form" class="assistant-form">
+            <label for="assistant-input">메시지</label>
+            <textarea id="assistant-input" rows="4" maxlength="8000" placeholder="예: 지금 실패 원인 빠르게 요약해줘"></textarea>
+            <div class="issue-form-actions">
+              <button type="submit" id="assistant-submit" class="action-button">Codex에게 보내기</button>
+              <p id="assistant-status" class="hint"></p>
+            </div>
           </form>
         </section>
       </section>
@@ -385,7 +498,7 @@
               ? `<a href="${esc(job.pr_url)}" target="_blank" rel="noreferrer">PR</a>`
               : "-";
             const appCode = job.app_code || "default";
-            const track = job.track || "new";
+            const track = job.track || "enhance";
             return `
             <tr>
               <td><a href="/jobs/${esc(job.job_id)}">${esc(String(job.job_id).slice(0, 8))}</a></td>
@@ -417,6 +530,50 @@
         if (!node) return;
         node.textContent = message;
         node.classList.toggle("text-error", isError);
+      }
+
+      function setRoleConfigResult(message, isError = false) {
+        const node = document.getElementById("role-config-result");
+        if (!node) return;
+        node.textContent = message;
+        node.classList.toggle("text-error", isError);
+      }
+
+      function setRolePresetResult(message, isError = false) {
+        const node = document.getElementById("role-preset-result");
+        if (!node) return;
+        node.textContent = message;
+        node.classList.toggle("text-error", isError);
+      }
+
+      let assistantMessages = [
+        {
+          role: "assistant",
+          content: "안녕하세요. AgentHub 시스템 도우미 Codex입니다. 필요한 작업/오류를 질문해주세요.",
+        },
+      ];
+
+      function setAssistantStatus(message, isError = false) {
+        const node = document.getElementById("assistant-status");
+        if (!node) return;
+        node.textContent = message;
+        node.classList.toggle("text-error", isError);
+      }
+
+      function renderAssistantMessages() {
+        const box = document.getElementById("assistant-messages");
+        if (!box) return;
+        box.innerHTML = assistantMessages
+          .map((item) => {
+            const role = item.role === "user" ? "user" : "assistant";
+            const label = role === "user" ? "사용자" : "Codex";
+            return `<article class="assistant-message role-${role}">
+              <header>${esc(label)}</header>
+              <pre>${esc(item.content || "")}</pre>
+            </article>`;
+          })
+          .join("");
+        box.scrollTop = box.scrollHeight;
       }
 
       function renderAppOptions(apps) {
@@ -469,6 +626,63 @@
         </div>`;
       }
 
+      function renderRolePresetOptions(presets) {
+        const select = document.getElementById("issue-role-preset");
+        if (!select) return;
+        const prev = select.value;
+        const options = (presets || [])
+          .map((item) => `<option value="${esc(item.preset_id)}">${esc(item.name)} (${esc(item.preset_id)})</option>`)
+          .join("");
+        select.innerHTML = `<option value="">(선택 안 함)</option>${options}`;
+        if ((presets || []).some((item) => item.preset_id === prev)) {
+          select.value = prev;
+        }
+      }
+
+      function renderRoleList(roles) {
+        const box = document.getElementById("role-list-box");
+        if (!box) return;
+        if (!roles || roles.length === 0) {
+          box.textContent = "등록된 역할 없음";
+          return;
+        }
+        const rows = roles
+          .map((item) => `<tr>
+            <td><code>${esc(item.code)}</code></td>
+            <td>${esc(item.name)}</td>
+            <td>${esc(item.cli || "-")}</td>
+            <td><code>${esc(item.template_key || "-")}</code></td>
+            <td>${item.enabled ? "on" : "off"}</td>
+            <td><button type="button" class="action-button role-delete" data-role-code="${esc(item.code)}">삭제</button></td>
+          </tr>`)
+          .join("");
+        box.innerHTML = `<div class="app-table-wrap"><table class="app-table">
+          <thead><tr><th>코드</th><th>이름</th><th>CLI</th><th>템플릿</th><th>활성</th><th>삭제</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table></div>`;
+      }
+
+      function renderRolePresetList(presets) {
+        const box = document.getElementById("role-preset-list-box");
+        if (!box) return;
+        if (!presets || presets.length === 0) {
+          box.textContent = "등록된 프리셋 없음";
+          return;
+        }
+        const rows = presets
+          .map((item) => `<tr>
+            <td><code>${esc(item.preset_id)}</code></td>
+            <td>${esc(item.name)}</td>
+            <td>${esc(item.role_codes?.join(", ") || "-")}</td>
+            <td><button type="button" class="action-button preset-delete" data-preset-id="${esc(item.preset_id)}">삭제</button></td>
+          </tr>`)
+          .join("");
+        box.innerHTML = `<div class="app-table-wrap"><table class="app-table">
+          <thead><tr><th>ID</th><th>이름</th><th>역할 코드</th><th>삭제</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table></div>`;
+      }
+
       async function loadApps() {
         try {
           const response = await fetch("/api/apps", { cache: "no-store" });
@@ -479,6 +693,21 @@
           renderAppList(apps);
         } catch {
           setAppConfigResult("앱 목록을 불러오지 못했습니다.", true);
+        }
+      }
+
+      async function loadRoles() {
+        try {
+          const response = await fetch("/api/roles", { cache: "no-store" });
+          if (!response.ok) return;
+          const payload = await response.json();
+          const roles = payload.roles || [];
+          const presets = payload.presets || [];
+          renderRoleList(roles);
+          renderRolePresetList(presets);
+          renderRolePresetOptions(presets);
+        } catch {
+          setRoleConfigResult("역할 목록을 불러오지 못했습니다.", true);
         }
       }
 
@@ -592,9 +821,10 @@
         const planner = buildRoleCommand(fields.plannerAgent, "planner", fields);
         const coder = buildRoleCommand(fields.coderAgent, "coder", fields);
         const reviewer = buildRoleCommand(fields.reviewerAgent, "reviewer", fields);
+        const copilot = `gh copilot -p \"$(cat {prompt_file})\"`;
         const escalationBase = buildRoleCommand(fields.escalationAgent, "escalation", fields);
         const escalation = `${escalationBase} > ESCALATION.md`;
-        return { planner, coder, reviewer, escalation };
+        return { planner, coder, reviewer, copilot, escalation };
       }
 
       function renderEasyPreview() {
@@ -603,6 +833,7 @@
         document.getElementById("preview-planner").textContent = commands.planner;
         document.getElementById("preview-coder").textContent = commands.coder;
         document.getElementById("preview-reviewer").textContent = commands.reviewer;
+        document.getElementById("preview-copilot").textContent = commands.copilot;
         document.getElementById("preview-escalation").textContent = commands.escalation;
         return commands;
       }
@@ -654,6 +885,7 @@
           event.preventDefault();
           const appCode = document.getElementById("issue-app-code").value;
           const track = document.getElementById("issue-track").value;
+          const rolePresetId = document.getElementById("issue-role-preset").value;
           const title = document.getElementById("issue-title").value.trim();
           const body = document.getElementById("issue-body").value.trim();
           if (!title) {
@@ -668,7 +900,7 @@
             const response = await fetch("/api/issues/register", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ title, body, app_code: appCode, track }),
+              body: JSON.stringify({ title, body, app_code: appCode, track, role_preset_id: rolePresetId }),
             });
             const payload = await response.json();
             if (!response.ok) {
@@ -760,18 +992,168 @@
         });
       }
 
+      function bindRoleConfigForm() {
+        const form = document.getElementById("role-config-form");
+        const submit = document.getElementById("role-config-submit");
+        const list = document.getElementById("role-list-box");
+        if (!form || !submit || !list) return;
+
+        list.addEventListener("click", async (event) => {
+          const target = event.target;
+          if (!(target instanceof Element)) return;
+          const button = target.closest(".role-delete");
+          if (!(button instanceof HTMLButtonElement)) return;
+          const code = button.getAttribute("data-role-code") || "";
+          if (!code) return;
+          button.setAttribute("disabled", "disabled");
+          try {
+            const response = await fetch(`/api/roles/${encodeURIComponent(code)}`, { method: "DELETE" });
+            const payload = await response.json();
+            if (!response.ok) {
+              setRoleConfigResult(payload.detail || "역할 삭제 실패", true);
+              return;
+            }
+            setRoleConfigResult(`삭제 완료: ${code}`);
+            renderRoleList(payload.roles || []);
+            renderRolePresetList(payload.presets || []);
+            renderRolePresetOptions(payload.presets || []);
+          } catch {
+            setRoleConfigResult("네트워크 오류로 역할 삭제 실패", true);
+          } finally {
+            button.removeAttribute("disabled");
+          }
+        });
+
+        form.addEventListener("submit", async (event) => {
+          event.preventDefault();
+          const payload = {
+            code: document.getElementById("role-code").value.trim(),
+            name: document.getElementById("role-name").value.trim(),
+            cli: document.getElementById("role-cli").value.trim(),
+            template_key: document.getElementById("role-template-key").value.trim(),
+            inputs: document.getElementById("role-inputs").value.trim(),
+            outputs: document.getElementById("role-outputs").value.trim(),
+            objective: document.getElementById("role-objective").value.trim(),
+            checklist: document.getElementById("role-checklist").value.trim(),
+            enabled: document.getElementById("role-enabled").checked,
+          };
+          if (!payload.code || !payload.name) {
+            setRoleConfigResult("역할 코드/이름은 필수입니다.", true);
+            return;
+          }
+          submit.disabled = true;
+          setRoleConfigResult("저장 중...");
+          try {
+            const response = await fetch("/api/roles", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload),
+            });
+            const result = await response.json();
+            if (!response.ok) {
+              setRoleConfigResult(result.detail || "역할 저장 실패", true);
+              return;
+            }
+            setRoleConfigResult(`저장 완료: ${payload.code}`);
+            renderRoleList(result.roles || []);
+            renderRolePresetList(result.presets || []);
+            renderRolePresetOptions(result.presets || []);
+          } catch {
+            setRoleConfigResult("네트워크 오류로 역할 저장 실패", true);
+          } finally {
+            submit.disabled = false;
+          }
+        });
+      }
+
+      function bindRolePresetForm() {
+        const form = document.getElementById("role-preset-form");
+        const submit = document.getElementById("role-preset-submit");
+        const list = document.getElementById("role-preset-list-box");
+        if (!form || !submit || !list) return;
+
+        list.addEventListener("click", async (event) => {
+          const target = event.target;
+          if (!(target instanceof Element)) return;
+          const button = target.closest(".preset-delete");
+          if (!(button instanceof HTMLButtonElement)) return;
+          const presetId = button.getAttribute("data-preset-id") || "";
+          if (!presetId) return;
+          button.setAttribute("disabled", "disabled");
+          try {
+            const response = await fetch(`/api/role-presets/${encodeURIComponent(presetId)}`, { method: "DELETE" });
+            const payload = await response.json();
+            if (!response.ok) {
+              setRolePresetResult(payload.detail || "프리셋 삭제 실패", true);
+              return;
+            }
+            setRolePresetResult(`삭제 완료: ${presetId}`);
+            renderRoleList(payload.roles || []);
+            renderRolePresetList(payload.presets || []);
+            renderRolePresetOptions(payload.presets || []);
+          } catch {
+            setRolePresetResult("네트워크 오류로 프리셋 삭제 실패", true);
+          } finally {
+            button.removeAttribute("disabled");
+          }
+        });
+
+        form.addEventListener("submit", async (event) => {
+          event.preventDefault();
+          const presetId = document.getElementById("preset-id").value.trim();
+          const name = document.getElementById("preset-name").value.trim();
+          const description = document.getElementById("preset-description").value.trim();
+          const roleCodesRaw = document.getElementById("preset-role-codes").value.trim();
+          const roleCodes = roleCodesRaw
+            ? roleCodesRaw.split(",").map((item) => item.trim()).filter(Boolean)
+            : [];
+          if (!presetId || !name) {
+            setRolePresetResult("프리셋 ID/이름은 필수입니다.", true);
+            return;
+          }
+          submit.disabled = true;
+          setRolePresetResult("저장 중...");
+          try {
+            const response = await fetch("/api/role-presets", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                preset_id: presetId,
+                name,
+                description,
+                role_codes: roleCodes,
+              }),
+            });
+            const payload = await response.json();
+            if (!response.ok) {
+              setRolePresetResult(payload.detail || "프리셋 저장 실패", true);
+              return;
+            }
+            setRolePresetResult(`저장 완료: ${presetId}`);
+            renderRoleList(payload.roles || []);
+            renderRolePresetList(payload.presets || []);
+            renderRolePresetOptions(payload.presets || []);
+          } catch {
+            setRolePresetResult("네트워크 오류로 프리셋 저장 실패", true);
+          } finally {
+            submit.disabled = false;
+          }
+        });
+      }
+
       function setMainTab(tabName) {
         document.querySelectorAll(".menu-tab").forEach((button) => {
           button.classList.toggle("active", button.dataset.tab === tabName);
         });
         document.getElementById("panel-jobs").classList.toggle("active", tabName === "jobs");
         document.getElementById("panel-settings").classList.toggle("active", tabName === "settings");
+        document.getElementById("panel-assistant").classList.toggle("active", tabName === "assistant");
         localStorage.setItem("agenthub-main-tab", tabName);
       }
 
       function bindMainTabs() {
         const saved = localStorage.getItem("agenthub-main-tab");
-        const initial = saved === "settings" ? "settings" : "jobs";
+        const initial = (saved === "settings" || saved === "assistant") ? saved : "jobs";
         setMainTab(initial);
 
         document.querySelectorAll(".menu-tab").forEach((button) => {
@@ -802,6 +1184,56 @@
         });
       }
 
+      function bindAssistantForm() {
+        const form = document.getElementById("assistant-form");
+        const input = document.getElementById("assistant-input");
+        const submit = document.getElementById("assistant-submit");
+        if (!form || !input || !submit) return;
+
+        form.addEventListener("submit", async (event) => {
+          event.preventDefault();
+          const text = input.value.trim();
+          if (!text) {
+            setAssistantStatus("메시지를 입력해주세요.", true);
+            return;
+          }
+
+          assistantMessages.push({ role: "user", content: text });
+          renderAssistantMessages();
+          input.value = "";
+          submit.disabled = true;
+          setAssistantStatus("Codex 응답 생성 중...");
+
+          try {
+            const response = await fetch("/api/assistant/codex-chat", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                message: text,
+                history: assistantMessages.slice(0, -1),
+              }),
+            });
+            const payload = await response.json();
+            if (!response.ok) {
+              const errorText = payload.detail || "응답 생성 실패";
+              assistantMessages.push({ role: "assistant", content: `오류: ${errorText}` });
+              setAssistantStatus("실패", true);
+              renderAssistantMessages();
+              return;
+            }
+            assistantMessages.push({ role: "assistant", content: payload.assistant || "" });
+            setAssistantStatus("완료");
+            renderAssistantMessages();
+          } catch {
+            assistantMessages.push({ role: "assistant", content: "네트워크 오류로 응답을 가져오지 못했습니다." });
+            setAssistantStatus("네트워크 오류", true);
+            renderAssistantMessages();
+          } finally {
+            submit.disabled = false;
+          }
+        });
+      }
+
       async function loadAgentConfig() {
         try {
           const response = await fetch("/api/agents/config", { cache: "no-store" });
@@ -810,6 +1242,7 @@
           document.getElementById("tpl-planner").value = payload.planner || "";
           document.getElementById("tpl-coder").value = payload.coder || "";
           document.getElementById("tpl-reviewer").value = payload.reviewer || "";
+          document.getElementById("tpl-copilot").value = payload.copilot || "";
           document.getElementById("tpl-escalation").value = payload.escalation || "";
           document.getElementById("enable-escalation").checked = Boolean(payload.enable_escalation);
           renderEasyPreview();
@@ -895,6 +1328,7 @@
           let planner = document.getElementById("tpl-planner").value.trim();
           let coder = document.getElementById("tpl-coder").value.trim();
           let reviewer = document.getElementById("tpl-reviewer").value.trim();
+          let copilot = document.getElementById("tpl-copilot").value.trim();
           let escalation = document.getElementById("tpl-escalation").value.trim();
           if (currentAgentMode() === "easy") {
             const fields = readEasyFields();
@@ -906,10 +1340,12 @@
             planner = generated.planner;
             coder = generated.coder;
             reviewer = generated.reviewer;
+            copilot = generated.copilot;
             escalation = generated.escalation;
             document.getElementById("tpl-planner").value = planner;
             document.getElementById("tpl-coder").value = coder;
             document.getElementById("tpl-reviewer").value = reviewer;
+            document.getElementById("tpl-copilot").value = copilot;
             document.getElementById("tpl-escalation").value = escalation;
           }
           const enableEscalation = document.getElementById("enable-escalation").checked;
@@ -932,6 +1368,7 @@
                 planner,
                 coder,
                 reviewer,
+                copilot,
                 escalation,
                 enable_escalation: enableEscalation,
               }),
@@ -967,11 +1404,16 @@
       bindSettingsTabs();
       bindIssueForm();
       bindAppConfigForm();
+      bindRoleConfigForm();
+      bindRolePresetForm();
       bindAgentModeTabs();
       bindAgentConfigForm();
+      bindAssistantForm();
       hydrateRenderedTimes();
       applySafeTemplateToEasyFields();
+      renderAssistantMessages();
       loadApps();
+      loadRoles();
       loadAgentConfig();
       refreshJobs();
       setInterval(refreshJobs, 3000);

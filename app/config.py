@@ -41,6 +41,8 @@ class AppSettings:
     api_port: int
     store_backend: str
     sqlite_file: Path
+    cors_allow_all: bool = True
+    cors_origins: str = "*"
     docker_preview_enabled: bool = True
     docker_preview_host: str = "ssh.manbalboy.com"
     docker_preview_port_start: int = 7000
@@ -149,6 +151,11 @@ class AppSettings:
                 f"Current value: {store_backend}"
             )
         raw_sqlite_file = os.getenv("AGENTHUB_SQLITE_FILE", str(Path(raw_data_dir) / "agenthub.db"))
+        cors_allow_all = (
+            os.getenv("AGENTHUB_CORS_ALLOW_ALL", "true").strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
+        cors_origins = os.getenv("AGENTHUB_CORS_ORIGINS", "*").strip() or "*"
 
         settings = cls(
             webhook_secret=webhook_secret,
@@ -172,6 +179,8 @@ class AppSettings:
             api_port=api_port,
             store_backend=store_backend,
             sqlite_file=Path(raw_sqlite_file).resolve(),
+            cors_allow_all=cors_allow_all,
+            cors_origins=cors_origins,
             docker_preview_enabled=docker_preview_enabled,
             docker_preview_host=docker_preview_host,
             docker_preview_port_start=docker_preview_port_start,
@@ -190,6 +199,8 @@ class AppSettings:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
+        self.logs_debug_dir.mkdir(parents=True, exist_ok=True)
+        self.logs_user_dir.mkdir(parents=True, exist_ok=True)
 
     @property
     def jobs_file(self) -> Path:
@@ -208,6 +219,18 @@ class AppSettings:
         """Directory where per-job log files are stored."""
 
         return self.data_dir / "logs"
+
+    @property
+    def logs_debug_dir(self) -> Path:
+        """Directory where per-job debug log files are stored."""
+
+        return self.logs_dir / "debug"
+
+    @property
+    def logs_user_dir(self) -> Path:
+        """Directory where per-job user-friendly log files are stored."""
+
+        return self.logs_dir / "user"
 
     def repository_workspace_path(
         self,

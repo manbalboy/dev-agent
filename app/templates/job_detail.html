@@ -39,7 +39,7 @@
         <dt>상태</dt><dd id="job-status">{{ job.status }}</dd>
         <dt>단계</dt><dd id="job-stage">{{ job.stage }}</dd>
         <dt>앱</dt><dd id="job-app">{{ job.app_code or "default" }}</dd>
-        <dt>트랙</dt><dd id="job-track">{{ job.track or "new" }}</dd>
+        <dt>트랙</dt><dd id="job-track">{{ job.track or "enhance" }}</dd>
         <dt>시도 횟수</dt><dd id="job-attempt">{{ job.attempt }} / {{ job.max_attempts }}</dd>
         <dt>저장소</dt><dd id="job-repo">{{ job.repository }}</dd>
         <dt>이슈</dt><dd id="job-issue"><a href="{{ job.issue_url }}" target="_blank" rel="noreferrer">#{{ job.issue_number }} - {{ job.issue_title }}</a></dd>
@@ -61,19 +61,28 @@
 
       <section class="panel">
         <div class="panel-head">
-          <h2>실시간 터미널 로그</h2>
+          <h2>로그 뷰</h2>
           <p id="terminal-updated" class="hint">마지막 갱신: -</p>
         </div>
-        <div id="failure-summary" class="failure-summary"></div>
-        <div class="terminal-wrap">
-          <div class="terminal-topbar">
-            <span class="terminal-dot red"></span>
-            <span class="terminal-dot yellow"></span>
-            <span class="terminal-dot green"></span>
-            <span class="terminal-title">agenthub / {{ job.log_file }}</span>
-          </div>
-          <div id="terminal-log" class="terminal-log">로그를 불러오는 중...</div>
+        <div class="sub-tabs detail-tabs">
+          <button type="button" class="sub-tab active" data-detail-tab="user">사용자 로그</button>
+          <button type="button" class="sub-tab" data-detail-tab="debug">시스템 디버그</button>
         </div>
+        <section id="detail-tab-user" class="detail-tab-panel active">
+          <div id="user-log-board" class="task-log-board">사용자 로그를 준비 중...</div>
+        </section>
+        <section id="detail-tab-debug" class="detail-tab-panel">
+          <div id="failure-summary" class="failure-summary"></div>
+          <div class="terminal-wrap">
+            <div class="terminal-topbar">
+              <span class="terminal-dot red"></span>
+              <span class="terminal-dot yellow"></span>
+              <span class="terminal-dot green"></span>
+              <span class="terminal-title">agenthub / {{ job.log_file }}</span>
+            </div>
+            <div id="terminal-log" class="terminal-log">로그를 불러오는 중...</div>
+          </div>
+        </section>
       </section>
 
       <section class="panel">
@@ -90,9 +99,13 @@
     <script>
       const JOB_ID = "{{ job.job_id }}";
       const LOG_FILE = "{{ job.log_file }}";
-      let lastLogText = "";
-      let firstLogLoaded = false;
+      let lastDebugLogText = "";
+      let lastUserLogText = "";
+      let firstDebugLogLoaded = false;
+      let firstUserLogLoaded = false;
       let stageSnapshotMap = new Map();
+      let debugEntriesCache = [];
+      let workspaceMdFilesCache = [];
 
       function esc(value) {
         return String(value ?? "")
@@ -167,7 +180,7 @@
         document.getElementById("job-status").textContent = job.status;
         document.getElementById("job-stage").textContent = job.stage;
         document.getElementById("job-app").textContent = job.app_code || "default";
-        document.getElementById("job-track").textContent = job.track || "new";
+        document.getElementById("job-track").textContent = job.track || "enhance";
         document.getElementById("job-attempt").textContent = `${job.attempt} / ${job.max_attempts}`;
         document.getElementById("job-repo").textContent = job.repository;
         document.getElementById("job-branch").textContent = job.branch_name;
@@ -354,10 +367,35 @@
         return map[value] || value || "단계 미상";
       }
 
+      function stageOwnerActor(stageCode) {
+        const code = String(stageCode || "").trim().toLowerCase();
+        const map = {
+          read_issue: "SYSTEM_OWNER",
+          write_spec: "SYSTEM_OWNER",
+          plan_with_gemini: "PLANNER",
+          review_with_gemini: "REVIEWER",
+          design_with_codex: "DESIGNER",
+          implement_with_codex: "CODER",
+          fix_with_codex: "CODER",
+          summarize_code_changes: "COPILOT",
+          test_after_implement: "TESTER",
+          test_after_fix: "TESTER",
+          ux_e2e_review: "TESTER",
+          commit_implement: "GIT",
+          commit_fix: "GIT",
+          push_branch: "GIT",
+          create_pr: "GITHUB",
+          prepare_repo: "GIT",
+          finalize: "ORCHESTRATOR",
+        };
+        return map[code] || "ORCHESTRATOR";
+      }
+
       function actorDisplayName(actor) {
         const key = String(actor || "ORCHESTRATOR").toUpperCase();
         const map = {
-          ORCHESTRATOR: "오케스트레이터",
+          ORCHESTRATOR: "오케스트레이션",
+          SYSTEM_OWNER: "시스템 오너",
           CODER: "코더",
           PLANNER: "플래너",
           REVIEWER: "리뷰어",
@@ -728,6 +766,249 @@
         `;
       }
 
+      function detectGroupActor(group) {
+        const stageCode = String(group.stage || "").replace(/^stage:/, "");
+        const stageActor = stageOwnerActor(stageCode);
+        if (stageActor !== "ORCHESTRATOR") return stageActor;
+        const runEntry = (group.entries || []).find((entry) => String(entry.message || "").startsWith("[RUN] "));
+        if (runEntry && runEntry.actor) return runEntry.actor;
+        return "ORCHESTRATOR";
+      }
+
+      function summarizeGroupProgress(group) {
+        const entries = Array.isArray(group.entries) ? group.entries : [];
+        const done = entries.find((entry) => String(entry.message || "").startsWith("[DONE] "));
+        if (done) {
+          const matched = String(done.message || "").match(/exit_code=(\d+)/);
+          if (matched && Number(matched[1]) === 0) return "완료";
+          if (matched) return `실패(exit ${matched[1]})`;
+          return "완료";
+        }
+        const hasRun = entries.some((entry) => String(entry.message || "").startsWith("[RUN] "));
+        if (hasRun) return "진행중";
+        return "대기";
+      }
+
+      function chooseSummaryMdFiles(files) {
+        const picked = [];
+        const prefer = [
+          "CODE_CHANGE_SUMMARY.md",
+          "PLAN.md",
+          "REVIEW.md",
+          "UX_REVIEW.md",
+          "STATUS.md",
+          "SPEC.md",
+          "DESIGN_SYSTEM.md",
+        ];
+        const all = Array.isArray(files) ? files : [];
+        for (const name of prefer) {
+          const found = all.find((item) => String(item.path || "").trim() === name);
+          if (found) {
+            picked.push(found);
+          }
+          if (picked.length >= 2) break;
+        }
+        if (!picked.length && all.length) {
+          picked.push(all[0]);
+        }
+        return picked;
+      }
+
+      function shortMdPreview(content) {
+        const text = String(content || "").trim();
+        if (!text) return "(내용 없음)";
+        const lines = text.split("\n").slice(0, 6).join("\n").trim();
+        if (lines.length <= 280) return lines;
+        return `${lines.slice(0, 280)}...`;
+      }
+
+      function detectToolFromRunMessage(message) {
+        const raw = String(message || "");
+        if (!raw.startsWith("[RUN] ")) return "";
+        const command = raw.replace("[RUN] ", "").trim();
+        if (!command) return "";
+        const firstToken = command.split(/\s+/)[0] || "";
+        const lowered = command.toLowerCase();
+        if ((firstToken === "python3" || firstToken === "python") && lowered.includes("search_research_tool.py")) {
+          return "research_search";
+        }
+        if (firstToken === "node" && lowered.includes("gemini")) return "gemini";
+        if (lowered.includes("codex")) return "codex";
+        if (lowered.startsWith("gh ")) return "gh";
+        if (lowered.startsWith("git ")) return "git";
+        if (lowered.startsWith("docker ")) return "docker";
+        if (lowered.startsWith("curl ")) return "curl";
+        if (lowered.startsWith("npm ")) return "npm";
+        if (lowered.startsWith("pytest")) return "pytest";
+        return firstToken || "shell";
+      }
+
+      function renderUserLogBoard(groups) {
+        const board = document.getElementById("user-log-board");
+        if (!board) return;
+        if (!Array.isArray(groups) || groups.length === 0) {
+          board.innerHTML = `<p class="hint">표시할 사용자 로그가 아직 없습니다.</p>`;
+          return;
+        }
+        const roleMap = new Map();
+        for (const group of groups) {
+          const actor = detectGroupActor(group);
+          if (!roleMap.has(actor)) {
+            roleMap.set(actor, {
+              actor,
+              groups: [],
+              workflowStages: new Set(),
+              documents: new Map(),
+              tools: new Map(),
+              progress: { running: 0, done: 0, failed: 0, pending: 0 },
+            });
+          }
+          const bucket = roleMap.get(actor);
+          bucket.groups.push(group);
+          const stageCode = String(group.stage || "").replace(/^stage:/, "");
+          bucket.workflowStages.add(stageDisplayName(stageCode));
+          const progress = summarizeGroupProgress(group);
+          if (progress.startsWith("실패")) bucket.progress.failed += 1;
+          else if (progress === "완료") bucket.progress.done += 1;
+          else if (progress === "진행중") bucket.progress.running += 1;
+          else bucket.progress.pending += 1;
+
+          const snapshot = stageSnapshotMap.get(`${group.attempt}|${group.stage}`);
+          if (!snapshot) continue;
+
+          const mdFiles = Array.isArray(snapshot.md_files) ? snapshot.md_files : [];
+          for (const item of mdFiles) {
+            const name = String(item.path || "").trim();
+            const content = String(item.content || "");
+            if (!name) continue;
+            const key = `md:${name}`;
+            if (!bucket.documents.has(key)) {
+              bucket.documents.set(key, {
+                name,
+                content,
+                stage: stageDisplayName(stageCode),
+                attempt: String(group.attempt || "").replace(/^attempt:/, ""),
+                source: "md_snapshot",
+              });
+            }
+          }
+
+          const fileSnapshots = Array.isArray(snapshot.file_snapshots) ? snapshot.file_snapshots : [];
+          for (const item of fileSnapshots) {
+            const name = String(item.path || "").trim();
+            const content = String(item.content || "");
+            const binary = Boolean(item.binary);
+            if (!name || !content || binary) continue;
+            const key = `file:${name}`;
+            if (!bucket.documents.has(key)) {
+              bucket.documents.set(key, {
+                name,
+                content,
+                stage: stageDisplayName(stageCode),
+                attempt: String(group.attempt || "").replace(/^attempt:/, ""),
+                source: "file_snapshot",
+              });
+            }
+          }
+        }
+
+        for (const entry of debugEntriesCache || []) {
+          const actor = String(entry.actor || "ORCHESTRATOR");
+          const bucket = roleMap.get(actor);
+          if (!bucket) continue;
+          const tool = detectToolFromRunMessage(entry.message || "");
+          if (!tool) continue;
+          bucket.tools.set(tool, (bucket.tools.get(tool) || 0) + 1);
+        }
+
+        const workspaceDocs = Array.isArray(workspaceMdFilesCache) ? workspaceMdFilesCache : [];
+        const workspaceDocsHtml = workspaceDocs.length
+          ? workspaceDocs.map((doc, index) => {
+              const name = String(doc.name || "unknown.md");
+              const content = String(doc.content || "");
+              return `<details class="snapshot-file" ${index === 0 ? "open" : ""}>
+                <summary>${esc(name)}</summary>
+                <pre class="snapshot-content">${esc(content)}</pre>
+              </details>`;
+            }).join("")
+          : `<p class="snapshot-empty">워크스페이스 문서가 없습니다.</p>`;
+
+        const roleCards = Array.from(roleMap.values());
+        const roleCardsHtml = roleCards.map((role, index) => {
+          const workflow = Array.from(role.workflowStages.values());
+          const workflowHtml = workflow.length
+            ? `<ol class="failure-list">${workflow.map((stage) => `<li class="failure-item"><span class="failure-text">${esc(stage)}</span></li>`).join("")}</ol>`
+            : `<p class="snapshot-empty">워크플로우 단계 정보가 없습니다.</p>`;
+
+          const groupRows = role.groups
+            .map((group) => {
+              const stageCode = String(group.stage || "").replace(/^stage:/, "");
+              const stageLabel = stageDisplayName(stageCode);
+              const attemptLabel = String(group.attempt || "attempt:0").replace(/^attempt:/, "");
+              const progress = summarizeGroupProgress(group);
+              return `<li class="failure-item">
+                <span class="failure-type">${esc(progress)}</span>
+                <span class="failure-text">시도 ${esc(attemptLabel)} · ${esc(stageLabel)} · 로그 ${group.entries.length}줄</span>
+              </li>`;
+            })
+            .join("");
+
+          const docs = Array.from(role.documents.values());
+          const docsHtml = docs.length
+            ? docs.map((doc) => `<details class="snapshot-file" ${index === 0 ? "open" : ""}>
+                <summary>${esc(doc.name)} <span class="hint">(${esc(doc.stage)} · 시도 ${esc(doc.attempt)})</span></summary>
+                <pre class="snapshot-content">${esc(doc.content)}</pre>
+              </details>`).join("")
+            : `<p class="snapshot-empty">생성된 문서가 없습니다.</p>`;
+
+          const tools = Array.from(role.tools.entries()).sort((a, b) => b[1] - a[1]);
+          const toolsHtml = tools.length
+            ? `<ul class="failure-list">${tools.map(([name, count]) => `<li class="failure-item"><span class="failure-type">${esc(String(count))}회</span><span class="failure-text">${esc(name)}</span></li>`).join("")}</ul>`
+            : `<p class="snapshot-empty">기록된 도구 사용 정보가 없습니다.</p>`;
+
+          return `<article class="task-log-card user-log-card">
+            <header class="task-log-head">
+              <div class="task-log-title">
+                <strong>역할: ${esc(actorDisplayName(role.actor))}</strong>
+                <span class="hint">진행중 ${role.progress.running} · 완료 ${role.progress.done} · 실패 ${role.progress.failed}</span>
+              </div>
+            </header>
+            <details class="stage-snapshot">
+              <summary>도구 사용 현황</summary>
+              ${toolsHtml}
+            </details>
+            <details class="stage-snapshot" ${index === 0 ? "open" : ""}>
+              <summary>역할 워크플로우</summary>
+              ${workflowHtml}
+            </details>
+            <details class="stage-snapshot">
+              <summary>역할 단계 수행 로그</summary>
+              <ul class="failure-list">${groupRows || `<li class="failure-item"><span class="failure-text">기록 없음</span></li>`}</ul>
+            </details>
+            <section class="stage-snapshot">
+              <h4>생성 문서 전체 내용</h4>
+              ${docsHtml}
+            </section>
+          </article>`;
+        }).join("");
+
+        board.innerHTML = `
+          <article class="task-log-card user-log-card">
+            <header class="task-log-head">
+              <div class="task-log-title">
+                <strong>최신 생성 문서 전체</strong>
+                <span class="hint">워크스페이스 기준 (_docs 포함)</span>
+              </div>
+            </header>
+            <section class="stage-snapshot">
+              <h4>문서 전체 본문</h4>
+              ${workspaceDocsHtml}
+            </section>
+          </article>
+          ${roleCardsHtml}
+        `;
+      }
+
       function buildGroupedEntries(entriesNewestFirst) {
         const chronological = [...entriesNewestFirst].reverse();
         let currentAttempt = "attempt:0";
@@ -791,7 +1072,7 @@
         `;
       }
 
-      function renderTerminalLog(logText) {
+      function renderDebugLog(logText) {
         const terminal = document.getElementById("terminal-log");
         if (!terminal) return;
 
@@ -803,6 +1084,10 @@
         }
 
         const entries = parseLogEntries(logText).reverse();
+        debugEntriesCache = entries;
+        if (firstUserLogLoaded && lastUserLogText) {
+          renderUserLog(lastUserLogText);
+        }
         renderFailureSummary(entries);
         renderWorkflowInsights(entries);
         const groups = buildGroupedEntries(entries);
@@ -834,27 +1119,74 @@
         }
       }
 
-      async function refreshLog() {
-        try {
-          const url = `/logs/${encodeURIComponent(LOG_FILE)}?t=${Date.now()}`;
-          const response = await fetch(url, { cache: "no-store" });
-          if (response.status === 404) {
-            renderTerminalLog("[로그 파일이 아직 생성되지 않았습니다]");
-            return;
-          }
-          if (!response.ok) {
-            renderTerminalLog("[로그를 읽는 중 오류가 발생했습니다]");
-            return;
-          }
+      function renderUserLog(logText) {
+        if (!logText || !logText.trim()) {
+          renderUserLogBoard([]);
+          return;
+        }
+        const entries = parseLogEntries(logText).reverse();
+        const groups = buildGroupedEntries(entries);
+        renderUserLogBoard(groups);
+      }
 
-          const text = await response.text();
-          if (!firstLogLoaded || text !== lastLogText) {
-            lastLogText = text;
-            firstLogLoaded = true;
-            renderTerminalLog(text);
+      function bindDetailTabs() {
+        const tabs = Array.from(document.querySelectorAll("[data-detail-tab]"));
+        const panels = {
+          user: document.getElementById("detail-tab-user"),
+          debug: document.getElementById("detail-tab-debug"),
+        };
+        if (!tabs.length || !panels.user || !panels.debug) return;
+
+        const activate = (tabName) => {
+          tabs.forEach((button) => {
+            const isActive = button.getAttribute("data-detail-tab") === tabName;
+            button.classList.toggle("active", isActive);
+          });
+          Object.entries(panels).forEach(([name, node]) => {
+            node.classList.toggle("active", name === tabName);
+          });
+        };
+
+        tabs.forEach((button) => {
+          button.addEventListener("click", () => {
+            activate(button.getAttribute("data-detail-tab") || "user");
+          });
+        });
+      }
+
+      async function refreshLogs() {
+        try {
+          const ts = Date.now();
+          const [userRes, debugRes] = await Promise.all([
+            fetch(`/logs/${encodeURIComponent(LOG_FILE)}?channel=user&t=${ts}`, { cache: "no-store" }),
+            fetch(`/logs/${encodeURIComponent(LOG_FILE)}?channel=debug&t=${ts}`, { cache: "no-store" }),
+          ]);
+
+          if (userRes.status === 404) {
+            renderUserLog("[로그 파일이 아직 생성되지 않았습니다]");
+          } else if (userRes.ok) {
+            const userText = await userRes.text();
+            if (!firstUserLogLoaded || userText !== lastUserLogText) {
+              lastUserLogText = userText;
+              firstUserLogLoaded = true;
+              renderUserLog(userText);
+            }
+          }
+          if (debugRes.status === 404) {
+            renderDebugLog("[로그 파일이 아직 생성되지 않았습니다]");
+          } else if (debugRes.ok) {
+            const debugText = await debugRes.text();
+            if (!firstDebugLogLoaded || debugText !== lastDebugLogText) {
+              lastDebugLogText = debugText;
+              firstDebugLogLoaded = true;
+              renderDebugLog(debugText);
+            }
+          } else {
+            renderDebugLog("[로그를 읽는 중 오류가 발생했습니다]");
           }
         } catch {
-          renderTerminalLog("[네트워크 오류로 로그를 읽지 못했습니다]");
+          renderUserLog("[네트워크 오류로 로그를 읽지 못했습니다]");
+          renderDebugLog("[네트워크 오류로 로그를 읽지 못했습니다]");
         }
       }
 
@@ -865,6 +1197,10 @@
           const payload = await response.json();
           updateMeta(payload.job);
           stageSnapshotMap = buildStageSnapshotMap(payload.stage_md_snapshots || []);
+          workspaceMdFilesCache = Array.isArray(payload.md_files) ? payload.md_files : [];
+          if (firstUserLogLoaded && lastUserLogText) {
+            renderUserLog(lastUserLogText);
+          }
           const stopState = document.getElementById("stop-state");
           if (stopState) {
             if (payload.stop_requested) {
@@ -902,10 +1238,11 @@
       }
 
       async function refreshAll() {
-        await Promise.all([refreshJob(), refreshLog()]);
+        await Promise.all([refreshJob(), refreshLogs()]);
       }
 
       initThemeToggle();
+      bindDetailTabs();
       bindStopButton();
       hydrateRenderedTimes();
       refreshAll();

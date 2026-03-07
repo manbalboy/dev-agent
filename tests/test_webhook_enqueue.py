@@ -74,3 +74,53 @@ def test_ignore_disallowed_repository(app_components):
     assert response.json()["accepted"] is False
     assert response.json()["reason"] == "repository_not_allowed"
     assert store.queue_size() == 0
+
+
+def test_enqueue_long_track_uses_stable_issue_branch(app_components):
+    settings, store, app = app_components
+    client = TestClient(app)
+
+    payload = _issue_payload()
+    payload["issue"]["title"] = "[장기] Keep branch"
+    body = json.dumps(payload).encode("utf-8")
+    response = client.post(
+        "/webhooks/github",
+        data=body,
+        headers={
+            "X-GitHub-Event": "issues",
+            "X-Hub-Signature-256": _sign(settings.webhook_secret, body),
+            "Content-Type": "application/json",
+        },
+    )
+
+    assert response.status_code == 200
+    queued_id = response.json()["job_id"]
+    stored = store.get_job(queued_id)
+    assert stored is not None
+    assert stored.track == "long"
+    assert stored.branch_name == "agenthub/default/issue-77"
+
+
+def test_enqueue_ultra_track_uses_stable_issue_branch(app_components):
+    settings, store, app = app_components
+    client = TestClient(app)
+
+    payload = _issue_payload()
+    payload["issue"]["title"] = "[초장기] Keep branch"
+    body = json.dumps(payload).encode("utf-8")
+    response = client.post(
+        "/webhooks/github",
+        data=body,
+        headers={
+            "X-GitHub-Event": "issues",
+            "X-Hub-Signature-256": _sign(settings.webhook_secret, body),
+            "Content-Type": "application/json",
+        },
+    )
+
+    assert response.status_code == 200
+    queued_id = response.json()["job_id"]
+    stored = store.get_job(queued_id)
+    assert stored is not None
+    assert stored.track == "ultra"
+    assert stored.branch_name == "agenthub/default/issue-77"

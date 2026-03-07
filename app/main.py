@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -29,6 +30,22 @@ def create_app(
     app = FastAPI(title="AgentHub", version="0.1.0")
     app.state.settings = resolved_settings
     app.state.store = resolved_store
+    if resolved_settings.cors_allow_all:
+        allow_origins = ["*"]
+    else:
+        allow_origins = [
+            origin.strip()
+            for origin in resolved_settings.cors_origins.split(",")
+            if origin.strip()
+        ] or ["*"]
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=allow_origins,
+        allow_credentials=False if "*" in allow_origins else True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+        expose_headers=["*"],
+    )
 
     static_dir = Path(__file__).parent / "static"
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")

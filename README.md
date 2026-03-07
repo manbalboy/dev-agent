@@ -161,6 +161,31 @@ Worker는 아래 순서를 **항상 같은 방식**으로 실행합니다.
 
 성공 시 `done`, 실패 시 최대 3회 재시도 후 `failed` 처리합니다.
 
+## 6-1) Planner Graph MVP (확장형 플랜 루프)
+
+`plan_with_gemini` 단계는 기본적으로 아래 루프로 동작합니다.
+
+1. 초안 PLAN 작성
+2. 품질 평가(`PLAN_QUALITY.json`)
+3. 부족 섹션 보강 지시 후 재작성(최대 N회)
+4. 통과 시 다음 단계 진행, 미통과여도 non-blocking으로 진행
+
+플래너가 정보 부족을 감지하면 `TOOL_REQUEST`를 출력하고, 오케스트레이터가
+`research_search`를 실행한 뒤 결과(`SEARCH_CONTEXT.md`)를 주입해 같은 라운드를 재실행합니다.
+검색 API 실패 시에는 SPEC/README 기반 로컬 폴백 근거팩으로 계속 진행합니다.
+
+환경 변수:
+
+- `AGENTHUB_PLANNER_GRAPH_ENABLED=true|false`
+- `AGENTHUB_PLANNER_GRAPH_MAX_ROUNDS=1..5` (기본 3)
+- `AGENTHUB_HARD_GATE_MAX_ATTEMPTS=1..5` (기본 3)
+- `AGENTHUB_HARD_GATE_TIMEBOX_SECONDS=120..7200` (기본 1200)
+
+테스트 단계는 하드 게이트로 동작합니다.
+- 실패 시 제한된 횟수 안에서만 수정/재테스트를 수행
+- 같은 실패 시그니처 반복 시 즉시 중단
+- 타임박스 초과 시 중단 (무한 루프 방지)
+
 ## 7) 실패 처리 정책
 
 - 실패 원인은 로그 파일에 단계별로 남깁니다.
@@ -235,7 +260,69 @@ bash scripts/test_live_webhook.sh --issue 123 --timeout 600 --poll 2
 - `{repository}` / `{issue_number}` / `{branch_name}`
 - `{work_dir}`
 
-## 11) 초보자용 문제 해결
+## 11) AI 도우미/역할관리 사용법 (실무 순서)
+
+대시보드 기준으로 아래 순서대로 쓰면 됩니다.
+
+1. 설정 → `AI 템플릿`
+- `planner`, `coder`, `reviewer`, `copilot` 템플릿 저장
+
+2. 설정 → `역할 관리`
+- 역할별 `CLI`, `template_key`, 입력/출력 정의
+- 프리셋(역할 묶음) 생성 후 이슈 등록 시 선택
+
+3. 메인 → `AI 도우미`
+- 런 ID/에러 상황을 넣고 진단 요청
+- 권장 흐름: `분석 → 제안 명령 확인 → 승인 후 실행`
+
+4. Job 상세
+- `기존 로그` 탭: 원본 실행 로그
+- `작업별 로그 + MD` 탭: stage별 로그와 당시 md 스냅샷
+
+## 12) Copilot/Codex 사전 점검
+
+아래가 준비되지 않으면 AI 단계가 쉽게 실패합니다.
+
+```bash
+gh auth status
+gh copilot -h
+codex --version
+```
+
+`Codex 실행 실패: No such file or directory: 'codex'`가 뜨면:
+
+1. `codex` 설치 또는 PATH 등록
+2. 필요하면 `.env`에 절대경로 지정
+
+```bash
+AGENTHUB_CODEX_BIN=/usr/local/bin/codex
+```
+
+3. 서비스 재시작 후 재시도
+
+## 13) 서비스 모드 운영(systemd)
+
+환경마다 유닛명이 다를 수 있으므로 먼저 확인:
+
+```bash
+systemctl list-units --type=service --all | rg -i "agenthub|devflow"
+```
+
+예시 유닛:
+- `agenthub-api.service`
+- `agenthub-worker.service`
+- `agenthub-dashboard-next.service`
+- `devflow-agenthub-api.service`
+- `devflow-agenthub-web.service`
+
+재시작 예시:
+
+```bash
+sudo systemctl restart agenthub-api.service
+sudo systemctl restart agenthub-worker.service
+```
+
+## 14) 초보자용 문제 해결
 
 1. 웹훅이 401이면
 - Secret 불일치 가능성이 큽니다.
@@ -249,7 +336,12 @@ bash scripts/test_live_webhook.sh --issue 123 --timeout 600 --poll 2
 - 해당 CLI 로그인 상태 확인 (`gemini`, `codex`, 필요시 `claude`)
 - `config/ai_commands.json` 템플릿이 실제 CLI 옵션과 맞는지 확인
 
-## 12) 나중에 확장하기
+4. Copilot 단계가 실패하면
+- `gh auth status`에서 토큰 만료/권한 확인
+- `gh copilot -h` 동작 확인
+- 역할 관리에서 해당 역할의 `cli=copilot`, `template_key=copilot` 확인
+
+## 15) 나중에 확장하기
 
 - 저장소: 기본 `SQLiteJobStore`에서 Postgres 등으로 확장
 - 워커: 멀티 워커/분산 큐 도입

@@ -357,7 +357,7 @@ class SQLiteJobStore(JobStore):
                     started_at TEXT,
                     finished_at TEXT,
                     app_code TEXT NOT NULL DEFAULT 'default',
-                    track TEXT NOT NULL DEFAULT 'new'
+                    track TEXT NOT NULL DEFAULT 'enhance'
                 )
                 """
             )

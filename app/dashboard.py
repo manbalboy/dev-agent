@@ -6,11 +6,13 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
+import tempfile
 from typing import Any, Dict, List, Optional
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
@@ -35,9 +37,10 @@ _TIMESTAMPED_LINE_PATTERN = re.compile(r"^\[(?P<ts>[^\]]+)\]\s(?P<msg>.*)$")
 _ISSUE_URL_PATTERN = re.compile(r"https://github\.com/[^\s]+/issues/\d+")
 _ISSUE_NUMBER_PATTERN = re.compile(r"/issues/(?P<number>\d+)")
 _APP_CODE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
-_TRACK_CHOICES = {"new", "enhance", "bug", "long", "ultra"}
+_TRACK_CHOICES = {"new", "enhance", "bug", "long", "ultra", "ultra10"}
 _APPS_CONFIG_PATH = Path.cwd() / "config" / "apps.json"
 _WORKFLOWS_CONFIG_PATH = Path.cwd() / "config" / "workflows.json"
+_ROLES_CONFIG_PATH = Path.cwd() / "config" / "roles.json"
 
 
 class IssueRegistrationRequest(BaseModel):
@@ -46,7 +49,10 @@ class IssueRegistrationRequest(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     body: str = Field(default="", max_length=20000)
     app_code: str = Field(default="default", min_length=1, max_length=32)
-    track: str = Field(default="new", min_length=1, max_length=32)
+    track: str = Field(default="enhance", min_length=1, max_length=32)
+    keep_branch: bool = Field(default=True)
+    branch_name: str = Field(default="", max_length=200)
+    role_preset_id: str = Field(default="", max_length=64)
 
 
 class AppConfigRequest(BaseModel):
@@ -62,12 +68,36 @@ class AppWorkflowMappingRequest(BaseModel):
     workflow_id: str = Field(min_length=1, max_length=120)
 
 
+class RoleConfigRequest(BaseModel):
+    """Payload for one role definition."""
+
+    code: str = Field(min_length=1, max_length=40)
+    name: str = Field(min_length=1, max_length=80)
+    objective: str = Field(default="", max_length=400)
+    cli: str = Field(default="", max_length=40)
+    template_key: str = Field(default="", max_length=80)
+    inputs: str = Field(default="", max_length=400)
+    outputs: str = Field(default="", max_length=400)
+    checklist: str = Field(default="", max_length=1000)
+    enabled: bool = Field(default=True)
+
+
+class RolePresetRequest(BaseModel):
+    """Payload for one role-combination preset."""
+
+    preset_id: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=500)
+    role_codes: List[str] = Field(default_factory=list)
+
+
 class AgentTemplateConfigRequest(BaseModel):
     """Editable command templates for planner/coder/reviewer."""
 
     planner: str = Field(min_length=1, max_length=4000)
     coder: str = Field(min_length=1, max_length=4000)
     reviewer: str = Field(min_length=1, max_length=4000)
+    copilot: str = Field(default="", max_length=4000)
     escalation: str = Field(default="", max_length=4000)
     enable_escalation: bool = Field(default=False)
 
@@ -83,6 +113,13 @@ class WorkflowSaveRequest(BaseModel):
 
     workflow: Dict[str, Any]
     set_default: bool = Field(default=False)
+
+
+class AssistantChatRequest(BaseModel):
+    """Payload for dashboard assistant chat."""
+
+    message: str = Field(min_length=1, max_length=8000)
+    history: List[Dict[str, str]] = Field(default_factory=list)
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -299,6 +336,162 @@ def map_app_workflow(
     )
 
 
+@router.get("/api/roles", response_class=JSONResponse)
+def roles_api() -> JSONResponse:
+    """Return role definitions and role-combination presets."""
+
+    payload = _read_roles_payload(_ROLES_CONFIG_PATH)
+    return JSONResponse(payload)
+
+
+@router.post("/api/roles", response_class=JSONResponse)
+def upsert_role(payload: RoleConfigRequest) -> JSONResponse:
+    """Create or update one role definition."""
+
+    role_code = _normalize_role_code(payload.code)
+    if not role_code:
+        raise HTTPException(status_code=400, detail="역할 코드는 영문/숫자/-/_ 형식이어야 합니다.")
+
+    role = {
+        "code": role_code,
+        "name": payload.name.strip(),
+        "objective": payload.objective.strip(),
+        "cli": payload.cli.strip().lower(),
+        "template_key": payload.template_key.strip(),
+        "inputs": payload.inputs.strip(),
+        "outputs": payload.outputs.strip(),
+        "checklist": payload.checklist.strip(),
+        "enabled": bool(payload.enabled),
+    }
+    if not role["name"]:
+        raise HTTPException(status_code=400, detail="역할 이름은 필수입니다.")
+
+    data = _read_roles_payload(_ROLES_CONFIG_PATH)
+    roles = data.get("roles", [])
+    replaced = False
+    updated: List[Dict[str, Any]] = []
+    for item in roles:
+        if not isinstance(item, dict):
+            continue
+        code = _normalize_role_code(str(item.get("code", "")))
+        if not code:
+            continue
+        if code == role_code:
+            updated.append(role)
+            replaced = True
+            continue
+        copied = dict(item)
+        copied["code"] = code
+        updated.append(copied)
+
+    if not replaced:
+        updated.append(role)
+
+    updated.sort(key=lambda item: str(item.get("code", "")))
+    data["roles"] = updated
+    _write_roles_payload(_ROLES_CONFIG_PATH, data)
+    return JSONResponse({"saved": True, "roles": data["roles"], "presets": data.get("presets", [])})
+
+
+@router.delete("/api/roles/{role_code}", response_class=JSONResponse)
+def delete_role(role_code: str) -> JSONResponse:
+    """Delete one role and unlink it from presets."""
+
+    code = _normalize_role_code(role_code)
+    if not code:
+        raise HTTPException(status_code=400, detail="유효하지 않은 역할 코드입니다.")
+
+    data = _read_roles_payload(_ROLES_CONFIG_PATH)
+    roles = [item for item in data.get("roles", []) if _normalize_role_code(str(item.get("code", ""))) != code]
+    data["roles"] = roles
+
+    presets: List[Dict[str, Any]] = []
+    for preset in data.get("presets", []):
+        if not isinstance(preset, dict):
+            continue
+        copied = dict(preset)
+        role_codes = [rc for rc in copied.get("role_codes", []) if _normalize_role_code(str(rc)) != code]
+        copied["role_codes"] = role_codes
+        presets.append(copied)
+    data["presets"] = presets
+    _write_roles_payload(_ROLES_CONFIG_PATH, data)
+    return JSONResponse({"deleted": True, "roles": roles, "presets": presets})
+
+
+@router.post("/api/role-presets", response_class=JSONResponse)
+def upsert_role_preset(payload: RolePresetRequest) -> JSONResponse:
+    """Create or update one role-combination preset."""
+
+    preset_id = _normalize_role_code(payload.preset_id)
+    if not preset_id:
+        raise HTTPException(status_code=400, detail="프리셋 ID는 영문/숫자/-/_ 형식이어야 합니다.")
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="프리셋 이름은 필수입니다.")
+
+    data = _read_roles_payload(_ROLES_CONFIG_PATH)
+    known_roles = {
+        _normalize_role_code(str(item.get("code", "")))
+        for item in data.get("roles", [])
+        if isinstance(item, dict)
+    }
+    role_codes: List[str] = []
+    for raw in payload.role_codes:
+        code = _normalize_role_code(raw)
+        if code and code in known_roles and code not in role_codes:
+            role_codes.append(code)
+
+    preset = {
+        "preset_id": preset_id,
+        "name": name,
+        "description": payload.description.strip(),
+        "role_codes": role_codes,
+    }
+
+    replaced = False
+    updated: List[Dict[str, Any]] = []
+    for item in data.get("presets", []):
+        if not isinstance(item, dict):
+            continue
+        if _normalize_role_code(str(item.get("preset_id", ""))) == preset_id:
+            updated.append(preset)
+            replaced = True
+            continue
+        copied = dict(item)
+        copied["preset_id"] = _normalize_role_code(str(copied.get("preset_id", "")))
+        copied["role_codes"] = [
+            rc for rc in [
+                _normalize_role_code(str(value))
+                for value in copied.get("role_codes", [])
+            ] if rc
+        ]
+        updated.append(copied)
+    if not replaced:
+        updated.append(preset)
+    updated.sort(key=lambda item: str(item.get("preset_id", "")))
+
+    data["presets"] = updated
+    _write_roles_payload(_ROLES_CONFIG_PATH, data)
+    return JSONResponse({"saved": True, "roles": data.get("roles", []), "presets": updated})
+
+
+@router.delete("/api/role-presets/{preset_id}", response_class=JSONResponse)
+def delete_role_preset(preset_id: str) -> JSONResponse:
+    """Delete one role-combination preset."""
+
+    normalized = _normalize_role_code(preset_id)
+    if not normalized:
+        raise HTTPException(status_code=400, detail="유효하지 않은 프리셋 ID입니다.")
+    data = _read_roles_payload(_ROLES_CONFIG_PATH)
+    presets = [
+        item for item in data.get("presets", [])
+        if _normalize_role_code(str(item.get("preset_id", ""))) != normalized
+    ]
+    data["presets"] = presets
+    _write_roles_payload(_ROLES_CONFIG_PATH, data)
+    return JSONResponse({"deleted": True, "roles": data.get("roles", []), "presets": presets})
+
+
 @router.get("/api/workflows/schema", response_class=JSONResponse)
 def workflow_schema_api() -> JSONResponse:
     """Return workflow node/edge schema metadata for editor UI."""
@@ -375,6 +568,7 @@ def get_agents_config(
             "planner": templates.get("planner", ""),
             "coder": templates.get("coder", ""),
             "reviewer": templates.get("reviewer", ""),
+            "copilot": templates.get("copilot", ""),
             "escalation": templates.get("escalation", ""),
             "enable_escalation": _read_env_enable_escalation(Path.cwd() / ".env", settings.enable_escalation),
         }
@@ -392,6 +586,7 @@ def update_agents_config(
     current["planner"] = payload.planner.strip()
     current["coder"] = payload.coder.strip()
     current["reviewer"] = payload.reviewer.strip()
+    current["copilot"] = payload.copilot.strip()
     current["escalation"] = payload.escalation.strip()
     _write_command_templates(settings.command_config, current)
     _set_env_value(Path.cwd() / ".env", "AGENTHUB_ENABLE_ESCALATION", "true" if payload.enable_escalation else "false")
@@ -428,6 +623,162 @@ def check_agent_models(
     return JSONResponse(result)
 
 
+@router.post("/api/assistant/codex-chat", response_class=JSONResponse)
+def codex_assistant_chat(
+    payload: AssistantChatRequest,
+    settings: AppSettings = Depends(get_settings),
+    store: JobStore = Depends(get_store),
+) -> JSONResponse:
+    """Run one Codex CLI turn and return assistant text output."""
+
+    raw_message = payload.message.strip()
+    if not raw_message:
+        raise HTTPException(status_code=400, detail="메시지를 입력해주세요.")
+
+    history_lines: List[str] = []
+    for item in payload.history[-12:]:
+        role = str(item.get("role", "")).strip().lower()
+        content = str(item.get("content", "")).strip()
+        if role not in {"user", "assistant"} or not content:
+            continue
+        if role == "assistant":
+            history_lines.append(f"assistant: {content}")
+        else:
+            history_lines.append(f"user: {content}")
+
+    conversation_context = "\n".join(history_lines)
+    runtime_context = _build_agent_observability_context(store, settings)
+    full_prompt = (
+        "You are 'AgentHub Ops Copilot', a diagnosis chatbot for AI-agent workflows.\n"
+        "Primary mission: analyze what happened in agent runs, identify likely root causes, "
+        "and provide practical next actions.\n"
+        "Rules:\n"
+        "- Reply in concise Korean unless user asks another language.\n"
+        "- Use evidence from provided runtime context first.\n"
+        "- Clearly separate: 사실(관측), 추정(가설), 조치(실행 단계).\n"
+        "- If evidence is insufficient, say exactly what is missing.\n"
+        "- Do not fabricate logs, job ids, or command outputs.\n\n"
+        f"Runtime context:\n{runtime_context}\n\n"
+        f"Conversation so far:\n{conversation_context or '(none)'}\n\n"
+        f"Latest user message:\n{raw_message}\n"
+    )
+    try:
+        templates = _read_command_templates(settings.command_config)
+    except HTTPException:
+        templates = {}
+    codex_prefix = _resolve_codex_command_prefix(templates)
+
+    output_file = tempfile.NamedTemporaryFile(
+        prefix="agenthub-codex-chat-",
+        suffix=".txt",
+        delete=False,
+    )
+    output_path = Path(output_file.name)
+    output_file.close()
+
+    command = [
+        *codex_prefix,
+        "exec",
+        "-C",
+        str(Path.cwd()),
+        "--skip-git-repo-check",
+        "--color",
+        "never",
+        "--output-last-message",
+        str(output_path),
+        full_prompt,
+    ]
+
+    try:
+        process = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+    except subprocess.TimeoutExpired as error:
+        try:
+            output_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise HTTPException(
+            status_code=504,
+            detail="Codex 응답이 시간 제한(180초)을 초과했습니다.",
+        ) from error
+    except OSError as error:
+        try:
+            output_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise HTTPException(
+            status_code=500,
+            detail=f"Codex 실행 실패: {error}",
+        ) from error
+
+    output_text = ""
+    if output_path.exists():
+        try:
+            output_text = output_path.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            output_text = ""
+    try:
+        output_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+    if process.returncode != 0:
+        raw_error = (process.stderr or process.stdout or "").strip()
+        lowered_error = raw_error.lower()
+        stderr_preview = raw_error[:1000]
+        if (
+            "operation not permitted" in lowered_error
+            or "error sending request for url" in lowered_error
+            or "failed to connect to websocket" in lowered_error
+            or "stream disconnected before completion" in lowered_error
+            or "chatgpt.com/backend-api/codex/responses" in lowered_error
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Codex 외부 연결이 차단되어 응답을 생성하지 못했습니다. "
+                    "서버에서 chatgpt.com 으로의 아웃바운드 네트워크를 허용하거나, "
+                    "로컬 OSS 모델(ollama/lmstudio) 구성을 사용해주세요. "
+                    f"원본 오류: {stderr_preview or '(no output)'}"
+                ),
+            )
+        if "not logged in" in lowered_error or "login" in lowered_error:
+            raise HTTPException(
+                status_code=401,
+                detail=(
+                    "Codex 로그인 상태가 유효하지 않습니다. "
+                    "서버 계정에서 `codex login` 후 다시 시도해주세요. "
+                    f"원본 오류: {stderr_preview or '(no output)'}"
+                ),
+            )
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Codex 응답 생성 실패. "
+                f"exit={process.returncode}, output={stderr_preview or '(no output)'}"
+            ),
+        )
+
+    if not output_text:
+        output_text = (process.stdout or "").strip()
+    if not output_text:
+        output_text = "응답이 비어 있습니다. 다시 시도해주세요."
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "assistant": output_text,
+            "model": "codex-cli",
+            "cwd": str(Path.cwd()),
+            "data_dir": str(settings.data_dir),
+        }
+    )
+
+
 @router.post("/api/issues/register", response_class=JSONResponse)
 def register_issue_and_trigger(
     payload: IssueRegistrationRequest,
@@ -443,6 +794,9 @@ def register_issue_and_trigger(
     body = payload.body.strip() or "AgentHub 대시보드에서 등록된 작업 이슈입니다."
     app_code = _normalize_app_code(payload.app_code) or "default"
     track = _normalize_track(payload.track)
+    keep_branch = bool(payload.keep_branch)
+    requested_branch_name = (payload.branch_name or "").strip()
+    role_preset_id = _normalize_role_code(payload.role_preset_id)
     title_track = _detect_title_track(title)
     if title_track:
         track = title_track
@@ -454,6 +808,27 @@ def register_issue_and_trigger(
         raise HTTPException(
             status_code=400,
             detail=f"등록되지 않은 앱 코드입니다: {app_code}. 설정 메뉴에서 먼저 등록해주세요.",
+        )
+
+    if role_preset_id:
+        roles_payload = _read_roles_payload(_ROLES_CONFIG_PATH)
+        presets = roles_payload.get("presets", [])
+        matched = next(
+            (
+                item
+                for item in presets
+                if _normalize_role_code(str(item.get("preset_id", ""))) == role_preset_id
+            ),
+            None,
+        )
+        if matched is None:
+            raise HTTPException(status_code=400, detail=f"등록되지 않은 역할 프리셋입니다: {role_preset_id}")
+        role_codes = matched.get("role_codes", [])
+        body = (
+            f"{body}\n\n"
+            "## ROLE PRESET\n"
+            f"- preset_id: `{role_preset_id}`\n"
+            f"- roles: {', '.join(f'`{code}`' for code in role_codes) if role_codes else '(none)'}\n"
         )
 
     create_stdout = _run_gh_command(
@@ -518,7 +893,14 @@ def register_issue_and_trigger(
         stage=JobStage.QUEUED.value,
         attempt=0,
         max_attempts=settings.max_retries,
-        branch_name=_build_branch_name(app_code, issue_number, job_id),
+        branch_name=_build_branch_name(
+            app_code,
+            issue_number,
+            track,
+            job_id,
+            keep_branch=keep_branch,
+            requested_branch_name=requested_branch_name,
+        ),
         pr_url=None,
         error_message=None,
         log_file=_build_log_file_name(app_code, job_id),
@@ -543,6 +925,8 @@ def register_issue_and_trigger(
             "issue_url": issue_url,
             "app_code": app_code,
             "track": track,
+            "keep_branch": keep_branch,
+            "role_preset_id": role_preset_id,
         }
     )
 
@@ -581,7 +965,7 @@ def job_detail_api(
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
 
-    log_path = (settings.logs_dir / job.log_file).resolve()
+    log_path = _resolve_channel_log_path(settings, job.log_file, channel="debug")
     events = _parse_log_events(log_path) if log_path.exists() else []
     
     workspace_path = settings.repository_workspace_path(job.repository, job.app_code)
@@ -606,15 +990,23 @@ def _read_agent_md_files(workspace_path: Path) -> List[Dict[str, str]]:
         return []
 
     md_files = []
-    # 에이전트가 생성한 주요 MD 파일들을 우선적으로 찾고, 그 외 MD 파일들도 포함한다.
-    # 보통 프로젝트 루트에 생성됨.
-    for path in workspace_path.glob("*.md"):
+    md_paths: List[Path] = []
+    md_paths.extend(sorted(workspace_path.glob("*.md")))
+    docs_dir = workspace_path / "_docs"
+    if docs_dir.exists():
+        md_paths.extend(sorted(docs_dir.glob("*.md")))
+    seen = set()
+    for path in md_paths:
         if not path.is_file():
             continue
+        rel = str(path.relative_to(workspace_path))
+        if rel in seen:
+            continue
+        seen.add(rel)
         try:
             content = path.read_text(encoding="utf-8", errors="replace")
             md_files.append({
-                "name": path.name,
+                "name": rel,
                 "content": content
             })
         except Exception:
@@ -651,7 +1043,9 @@ def _read_stage_md_snapshots(data_dir: Path, job_id: str) -> List[Dict[str, Any]
                 "stage": str(payload.get("stage", "")),
                 "created_at": str(payload.get("created_at", "")),
                 "changed_files": payload.get("changed_files", []),
+                "changed_files_all": payload.get("changed_files_all", []),
                 "md_files": payload.get("md_files", []),
+                "file_snapshots": payload.get("file_snapshots", []),
             }
         )
 
@@ -682,6 +1076,7 @@ def request_job_stop(
 @router.get("/logs/{file_name}", response_class=PlainTextResponse)
 def job_log_file(
     file_name: str,
+    channel: str = Query(default="debug"),
     settings: AppSettings = Depends(get_settings),
 ) -> PlainTextResponse:
     """Serve one log file as plain text.
@@ -695,19 +1090,32 @@ def job_log_file(
             detail="Invalid log file name. Use only letters, numbers, dot, dash, underscore.",
         )
 
-    logs_dir = settings.logs_dir.resolve()
-    target_path = (logs_dir / file_name).resolve()
-
-    # Why this check exists:
-    # Even after regex validation we still validate final resolved path to defend
-    # against symlink tricks or future relaxed naming rules.
-    if logs_dir not in target_path.parents and target_path != logs_dir:
-        raise HTTPException(status_code=400, detail="Invalid log file path.")
+    target_path = _resolve_channel_log_path(settings, file_name, channel=channel)
 
     if not target_path.exists():
         raise HTTPException(status_code=404, detail=f"Log file not found: {file_name}")
 
     return PlainTextResponse(target_path.read_text(encoding="utf-8"))
+
+
+def _resolve_channel_log_path(settings: AppSettings, file_name: str, channel: str = "debug") -> Path:
+    """Resolve one job log path by channel with legacy fallback for debug."""
+
+    normalized_channel = (channel or "debug").strip().lower()
+    if normalized_channel not in {"debug", "user"}:
+        normalized_channel = "debug"
+    logs_dir = settings.logs_dir.resolve()
+    channel_path = (logs_dir / normalized_channel / file_name).resolve()
+    legacy_path = (logs_dir / file_name).resolve()
+
+    if logs_dir not in channel_path.parents and channel_path != logs_dir:
+        raise HTTPException(status_code=400, detail="Invalid log file path.")
+    if logs_dir not in legacy_path.parents and legacy_path != logs_dir:
+        raise HTTPException(status_code=400, detail="Invalid legacy log file path.")
+
+    if normalized_channel == "debug" and not channel_path.exists() and legacy_path.exists():
+        return legacy_path
+    return channel_path
 
 
 def _parse_log_events(log_path: Path) -> List[Dict[str, str]]:
@@ -1008,6 +1416,69 @@ def _build_cli_probe_candidates(cli_name: str, templates: Dict[str, str]) -> Lis
     return deduped
 
 
+def _resolve_codex_command_prefix(templates: Dict[str, str]) -> List[str]:
+    """Resolve executable prefix for Codex command under systemd/non-login shells."""
+
+    candidates: List[List[str]] = []
+    env_codex = os.getenv("AGENTHUB_CODEX_BIN", "").strip()
+    if env_codex:
+        candidates.append([env_codex])
+
+    template_text = " ".join(templates.values())
+    absolute_paths = re.findall(r"(/[^ \t\"']+)", template_text)
+    node_paths = [path for path in absolute_paths if path.endswith("/node")]
+    codex_paths = [
+        path for path in absolute_paths if path.endswith("/codex") or path.endswith("/codex.js")
+    ]
+    for path in codex_paths:
+        if path.endswith(".js") and node_paths:
+            candidates.append([node_paths[0], path])
+        candidates.append([path])
+
+    for known in [
+        "/root/.nvm/versions/node/v24.14.0/bin/codex",
+        "/usr/local/bin/codex",
+        "/usr/bin/codex",
+    ]:
+        candidates.append([known])
+
+    which_codex = shutil.which("codex")
+    if which_codex:
+        candidates.append([which_codex])
+
+    deduped: List[List[str]] = []
+    seen: set[str] = set()
+    for item in candidates:
+        key = " ".join(item)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+
+    for prefix in deduped:
+        try:
+            probe = subprocess.run(
+                [*prefix, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=8,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if probe.returncode == 0:
+            return prefix
+
+    tried = ", ".join(" ".join(item) for item in deduped) or "(none)"
+    raise HTTPException(
+        status_code=500,
+        detail=(
+            "Codex 실행 파일을 찾지 못했습니다. "
+            "환경변수 `AGENTHUB_CODEX_BIN`에 Codex 절대경로를 설정해주세요. "
+            f"탐색 경로: {tried}"
+        ),
+    )
+
+
 def _run_probe(args: List[str]) -> Dict[str, Any]:
     """Run one probe command and capture compact output."""
 
@@ -1024,6 +1495,69 @@ def _run_probe(args: List[str]) -> Dict[str, Any]:
     output = (process.stdout or process.stderr or "").strip().splitlines()
     first_line = output[0] if output else ""
     return {"ok": process.returncode == 0, "output": first_line[:240]}
+
+
+def _build_agent_observability_context(store: JobStore, settings: AppSettings) -> str:
+    """Build compact runtime context for diagnosis-focused assistant responses."""
+
+    jobs = store.list_jobs()
+    if not jobs:
+        return "No jobs found."
+
+    sorted_jobs = sorted(jobs, key=lambda item: item.updated_at or "", reverse=True)
+    queued = sum(1 for item in jobs if item.status == JobStatus.QUEUED.value)
+    running = sum(1 for item in jobs if item.status == JobStatus.RUNNING.value)
+    done = sum(1 for item in jobs if item.status == JobStatus.DONE.value)
+    failed = sum(1 for item in jobs if item.status == JobStatus.FAILED.value)
+
+    lines: List[str] = []
+    lines.append(f"Job summary: total={len(jobs)}, queued={queued}, running={running}, done={done}, failed={failed}")
+
+    recent_running = [item for item in sorted_jobs if item.status == JobStatus.RUNNING.value][:3]
+    if recent_running:
+        lines.append("Running jobs:")
+        for item in recent_running:
+            lines.append(
+                f"- {item.job_id} app={item.app_code} track={item.track} "
+                f"stage={item.stage} attempt={item.attempt}/{item.max_attempts} updated={item.updated_at}"
+            )
+
+    recent_failed = [item for item in sorted_jobs if item.status == JobStatus.FAILED.value][:3]
+    if recent_failed:
+        lines.append("Recent failed jobs:")
+        for item in recent_failed:
+            lines.append(
+                f"- {item.job_id} app={item.app_code} track={item.track} "
+                f"stage={item.stage} error={item.error_message or '-'} updated={item.updated_at}"
+            )
+            log_path = _resolve_channel_log_path(settings, item.log_file, channel="debug")
+            if log_path.exists():
+                lines.append(f"  log_tail({item.log_file}):")
+                lines.extend([f"    {row}" for row in _tail_text_lines(log_path, max_lines=16)])
+
+    recent_any = sorted_jobs[:3]
+    lines.append("Recent jobs:")
+    for item in recent_any:
+        lines.append(
+            f"- {item.job_id} status={item.status} stage={item.stage} "
+            f"app={item.app_code} track={item.track} updated={item.updated_at}"
+        )
+
+    text = "\n".join(lines).strip()
+    if len(text) > 14000:
+        return text[:14000] + "\n...(truncated)"
+    return text
+
+
+def _tail_text_lines(path: Path, max_lines: int = 16) -> List[str]:
+    """Read the tail lines of a UTF-8 text file safely."""
+
+    try:
+        rows = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ["(failed to read log file)"]
+    tail = rows[-max_lines:] if len(rows) > max_lines else rows
+    return [row[:300] for row in tail]
 
 
 def _infer_cli_model(cli_name: str, templates: Dict[str, str]) -> Dict[str, Any]:
@@ -1243,19 +1777,23 @@ def _normalize_track(value: str) -> str:
     """Normalize track value to one of known choices."""
 
     lowered = (value or "").strip().lower()
+    if lowered in {"ultra10", "ultra-10", "초초장기"}:
+        lowered = "ultra10"
     if lowered in {"ultra", "초장기"}:
         lowered = "ultra"
     if lowered in {"longterm", "long-term", "장기"}:
         lowered = "long"
     if lowered in _TRACK_CHOICES:
         return lowered
-    return "new"
+    return "enhance"
 
 
 def _detect_title_track(title: str) -> str:
     """Detect explicit title marker track override."""
 
     lowered = (title or "").strip().lower()
+    if "[초초장기]" in lowered or "[ultra10]" in lowered:
+        return "ultra10"
     if "[초장기]" in lowered or "[ultra]" in lowered:
         return "ultra"
     if "[장기]" in lowered or "[long]" in lowered:
@@ -1263,10 +1801,41 @@ def _detect_title_track(title: str) -> str:
     return ""
 
 
-def _build_branch_name(app_code: str, issue_number: int, job_id: str) -> str:
-    """Build namespaced branch name for one job."""
+def _build_branch_name(
+    app_code: str,
+    issue_number: int,
+    track: str,
+    job_id: str,
+    keep_branch: bool = True,
+    requested_branch_name: str = "",
+) -> str:
+    """Build namespaced branch name for one job.
 
+    `enhance` track reuses one stable issue branch so iterative jobs can build
+    on previous commits.
+    """
+
+    custom = _sanitize_branch_name(requested_branch_name)
+    if custom:
+        return custom
+    if keep_branch:
+        return f"agenthub/{app_code}/issue-{issue_number}"
+    if track == "enhance":
+        return f"agenthub/{app_code}/issue-{issue_number}-enhance"
     return f"agenthub/{app_code}/issue-{issue_number}-{job_id[:8]}"
+
+
+def _sanitize_branch_name(value: str) -> str:
+    """Best-effort sanitize for user-provided branch names."""
+
+    name = (value or "").strip()
+    if not name:
+        return ""
+    allowed = re.sub(r"[^a-zA-Z0-9/_-]", "-", name)
+    collapsed = re.sub(r"/{2,}", "/", allowed).strip("/ ")
+    if not collapsed:
+        return ""
+    return collapsed[:120]
 
 
 def _build_log_file_name(app_code: str, job_id: str) -> str:
@@ -1360,6 +1929,155 @@ def _write_registered_apps(path: Path, apps: List[Dict[str, str]]) -> None:
     ordered = [dedup[key] for key in sorted(dedup)]
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(ordered, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _normalize_role_code(value: str) -> str:
+    """Normalize one role/preset identifier."""
+
+    lowered = (value or "").strip().lower()
+    filtered = "".join(ch for ch in lowered if ch.isalnum() or ch in {"-", "_"})
+    return filtered[:40]
+
+
+def _default_roles_payload() -> Dict[str, Any]:
+    """Default role catalog for role-management MVP."""
+
+    role_rows = [
+        ("ai-helper", "AI 도우미", "codex", "", "요청/문제 정리", "분석/조치안"),
+        ("coder", "코더", "codex", "coder", "SPEC/PLAN", "코드 변경"),
+        ("designer", "디자이너", "codex", "coder", "요구사항", "UI/디자인 산출물"),
+        ("tester", "테스터", "bash", "", "코드 상태", "테스트 결과"),
+        ("reviewer", "리뷰어", "gemini", "reviewer", "코드 diff", "리뷰 리포트"),
+        ("copywriter", "카피라이터", "claude", "escalation", "요구사항", "문구"),
+        ("consultant", "컨설턴트", "gemini", "planner", "현황", "전략 제안"),
+        ("qa", "QA", "bash", "", "테스트 계획", "품질 점검"),
+        ("architect", "플래너", "gemini", "planner", "요구사항", "실행 계획"),
+        ("devops-sre", "인프라·운영 엔지니어", "bash", "", "서비스 상태", "운영 조치"),
+        ("security", "보안 엔지니어", "bash", "", "코드/설정", "보안 점검"),
+        ("db-engineer", "데이터베이스 엔지니어", "bash", "", "스키마", "DB 변경안"),
+        ("performance", "성능 최적화 엔지니어", "bash", "", "프로파일링", "개선안"),
+        ("accessibility", "접근성 전문가", "bash", "", "UI", "접근성 점검"),
+        ("test-automation", "테스트 자동화 엔지니어", "bash", "", "테스트 전략", "자동화 코드"),
+        ("release-manager", "배포 관리자", "bash", "", "릴리즈 계획", "배포 체크"),
+        ("incident-analyst", "장애 원인 분석가", "codex", "", "로그/지표", "RCA"),
+        ("orchestration-helper", "오케스트레이션 도우미", "copilot", "copilot", "워크플로우 상태/로그", "다음 단계/재시도 전략"),
+        ("system-owner", "시스템 오너", "gemini", "planner", "이슈 본문/SPEC.md", "확정 스펙/우선순위"),
+        ("tech-writer", "기술 문서 작성가", "claude", "pr_summary", "변경사항", "문서"),
+        ("product-analyst", "제품 분석가", "gemini", "planner", "지표/요구", "개선 우선순위"),
+        ("research-agent", "정보검색 도우미", "python3", "research_search", "질문/키워드", "SEARCH_CONTEXT.md"),
+        ("refactor-specialist", "리팩토링 전문가", "codex", "coder", "코드베이스", "구조 개선"),
+        ("requirements-manager", "요구사항 관리자", "gemini", "planner", "이해관계자 요청", "명세"),
+        ("data-ai-engineer", "데이터/AI 엔지니어", "copilot", "copilot", "데이터 과제", "파이프라인/모델 개선"),
+    ]
+    roles = [
+        {
+            "code": code,
+            "name": name,
+            "objective": "",
+            "cli": cli,
+            "template_key": template_key,
+            "inputs": inputs,
+            "outputs": outputs,
+            "checklist": "",
+            "enabled": True,
+        }
+        for code, name, cli, template_key, inputs, outputs in role_rows
+    ]
+    presets = [
+        {
+            "preset_id": "default-dev",
+            "name": "기본 개발",
+            "description": "설계-구현-테스트-리뷰",
+            "role_codes": ["architect", "coder", "tester", "reviewer"],
+        },
+        {
+            "preset_id": "fast-fix",
+            "name": "빠른 수정",
+            "description": "원인 파악 후 신속 수정",
+            "role_codes": ["incident-analyst", "coder", "tester"],
+        },
+        {
+            "preset_id": "research-first",
+            "name": "근거 우선",
+            "description": "검색 근거 확보 후 설계/구현",
+            "role_codes": ["research-agent", "architect", "coder", "reviewer"],
+        },
+    ]
+    return {"roles": roles, "presets": presets}
+
+
+def _read_roles_payload(path: Path) -> Dict[str, Any]:
+    """Read role/preset payload with safe defaults."""
+
+    defaults = _default_roles_payload()
+    if not path.exists():
+        return defaults
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return defaults
+    if not isinstance(payload, dict):
+        return defaults
+
+    roles: List[Dict[str, Any]] = []
+    for item in payload.get("roles", []):
+        if not isinstance(item, dict):
+            continue
+        code = _normalize_role_code(str(item.get("code", "")))
+        name = str(item.get("name", "")).strip()
+        if not code or not name:
+            continue
+        roles.append(
+            {
+                "code": code,
+                "name": name,
+                "objective": str(item.get("objective", "")).strip(),
+                "cli": str(item.get("cli", "")).strip().lower(),
+                "template_key": str(item.get("template_key", "")).strip(),
+                "inputs": str(item.get("inputs", "")).strip(),
+                "outputs": str(item.get("outputs", "")).strip(),
+                "checklist": str(item.get("checklist", "")).strip(),
+                "enabled": bool(item.get("enabled", True)),
+            }
+        )
+    if not roles:
+        roles = defaults["roles"]
+
+    known_codes = {str(item.get("code", "")) for item in roles}
+    presets: List[Dict[str, Any]] = []
+    for item in payload.get("presets", []):
+        if not isinstance(item, dict):
+            continue
+        preset_id = _normalize_role_code(str(item.get("preset_id", "")))
+        name = str(item.get("name", "")).strip()
+        if not preset_id or not name:
+            continue
+        role_codes = []
+        for raw in item.get("role_codes", []):
+            code = _normalize_role_code(str(raw))
+            if code and code in known_codes and code not in role_codes:
+                role_codes.append(code)
+        presets.append(
+            {
+                "preset_id": preset_id,
+                "name": name,
+                "description": str(item.get("description", "")).strip(),
+                "role_codes": role_codes,
+            }
+        )
+    if not presets:
+        presets = defaults["presets"]
+
+    roles.sort(key=lambda one: str(one.get("code", "")))
+    presets.sort(key=lambda one: str(one.get("preset_id", "")))
+    return {"roles": roles, "presets": presets}
+
+
+def _write_roles_payload(path: Path, payload: Dict[str, Any]) -> None:
+    """Persist role/preset payload as pretty JSON."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def _read_default_workflow_id(path: Path) -> str:
