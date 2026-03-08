@@ -147,17 +147,23 @@ Worker는 아래 순서를 **항상 같은 방식**으로 실행합니다.
 1. `prepare_repo`
 2. `read_issue`
 3. `write_spec`
-4. `plan_with_gemini`
-5. `implement_with_codex`
-6. `test_after_implement`
-7. `commit_implement`
-8. `review_with_gemini`
-9. `fix_with_codex`
-10. `test_after_fix`
-11. `commit_fix`
-12. `push_branch`
-13. `create_pr`
-14. `finalize`
+4. `idea_to_product_brief`
+5. `generate_user_flows`
+6. `define_mvp_scope`
+7. `architecture_planning`
+8. `plan_with_gemini`
+9. `implement_with_codex`
+10. `test_after_implement`
+11. `commit_implement`
+12. `review_with_gemini`
+13. `product_review`
+14. `improvement_stage`
+15. `fix_with_codex`
+16. `test_after_fix`
+17. `commit_fix`
+18. `push_branch`
+19. `create_pr`
+20. `finalize`
 
 성공 시 `done`, 실패 시 최대 3회 재시도 후 `failed` 처리합니다.
 

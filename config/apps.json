@@ -18,6 +18,12 @@
     "workflow_id": "default_design_first_v3"
   },
   {
+    "code": "food-c",
+    "name": "오늘 뭐먹지 3",
+    "repository": "manbalboy/agent-hub",
+    "workflow_id": "default_product_dev_loop_v5"
+  },
+  {
     "code": "monimo-tools",
     "name": "모니모 툴즈",
     "repository": "manbalboy/agent-hub",

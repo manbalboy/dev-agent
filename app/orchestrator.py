@@ -370,6 +370,22 @@ class Orchestrator:
         self._commit_markdown_changes_after_stage(
             job, repository_path, JobStage.WRITE_SPEC.value, log_path
         )
+        self._stage_idea_to_product_brief(job, repository_path, paths, log_path)
+        self._commit_markdown_changes_after_stage(
+            job, repository_path, JobStage.IDEA_TO_PRODUCT_BRIEF.value, log_path
+        )
+        self._stage_generate_user_flows(job, repository_path, paths, log_path)
+        self._commit_markdown_changes_after_stage(
+            job, repository_path, JobStage.GENERATE_USER_FLOWS.value, log_path
+        )
+        self._stage_define_mvp_scope(job, repository_path, paths, log_path)
+        self._commit_markdown_changes_after_stage(
+            job, repository_path, JobStage.DEFINE_MVP_SCOPE.value, log_path
+        )
+        self._stage_architecture_planning(job, repository_path, paths, log_path)
+        self._commit_markdown_changes_after_stage(
+            job, repository_path, JobStage.ARCHITECTURE_PLANNING.value, log_path
+        )
 
         self._stage_plan_with_gemini(job, repository_path, paths, log_path)
         self._snapshot_plan_variant(repository_path, paths, "general", log_path)
@@ -411,6 +427,14 @@ class Orchestrator:
         self._stage_review_with_gemini(job, repository_path, paths, log_path)
         self._commit_markdown_changes_after_stage(
             job, repository_path, JobStage.REVIEW_WITH_GEMINI.value, log_path
+        )
+        self._stage_product_review(job, repository_path, paths, log_path)
+        self._commit_markdown_changes_after_stage(
+            job, repository_path, JobStage.PRODUCT_REVIEW.value, log_path
+        )
+        self._stage_improvement_stage(job, repository_path, paths, log_path)
+        self._commit_markdown_changes_after_stage(
+            job, repository_path, JobStage.IMPROVEMENT_STAGE.value, log_path
         )
         self._stage_fix_with_codex(job, repository_path, paths, log_path)
         self._commit_markdown_changes_after_stage(
@@ -499,6 +523,14 @@ class Orchestrator:
                     planning_mode=planning_mode,
                 )
                 self._snapshot_plan_variant(repository_path, paths, planning_mode, log_path)
+            elif node_type == "idea_to_product_brief":
+                self._stage_idea_to_product_brief(job, repository_path, paths, log_path)
+            elif node_type == "generate_user_flows":
+                self._stage_generate_user_flows(job, repository_path, paths, log_path)
+            elif node_type == "define_mvp_scope":
+                self._stage_define_mvp_scope(job, repository_path, paths, log_path)
+            elif node_type == "architecture_planning":
+                self._stage_architecture_planning(job, repository_path, paths, log_path)
             elif node_type == "designer_task":
                 if self._is_design_system_locked(repository_path, paths):
                     self._set_stage(job.job_id, JobStage.DESIGN_WITH_CODEX, log_path)
@@ -546,6 +578,10 @@ class Orchestrator:
                 self._stage_commit(job, repository_path, JobStage.COMMIT_IMPLEMENT, log_path, "feat")
             elif node_type == "gemini_review":
                 self._stage_review_with_gemini(job, repository_path, paths, log_path)
+            elif node_type == "product_review":
+                self._stage_product_review(job, repository_path, paths, log_path)
+            elif node_type == "improvement_stage":
+                self._stage_improvement_stage(job, repository_path, paths, log_path)
             elif node_type == "codex_fix":
                 self._stage_fix_with_codex(job, repository_path, paths, log_path)
             elif node_type == "coder_fix_from_test_report":
@@ -914,6 +950,17 @@ class Orchestrator:
         copy_plan_path = self._docs_file(repository_path, "COPYWRITING_PLAN.md")
         copy_deck_path = self._docs_file(repository_path, "COPY_DECK.md")
         documentation_plan_path = self._docs_file(repository_path, "DOCUMENTATION_PLAN.md")
+        product_brief_path = self._docs_file(repository_path, "PRODUCT_BRIEF.md")
+        user_flows_path = self._docs_file(repository_path, "USER_FLOWS.md")
+        mvp_scope_path = self._docs_file(repository_path, "MVP_SCOPE.md")
+        architecture_plan_path = self._docs_file(repository_path, "ARCHITECTURE_PLAN.md")
+        product_review_path = self._docs_file(repository_path, "PRODUCT_REVIEW.json")
+        review_history_path = self._docs_file(repository_path, "REVIEW_HISTORY.json")
+        improvement_backlog_path = self._docs_file(repository_path, "IMPROVEMENT_BACKLOG.json")
+        improvement_loop_state_path = self._docs_file(repository_path, "IMPROVEMENT_LOOP_STATE.json")
+        improvement_plan_path = self._docs_file(repository_path, "IMPROVEMENT_PLAN.md")
+        stage_contracts_path = self._docs_file(repository_path, "STAGE_CONTRACTS.md")
+        pipeline_analysis_path = self._docs_file(repository_path, "PIPELINE_ANALYSIS.md")
         readme_path = repository_path / "README.md"
         copyright_path = repository_path / "COPYRIGHT.md"
         development_guide_path = repository_path / "DEVELOPMENT_GUIDE.md"
@@ -1015,6 +1062,8 @@ class Orchestrator:
                 "ORCHESTRATOR",
                 "SPEC quality gate not passed, but continuing by non-blocking assist policy.",
             )
+        self._write_stage_contracts_doc(stage_contracts_path)
+        self._write_pipeline_analysis_doc(pipeline_analysis_path)
 
         # Keep job metadata in sync with canonical issue data.
         self.store.update_job(
@@ -1037,11 +1086,450 @@ class Orchestrator:
             "copy_plan": copy_plan_path,
             "copy_deck": copy_deck_path,
             "documentation_plan": documentation_plan_path,
+            "product_brief": product_brief_path,
+            "user_flows": user_flows_path,
+            "mvp_scope": mvp_scope_path,
+            "architecture_plan": architecture_plan_path,
+            "product_review": product_review_path,
+            "review_history": review_history_path,
+            "improvement_backlog": improvement_backlog_path,
+            "improvement_loop_state": improvement_loop_state_path,
+            "improvement_plan": improvement_plan_path,
+            "stage_contracts": stage_contracts_path,
+            "pipeline_analysis": pipeline_analysis_path,
             "readme": readme_path,
             "copyright": copyright_path,
             "development_guide": development_guide_path,
             "status": status_path,
         }
+
+    def _stage_idea_to_product_brief(
+        self,
+        job: JobRecord,
+        repository_path: Path,
+        paths: Dict[str, Path],
+        log_path: Path,
+    ) -> None:
+        """Create PRODUCT_BRIEF.md from issue/spec context."""
+
+        self._set_stage(job.job_id, JobStage.IDEA_TO_PRODUCT_BRIEF, log_path)
+        product_brief_path = paths.get("product_brief", self._docs_file(repository_path, "PRODUCT_BRIEF.md"))
+        spec_json = self._read_json_file(paths.get("spec_json"))
+        goal = str(spec_json.get("goal", "")).strip() or job.issue_title
+        scope_in = spec_json.get("scope_in", []) if isinstance(spec_json, dict) else []
+        target_users = [
+            "문제를 직접 겪는 1차 사용자",
+            "기능 품질을 유지보수하는 운영/개발 사용자",
+        ]
+        success_metrics = [
+            "MVP 핵심 시나리오 1개 이상이 재현 가능해야 함",
+            "테스트 리포트와 제품 리뷰 점수가 누적 저장되어야 함",
+            "다음 개선 작업이 자동 우선순위로 생성되어야 함",
+        ]
+        lines: List[str] = [
+            "# PRODUCT BRIEF",
+            "",
+            "## Product Goal",
+            f"- {goal}",
+            "",
+            "## Problem Statement",
+            "- 이슈 아이디어를 단발성 코드 생성이 아닌 제품 단위 개발 루프로 전환한다.",
+            "",
+            "## Target Users",
+        ]
+        lines.extend(f"- {item}" for item in target_users)
+        lines.extend(
+            [
+                "",
+                "## Core Value",
+                "- 아이디어 입력부터 MVP 구현, 품질 리뷰, 반복 개선까지 한 파이프라인으로 수행한다.",
+                "- 코드 생성보다 품질 평가와 개선 우선순위 결정을 시스템적으로 강제한다.",
+                "",
+                "## Scope Inputs",
+            ]
+        )
+        for item in (scope_in[:7] if isinstance(scope_in, list) else []):
+            if str(item).strip():
+                lines.append(f"- {str(item).strip()}")
+        lines.extend(
+            [
+                "",
+                "## Success Metrics",
+            ]
+        )
+        lines.extend(f"- {item}" for item in success_metrics)
+        lines.append("")
+        product_brief_path.write_text("\n".join(lines), encoding="utf-8")
+
+    def _stage_generate_user_flows(
+        self,
+        job: JobRecord,
+        repository_path: Path,
+        paths: Dict[str, Path],
+        log_path: Path,
+    ) -> None:
+        """Create USER_FLOWS.md with explicit product/user flows."""
+
+        self._set_stage(job.job_id, JobStage.GENERATE_USER_FLOWS, log_path)
+        user_flows_path = paths.get("user_flows", self._docs_file(repository_path, "USER_FLOWS.md"))
+        lines = [
+            "# USER FLOWS",
+            "",
+            "## Flow 1: 아이디어 입력 -> 제품 정의",
+            "1. 사용자가 이슈/아이디어를 입력한다.",
+            "2. 시스템이 PRODUCT_BRIEF.md를 생성한다.",
+            "3. 목표/문제/사용자/성공지표가 합의 가능한 형태로 정리된다.",
+            "",
+            "## Flow 2: 제품 정의 -> MVP 구현",
+            "1. USER_FLOWS.md, MVP_SCOPE.md, ARCHITECTURE_PLAN.md를 순차 생성한다.",
+            "2. PLAN.md를 작성하고 범위 내 구현을 진행한다.",
+            "3. 테스트/리뷰 단계로 이동 가능한 실행 산출물이 생긴다.",
+            "",
+            "## Flow 3: 리뷰 -> 개선 루프",
+            "1. PRODUCT_REVIEW.json으로 품질 점수를 계산한다.",
+            "2. IMPROVEMENT_BACKLOG.json에 우선순위 작업을 생성한다.",
+            "3. IMPROVEMENT_PLAN.md로 다음 루프 전략을 확정한다.",
+            "",
+            "## UX State Checklist",
+            "- Loading 상태: 스피너/스켈레톤/진행 메시지 존재 여부",
+            "- Empty 상태: 데이터 없음 시 안내/유도 문구 존재 여부",
+            "- Error 상태: 실패 사유/복구 액션/재시도 경로 존재 여부",
+            "",
+        ]
+        user_flows_path.write_text("\n".join(lines), encoding="utf-8")
+
+    def _stage_define_mvp_scope(
+        self,
+        job: JobRecord,
+        repository_path: Path,
+        paths: Dict[str, Path],
+        log_path: Path,
+    ) -> None:
+        """Create MVP_SCOPE.md with in/out scope and acceptance gates."""
+
+        self._set_stage(job.job_id, JobStage.DEFINE_MVP_SCOPE, log_path)
+        mvp_scope_path = paths.get("mvp_scope", self._docs_file(repository_path, "MVP_SCOPE.md"))
+        spec_json = self._read_json_file(paths.get("spec_json"))
+        scope_in = spec_json.get("scope_in", []) if isinstance(spec_json, dict) else []
+        scope_out = spec_json.get("scope_out", []) if isinstance(spec_json, dict) else []
+        lines = [
+            "# MVP SCOPE",
+            "",
+            "## In Scope",
+        ]
+        for item in (scope_in[:8] if isinstance(scope_in, list) else []):
+            if str(item).strip():
+                lines.append(f"- {str(item).strip()}")
+        lines.extend(
+            [
+                "",
+                "## Out of Scope",
+            ]
+        )
+        for item in (scope_out[:8] if isinstance(scope_out, list) else []):
+            if str(item).strip():
+                lines.append(f"- {str(item).strip()}")
+        lines.extend(
+            [
+                "",
+                "## MVP Acceptance Gates",
+                "- 핵심 사용자 플로우 1개 이상이 end-to-end로 동작한다.",
+                "- PRODUCT_REVIEW.json이 생성되고 필수 카테고리 점수가 기록된다.",
+                "- 최소 1개 테스트 리포트가 생성된다.",
+                "",
+                "## Post-MVP Candidate",
+                "- 성능 최적화, 리팩토링, 고급 UX polish는 개선 루프에서 처리한다.",
+                "",
+            ]
+        )
+        mvp_scope_path.write_text("\n".join(lines), encoding="utf-8")
+
+    def _stage_architecture_planning(
+        self,
+        job: JobRecord,
+        repository_path: Path,
+        paths: Dict[str, Path],
+        log_path: Path,
+    ) -> None:
+        """Create ARCHITECTURE_PLAN.md for implementation constraints."""
+
+        self._set_stage(job.job_id, JobStage.ARCHITECTURE_PLANNING, log_path)
+        architecture_plan_path = paths.get("architecture_plan", self._docs_file(repository_path, "ARCHITECTURE_PLAN.md"))
+        lines = [
+            "# ARCHITECTURE PLAN",
+            "",
+            "## Components",
+            "- Product Definition Layer: PRODUCT_BRIEF.md / USER_FLOWS.md / MVP_SCOPE.md",
+            "- Delivery Layer: PLAN.md / 구현 코드 / TEST_REPORT_*",
+            "- Review Layer: REVIEW.md / PRODUCT_REVIEW.json",
+            "- Improvement Loop Layer: REVIEW_HISTORY.json / IMPROVEMENT_BACKLOG.json / IMPROVEMENT_PLAN.md",
+            "",
+            "## Data Contracts",
+            "- 각 단계는 `_docs` 아래 파일(또는 JSON) 산출물을 남긴다.",
+            "- 다음 단계는 직전 산출물을 입력으로 사용한다.",
+            "- 실패 시 STATUS.md에 중단 원인과 재개 액션을 기록한다.",
+            "",
+            "## Quality Gates",
+            "- 설계 산출물(brief/flows/mvp/architecture) 누락 시 구현 단계 진행 금지",
+            "- 제품 리뷰 점수 하락/정체/반복 이슈 발생 시 전략 변경 플래그 활성화",
+            "",
+            "## Loop Safety",
+            "- 같은 문제 반복 제한: 동일 top issue 연속 반복 감지",
+            "- 품질 점수 정체 감지: 최근 N회 개선폭 임계치 이하",
+            "- 품질 하락 감지: 직전 대비 점수 하락",
+            "- 복구 고려: 마지막 안정 상태(git sha) 기록",
+            "",
+        ]
+        architecture_plan_path.write_text("\n".join(lines), encoding="utf-8")
+
+    def _stage_product_review(
+        self,
+        job: JobRecord,
+        repository_path: Path,
+        paths: Dict[str, Path],
+        log_path: Path,
+    ) -> None:
+        """Create PRODUCT_REVIEW.json and improvement backlog base."""
+
+        self._set_stage(job.job_id, JobStage.PRODUCT_REVIEW, log_path)
+        review_path = paths.get("review", self._docs_file(repository_path, "REVIEW.md"))
+        review_text = self._read_text_file(review_path)
+        todo_items = self._extract_review_todo_items(review_text)
+        test_report_paths = sorted(repository_path.glob("TEST_REPORT_*.md"))
+        test_failures = 0
+        test_passes = 0
+        for report in test_report_paths:
+            text = self._read_text_file(report)
+            if "Status: `PASS`" in text:
+                test_passes += 1
+            elif "Status: `FAIL`" in text:
+                test_failures += 1
+
+        architecture_exists = bool(self._read_text_file(paths.get("architecture_plan")))
+        user_flows_exists = bool(self._read_text_file(paths.get("user_flows")))
+        mvp_scope_exists = bool(self._read_text_file(paths.get("mvp_scope")))
+        ux_review_text = self._read_text_file(self._docs_file(repository_path, "UX_REVIEW.md"))
+        spec_text = self._read_text_file(paths.get("spec"))
+        review_lower = review_text.lower()
+        spec_lower = spec_text.lower()
+        todo_penalty = min(3, len(todo_items) // 2)
+
+        scores = {
+            "code_quality": max(1, 5 - todo_penalty),
+            "architecture_structure": 4 if architecture_exists else 2,
+            "maintainability": 4 if mvp_scope_exists else 2,
+            "usability": 4 if user_flows_exists else 2,
+            "ux_clarity": 4 if ux_review_text and "실패/누락 없음" in ux_review_text else (3 if ux_review_text else 2),
+            "test_coverage": max(1, 4 - min(2, test_failures)) if test_report_paths else 1,
+            "error_state_handling": 4 if ("error" in spec_lower or "오류" in review_lower) else 2,
+            "empty_state_handling": 4 if ("empty" in spec_lower or "빈 상태" in review_lower) else 2,
+            "loading_state_handling": 4 if ("loading" in spec_lower or "로딩" in review_lower) else 2,
+        }
+        overall = round(sum(scores.values()) / float(len(scores)), 2)
+
+        findings = [
+            {"category": "code_quality", "summary": f"TODO 항목 {len(todo_items)}개 감지"},
+            {"category": "architecture_structure", "summary": "ARCHITECTURE_PLAN.md 존재 여부 기반 평가"},
+            {"category": "maintainability", "summary": "MVP/문서 산출물 존재 여부 기반 평가"},
+            {"category": "usability", "summary": "USER_FLOWS.md 존재 여부 기반 평가"},
+            {"category": "ux_clarity", "summary": "UX_REVIEW.md 내용 기반 평가"},
+            {
+                "category": "test_coverage",
+                "summary": f"테스트 리포트 {len(test_report_paths)}개, 실패 {test_failures}개",
+            },
+            {"category": "error_state_handling", "summary": "오류 상태 안내 관련 키워드 기반 점검"},
+            {"category": "empty_state_handling", "summary": "빈 상태 안내 관련 키워드 기반 점검"},
+            {"category": "loading_state_handling", "summary": "로딩 상태 안내 관련 키워드 기반 점검"},
+        ]
+
+        candidates: List[Dict[str, Any]] = []
+        for item in todo_items:
+            priority = "P1" if any(key in item.lower() for key in ["bug", "fail", "error", "security", "crash"]) else "P2"
+            candidates.append(
+                {
+                    "id": self._stable_issue_id(item),
+                    "source": "review_todo",
+                    "title": item,
+                    "priority": priority,
+                    "reason": "REVIEW.md TODO 항목",
+                }
+            )
+        for category, score in scores.items():
+            if score <= 2:
+                candidates.append(
+                    {
+                        "id": self._stable_issue_id(category),
+                        "source": "quality_score",
+                        "title": f"{category} 점수 개선",
+                        "priority": "P1",
+                        "reason": f"{category} 점수 {score}/5",
+                    }
+                )
+        dedup: Dict[str, Dict[str, Any]] = {}
+        for item in candidates:
+            dedup[item["id"]] = item
+        ordered_candidates = sorted(
+            dedup.values(),
+            key=lambda x: (0 if x.get("priority") == "P1" else 1, str(x.get("title", ""))),
+        )
+
+        payload = {
+            "schema_version": "1.0",
+            "generated_at": utc_now_iso(),
+            "job_id": job.job_id,
+            "review_basis": {
+                "spec": str(paths.get("spec", "")),
+                "plan": str(paths.get("plan", "")),
+                "review": str(review_path),
+            },
+            "scores": {**scores, "overall": overall},
+            "findings": findings,
+            "improvement_candidates": ordered_candidates,
+            "quality_gate": {
+                "passed": overall >= 3.0,
+                "reason": "overall >= 3.0",
+            },
+        }
+        product_review_path = paths.get("product_review", self._docs_file(repository_path, "PRODUCT_REVIEW.json"))
+        product_review_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        review_history_path = paths.get("review_history", self._docs_file(repository_path, "REVIEW_HISTORY.json"))
+        history_payload = self._read_json_file(review_history_path)
+        history_entries = history_payload.get("entries", []) if isinstance(history_payload, dict) else []
+        if not isinstance(history_entries, list):
+            history_entries = []
+        history_entries.append(
+            {
+                "generated_at": payload["generated_at"],
+                "job_id": job.job_id,
+                "overall": overall,
+                "top_issue_ids": [item["id"] for item in ordered_candidates[:3]],
+            }
+        )
+        review_history_path.write_text(
+            json.dumps({"entries": history_entries[-30:]}, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        backlog_path = paths.get("improvement_backlog", self._docs_file(repository_path, "IMPROVEMENT_BACKLOG.json"))
+        backlog_path.write_text(
+            json.dumps(
+                {
+                    "generated_at": payload["generated_at"],
+                    "source_review": str(product_review_path),
+                    "items": ordered_candidates,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    def _stage_improvement_stage(
+        self,
+        job: JobRecord,
+        repository_path: Path,
+        paths: Dict[str, Path],
+        log_path: Path,
+    ) -> None:
+        """Create next-loop improvement plan and loop guard signals."""
+
+        self._set_stage(job.job_id, JobStage.IMPROVEMENT_STAGE, log_path)
+        product_review_path = paths.get("product_review", self._docs_file(repository_path, "PRODUCT_REVIEW.json"))
+        review_payload = self._read_json_file(product_review_path)
+        review_history_path = paths.get("review_history", self._docs_file(repository_path, "REVIEW_HISTORY.json"))
+        history_payload = self._read_json_file(review_history_path)
+        history_entries = history_payload.get("entries", []) if isinstance(history_payload, dict) else []
+        if not isinstance(history_entries, list):
+            history_entries = []
+        backlog_payload = self._read_json_file(paths.get("improvement_backlog"))
+        backlog_items = backlog_payload.get("items", []) if isinstance(backlog_payload, dict) else []
+        if not isinstance(backlog_items, list):
+            backlog_items = []
+
+        top_issue_id = str(backlog_items[0].get("id", "")) if backlog_items else ""
+        recent_top_ids = [str(item.get("top_issue_ids", [""])[0]) for item in history_entries[-3:] if item.get("top_issue_ids")]
+        repeated_issue_limit_hit = bool(top_issue_id) and recent_top_ids.count(top_issue_id) >= 2
+
+        recent_scores = [float(item.get("overall", 0.0)) for item in history_entries[-3:] if item.get("overall") is not None]
+        score_stagnation_detected = len(recent_scores) >= 3 and (max(recent_scores) - min(recent_scores) <= 0.15)
+        quality_regression_detected = False
+        if len(history_entries) >= 2:
+            prev = float(history_entries[-2].get("overall", 0.0))
+            current = float(history_entries[-1].get("overall", 0.0))
+            quality_regression_detected = current < (prev - 0.2)
+        strategy_change_required = repeated_issue_limit_hit or score_stagnation_detected or quality_regression_detected
+
+        git_head = ""
+        result = self.shell_executor(
+            command=f"git -C {shlex.quote(str(repository_path))} rev-parse HEAD",
+            cwd=repository_path,
+            log_writer=self._actor_log_writer(log_path, "GIT"),
+            check=False,
+            command_purpose="read current git head",
+        )
+        if int(getattr(result, "exit_code", 1)) == 0:
+            git_head = str(getattr(result, "stdout", "")).strip()
+
+        loop_state = {
+            "generated_at": utc_now_iso(),
+            "same_issue_repeat_limit": 2,
+            "repeated_issue_limit_hit": repeated_issue_limit_hit,
+            "score_stagnation_detected": score_stagnation_detected,
+            "quality_regression_detected": quality_regression_detected,
+            "strategy_change_required": strategy_change_required,
+            "rollback": {
+                "last_known_head": git_head,
+                "rollback_candidate": bool(git_head),
+            },
+            "strategy": (
+                "narrow_scope_stabilization"
+                if strategy_change_required
+                else "normal_iterative_improvement"
+            ),
+        }
+        loop_state_path = paths.get("improvement_loop_state", self._docs_file(repository_path, "IMPROVEMENT_LOOP_STATE.json"))
+        loop_state_path.write_text(
+            json.dumps(loop_state, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        plan_lines = [
+            "# IMPROVEMENT PLAN",
+            "",
+            f"- Generated at: {loop_state['generated_at']}",
+            f"- Strategy: `{loop_state['strategy']}`",
+            f"- Current overall score: `{review_payload.get('scores', {}).get('overall', 'n/a')}`",
+            "",
+            "## Loop Guard Signals",
+            f"- repeated_issue_limit_hit: `{repeated_issue_limit_hit}`",
+            f"- score_stagnation_detected: `{score_stagnation_detected}`",
+            f"- quality_regression_detected: `{quality_regression_detected}`",
+            f"- strategy_change_required: `{strategy_change_required}`",
+            "",
+            "## Next Improvements (Top 5)",
+        ]
+        for item in backlog_items[:5]:
+            plan_lines.append(
+                f"- [{item.get('priority', 'P2')}] {str(item.get('title', '')).strip()} ({item.get('reason', '')})"
+            )
+        if not backlog_items:
+            plan_lines.append("- 개선 백로그 항목 없음")
+        plan_lines.extend(
+            [
+                "",
+                "## Recovery Option",
+                f"- last_known_head: `{git_head or 'unavailable'}`",
+                "- 전략 변경이 필요하면 범위를 축소하고 안정화 작업을 우선 수행한다.",
+                "",
+            ]
+        )
+        improvement_plan_path = paths.get("improvement_plan", self._docs_file(repository_path, "IMPROVEMENT_PLAN.md"))
+        improvement_plan_path.write_text("\n".join(plan_lines), encoding="utf-8")
 
     def _stage_plan_with_gemini(
         self,
@@ -3894,6 +4382,10 @@ class Orchestrator:
         node_to_stage = {
             "gh_read_issue": JobStage.READ_ISSUE.value,
             "write_spec": JobStage.WRITE_SPEC.value,
+            "idea_to_product_brief": JobStage.IDEA_TO_PRODUCT_BRIEF.value,
+            "generate_user_flows": JobStage.GENERATE_USER_FLOWS.value,
+            "define_mvp_scope": JobStage.DEFINE_MVP_SCOPE.value,
+            "architecture_planning": JobStage.ARCHITECTURE_PLANNING.value,
             "gemini_plan": JobStage.PLAN_WITH_GEMINI.value,
             "designer_task": JobStage.DESIGN_WITH_CODEX.value,
             "publisher_task": "publisher_task",
@@ -3905,6 +4397,8 @@ class Orchestrator:
             "ux_e2e_review": JobStage.UX_E2E_REVIEW.value,
             "commit_implement": JobStage.COMMIT_IMPLEMENT.value,
             "gemini_review": JobStage.REVIEW_WITH_GEMINI.value,
+            "product_review": JobStage.PRODUCT_REVIEW.value,
+            "improvement_stage": JobStage.IMPROVEMENT_STAGE.value,
             "codex_fix": JobStage.FIX_WITH_CODEX.value,
             "coder_fix_from_test_report": JobStage.FIX_WITH_CODEX.value,
             "test_after_fix": JobStage.TEST_AFTER_FIX.value,
@@ -3922,6 +4416,10 @@ class Orchestrator:
         stage_map = {
             JobStage.READ_ISSUE.value: "이슈 읽기 문서 반영",
             JobStage.WRITE_SPEC.value: "스펙 문서 작성",
+            JobStage.IDEA_TO_PRODUCT_BRIEF.value: "제품 정의 브리프 작성",
+            JobStage.GENERATE_USER_FLOWS.value: "사용자 흐름 작성",
+            JobStage.DEFINE_MVP_SCOPE.value: "MVP 범위 정의",
+            JobStage.ARCHITECTURE_PLANNING.value: "아키텍처 계획 작성",
             JobStage.PLAN_WITH_GEMINI.value: "제미나이 플래너 작성",
             JobStage.DESIGN_WITH_CODEX.value: "코덱스 디자이너 작성",
             JobStage.COPYWRITER_TASK.value: "카피라이터 작성",
@@ -3932,11 +4430,17 @@ class Orchestrator:
             JobStage.UX_E2E_REVIEW.value: "UX E2E 검수 리포트 작성",
             JobStage.COMMIT_IMPLEMENT.value: "구현 커밋 단계 문서 정리",
             JobStage.REVIEW_WITH_GEMINI.value: "제미나이 리뷰어 작성",
+            JobStage.PRODUCT_REVIEW.value: "제품 품질 리뷰 작성",
+            JobStage.IMPROVEMENT_STAGE.value: "개선 루프 계획 작성",
             JobStage.FIX_WITH_CODEX.value: "코덱스 수정자 작성",
             JobStage.TEST_AFTER_FIX.value: "수정 후 테스트 리포트 작성",
             JobStage.COMMIT_FIX.value: "수정 커밋 단계 문서 정리",
             "gh_read_issue": "이슈 읽기 문서 반영",
             "write_spec": "스펙 문서 작성",
+            "idea_to_product_brief": "제품 정의 브리프 작성",
+            "generate_user_flows": "사용자 흐름 작성",
+            "define_mvp_scope": "MVP 범위 정의",
+            "architecture_planning": "아키텍처 계획 작성",
             "gemini_plan": "제미나이 플래너 작성",
             "designer_task": "코덱스 디자이너 작성",
             "publisher_task": "퍼블리셔 작성",
@@ -3948,6 +4452,8 @@ class Orchestrator:
             "ux_e2e_review": "UX E2E 검수 리포트 작성",
             "commit_implement": "구현 커밋 단계 문서 정리",
             "gemini_review": "제미나이 리뷰어 작성",
+            "product_review": "제품 품질 리뷰 작성",
+            "improvement_stage": "개선 루프 계획 작성",
             "codex_fix": "코덱스 수정자 작성",
             "coder_fix_from_test_report": "코덱스 수정자 작성",
             "test_after_fix": "수정 후 테스트 리포트 작성",
@@ -4124,6 +4630,15 @@ class Orchestrator:
             "copy_plan_path": str(paths.get("copy_plan", Path("_docs/COPYWRITING_PLAN.md"))),
             "copy_deck_path": str(paths.get("copy_deck", Path("_docs/COPY_DECK.md"))),
             "documentation_plan_path": str(paths.get("documentation_plan", Path("_docs/DOCUMENTATION_PLAN.md"))),
+            "product_brief_path": str(paths.get("product_brief", Path("_docs/PRODUCT_BRIEF.md"))),
+            "user_flows_path": str(paths.get("user_flows", Path("_docs/USER_FLOWS.md"))),
+            "mvp_scope_path": str(paths.get("mvp_scope", Path("_docs/MVP_SCOPE.md"))),
+            "architecture_plan_path": str(paths.get("architecture_plan", Path("_docs/ARCHITECTURE_PLAN.md"))),
+            "product_review_json_path": str(paths.get("product_review", Path("_docs/PRODUCT_REVIEW.json"))),
+            "review_history_path": str(paths.get("review_history", Path("_docs/REVIEW_HISTORY.json"))),
+            "improvement_backlog_path": str(paths.get("improvement_backlog", Path("_docs/IMPROVEMENT_BACKLOG.json"))),
+            "improvement_loop_state_path": str(paths.get("improvement_loop_state", Path("_docs/IMPROVEMENT_LOOP_STATE.json"))),
+            "improvement_plan_path": str(paths.get("improvement_plan", Path("_docs/IMPROVEMENT_PLAN.md"))),
             "readme_path": str(paths.get("readme", Path("README.md"))),
             "copyright_path": str(paths.get("copyright", Path("COPYRIGHT.md"))),
             "development_guide_path": str(paths.get("development_guide", Path("DEVELOPMENT_GUIDE.md"))),
@@ -4416,6 +4931,121 @@ class Orchestrator:
             json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
+
+    @staticmethod
+    def _read_json_file(path: Optional[Path]) -> Dict[str, Any]:
+        """Read JSON file safely and return object fallback."""
+
+        if path is None or not path.exists():
+            return {}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        except json.JSONDecodeError:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def _read_text_file(path: Optional[Path]) -> str:
+        """Read one text file safely."""
+
+        if path is None or not path.exists():
+            return ""
+        return path.read_text(encoding="utf-8", errors="replace")
+
+    @staticmethod
+    def _extract_review_todo_items(review_text: str) -> List[str]:
+        """Extract actionable TODO lines from REVIEW.md."""
+
+        items: List[str] = []
+        for raw in str(review_text or "").splitlines():
+            line = raw.strip()
+            match = re.match(r"^[-*]\s*\[\s?\]\s*(.+)$", line)
+            if match:
+                todo = match.group(1).strip()
+                if todo:
+                    items.append(todo)
+        return items
+
+    @staticmethod
+    def _stable_issue_id(raw_text: str) -> str:
+        """Generate deterministic issue id from text."""
+
+        normalized = re.sub(r"\s+", " ", str(raw_text or "").strip().lower())
+        digest = hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:10]
+        return f"issue_{digest}"
+
+    @staticmethod
+    def _write_stage_contracts_doc(path: Path) -> None:
+        """Persist stage IO/success/failure contracts for product-dev pipeline."""
+
+        if path.exists():
+            return
+        content = (
+            "# STAGE CONTRACTS\n\n"
+            "## idea_to_product_brief\n"
+            "- 입력: SPEC.md, SPEC.json, issue metadata\n"
+            "- 출력: PRODUCT_BRIEF.md\n"
+            "- 성공 조건: 목표/문제/사용자/가치/지표 섹션 존재\n"
+            "- 실패 조건: 파일 미생성 또는 핵심 섹션 누락\n"
+            "- 다음 단계 전달 데이터: goal, target_users, constraints\n\n"
+            "## generate_user_flows\n"
+            "- 입력: PRODUCT_BRIEF.md\n"
+            "- 출력: USER_FLOWS.md\n"
+            "- 성공 조건: 최소 3개 흐름 + UX 상태 체크리스트\n"
+            "- 실패 조건: 흐름 단계 정의 부재\n"
+            "- 다음 단계 전달 데이터: flow list, UX states\n\n"
+            "## define_mvp_scope\n"
+            "- 입력: PRODUCT_BRIEF.md, USER_FLOWS.md, SPEC.json\n"
+            "- 출력: MVP_SCOPE.md\n"
+            "- 성공 조건: in-scope / out-of-scope / acceptance gates 명시\n"
+            "- 실패 조건: 범위 구분 미정의\n"
+            "- 다음 단계 전달 데이터: 구현 범위, 비범위, 게이트\n\n"
+            "## architecture_planning\n"
+            "- 입력: MVP_SCOPE.md, USER_FLOWS.md\n"
+            "- 출력: ARCHITECTURE_PLAN.md\n"
+            "- 성공 조건: 컴포넌트/데이터계약/품질게이트/루프안전 정의\n"
+            "- 실패 조건: 품질 게이트/루프 가드 누락\n"
+            "- 다음 단계 전달 데이터: 아키텍처 제약과 품질 정책\n\n"
+            "## product_review\n"
+            "- 입력: REVIEW.md, TEST_REPORT_*.md, UX_REVIEW.md, ARCHITECTURE_PLAN.md\n"
+            "- 출력: PRODUCT_REVIEW.json, REVIEW_HISTORY.json, IMPROVEMENT_BACKLOG.json\n"
+            "- 성공 조건: 9개 품질 카테고리 점수 + 개선 후보 생성\n"
+            "- 실패 조건: 필수 카테고리 누락 또는 JSON 구조 파손\n"
+            "- 다음 단계 전달 데이터: overall score, top issues, backlog\n\n"
+            "## improvement_stage\n"
+            "- 입력: PRODUCT_REVIEW.json, REVIEW_HISTORY.json, IMPROVEMENT_BACKLOG.json\n"
+            "- 출력: IMPROVEMENT_LOOP_STATE.json, IMPROVEMENT_PLAN.md\n"
+            "- 성공 조건: 반복/정체/하락 감지 및 전략 결정\n"
+            "- 실패 조건: 루프 가드 계산 불가\n"
+            "- 다음 단계 전달 데이터: next strategy, top priorities, rollback candidate\n"
+        )
+        path.write_text(content, encoding="utf-8")
+
+    @staticmethod
+    def _write_pipeline_analysis_doc(path: Path) -> None:
+        """Persist phase-1 pipeline analysis and missing-stage summary."""
+
+        if path.exists():
+            return
+        content = (
+            "# PIPELINE ANALYSIS\n\n"
+            "## 현재 구조 요약\n"
+            "- 기존 파이프라인은 issue -> spec -> plan -> implement -> test -> review -> fix 중심.\n"
+            "- 제품 정의(사용자 흐름, MVP 경계, 아키텍처 의사결정)가 코드 생성 전에 충분히 분리되지 않음.\n"
+            "- 리뷰 결과를 다음 개선 작업으로 구조화해 넘기는 계약이 약함.\n\n"
+            "## 부족 단계\n"
+            "- idea_to_product_brief\n"
+            "- generate_user_flows\n"
+            "- define_mvp_scope\n"
+            "- architecture_planning\n"
+            "- product_review(정량 평가)\n"
+            "- improvement_stage(자동 우선순위/루프가드)\n\n"
+            "## 제품 개발 관점의 공백\n"
+            "- MVP 우선 정책 강제 장치 부족\n"
+            "- UX empty/loading/error 상태 점검이 일관된 점수 체계로 연결되지 않음\n"
+            "- 동일 문제 반복/점수 정체/품질 하락 감지 규칙이 표준화되지 않음\n"
+        )
+        path.write_text(content, encoding="utf-8")
 
     @staticmethod
     def _sha256_file(path: Optional[Path]) -> str:

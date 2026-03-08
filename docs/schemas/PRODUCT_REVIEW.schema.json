@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agenthub.local/schemas/product_review.schema.json",
+  "title": "ProductReview",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "generated_at",
+    "job_id",
+    "scores",
+    "findings",
+    "improvement_candidates",
+    "quality_gate"
+  ],
+  "properties": {
+    "schema_version": { "type": "string" },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "job_id": { "type": "string" },
+    "review_basis": {
+      "type": "object",
+      "properties": {
+        "spec": { "type": "string" },
+        "plan": { "type": "string" },
+        "review": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "scores": {
+      "type": "object",
+      "required": [
+        "code_quality",
+        "architecture_structure",
+        "maintainability",
+        "usability",
+        "ux_clarity",
+        "test_coverage",
+        "error_state_handling",
+        "empty_state_handling",
+        "loading_state_handling",
+        "overall"
+      ],
+      "properties": {
+        "code_quality": { "type": "number", "minimum": 0, "maximum": 5 },
+        "architecture_structure": { "type": "number", "minimum": 0, "maximum": 5 },
+        "maintainability": { "type": "number", "minimum": 0, "maximum": 5 },
+        "usability": { "type": "number", "minimum": 0, "maximum": 5 },
+        "ux_clarity": { "type": "number", "minimum": 0, "maximum": 5 },
+        "test_coverage": { "type": "number", "minimum": 0, "maximum": 5 },
+        "error_state_handling": { "type": "number", "minimum": 0, "maximum": 5 },
+        "empty_state_handling": { "type": "number", "minimum": 0, "maximum": 5 },
+        "loading_state_handling": { "type": "number", "minimum": 0, "maximum": 5 },
+        "overall": { "type": "number", "minimum": 0, "maximum": 5 }
+      },
+      "additionalProperties": false
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["category", "summary"],
+        "properties": {
+          "category": { "type": "string" },
+          "summary": { "type": "string" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "improvement_candidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "title", "priority", "reason"],
+        "properties": {
+          "id": { "type": "string" },
+          "source": { "type": "string" },
+          "title": { "type": "string" },
+          "priority": { "type": "string", "enum": ["P0", "P1", "P2", "P3"] },
+          "reason": { "type": "string" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "quality_gate": {
+      "type": "object",
+      "required": ["passed", "reason"],
+      "properties": {
+        "passed": { "type": "boolean" },
+        "reason": { "type": "string" }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

@@ -19,6 +19,10 @@ SUPPORTED_NODE_TYPES: Dict[str, Dict[str, Any]] = {
     "if_label_match": {"label": "라벨 조건 분기(IF)", "kind": "control"},
     "loop_until_pass": {"label": "반복 루프(Loop)", "kind": "control"},
     "write_spec": {"label": "SPEC 작성", "kind": "transform"},
+    "idea_to_product_brief": {"label": "제품 정의 브리프 작성", "kind": "product"},
+    "generate_user_flows": {"label": "사용자 흐름 정의", "kind": "product"},
+    "define_mvp_scope": {"label": "MVP 범위 결정", "kind": "product"},
+    "architecture_planning": {"label": "아키텍처 계획", "kind": "product"},
     "gemini_plan": {"label": "Gemini 계획", "kind": "ai"},
     "publisher_task": {"label": "퍼블리셔 작업", "kind": "ai"},
     "copywriter_task": {"label": "카피라이터 작업", "kind": "ai"},
@@ -32,6 +36,8 @@ SUPPORTED_NODE_TYPES: Dict[str, Dict[str, Any]] = {
     "coder_fix_from_test_report": {"label": "코더 테스트 리포트 기반 수정", "kind": "ai"},
     "commit_implement": {"label": "커밋(구현)", "kind": "git"},
     "gemini_review": {"label": "Gemini 리뷰", "kind": "ai"},
+    "product_review": {"label": "제품 품질 리뷰", "kind": "qa"},
+    "improvement_stage": {"label": "개선 우선순위/루프 계획", "kind": "qa"},
     "claude_escalation": {"label": "Claude 에스컬레이션", "kind": "ai"},
     "codex_fix": {"label": "Codex 수정", "kind": "ai"},
     "test_after_fix": {"label": "테스트(수정 후)", "kind": "qa"},
@@ -46,35 +52,43 @@ def default_workflow_template() -> Dict[str, Any]:
     """Return a default workflow template equivalent to fixed orchestration."""
 
     return {
-        "workflow_id": "default_design_first_v4",
-        "name": "Default Design First V4",
-        "description": "기본 확장 플로우: 큰틀 플랜 -> 디자인 기획 -> 퍼블리싱 -> 카피라이팅 -> 개발기획 -> 코딩 -> PR 전 문서화",
-        "version": 4,
+        "workflow_id": "default_product_dev_loop_v5",
+        "name": "Default Product Dev Loop V5",
+        "description": "제품정의 -> MVP -> 아키텍처 -> 구현 -> 제품리뷰 -> 개선루프 기반 기본 플로우",
+        "version": 5,
         "entry_node_id": "n1",
         "nodes": [
             {"id": "n1", "type": "gh_read_issue", "title": "이슈 읽기"},
             {"id": "n2", "type": "write_spec", "title": "SPEC 작성"},
-            {"id": "n3", "type": "gemini_plan", "title": "큰틀 플랜"},
-            {"id": "n4", "type": "designer_task", "title": "디자인 시스템 기획"},
-            {"id": "n5", "type": "publisher_task", "title": "퍼블리싱(디자인 시스템 반영)"},
-            {"id": "n6", "type": "copywriter_task", "title": "카피라이팅(고객 문구 기획/작성)"},
-            {"id": "n7", "type": "gemini_plan", "title": "개발 기획(기술/라이브러리 확정)"},
-            {"id": "n8", "type": "codex_implement", "title": "코딩(기능 구현)"},
-            {"id": "n9", "type": "code_change_summary", "title": "코드 변경 요약"},
-            {"id": "n10", "type": "test_after_implement", "title": "1차 기능 테스트"},
-            {"id": "n11", "type": "tester_run_e2e", "title": "1차 E2E/타입별 테스트"},
-            {"id": "n12", "type": "ux_e2e_review", "title": "UX E2E 검수(PC/모바일 스샷)"},
-            {"id": "n13", "type": "coder_fix_from_test_report", "title": "UX/E2E 실패 우선 수정"},
-            {"id": "n14", "type": "tester_run_e2e", "title": "수정 + E2E/타입별 루프(최대 3회)"},
-            {"id": "n15", "type": "gemini_review", "title": "리뷰어 점검"},
-            {"id": "n16", "type": "gemini_plan", "title": "리뷰 반영 고도화 플랜"},
-            {"id": "n17", "type": "coder_fix_from_test_report", "title": "고도화 반영 구현"},
-            {"id": "n18", "type": "tester_retest_e2e", "title": "고도화 후 E2E/타입별 재테스트"},
-            {"id": "n19", "type": "gemini_review", "title": "최종 리뷰 게이트"},
-            {"id": "n20", "type": "commit_fix", "title": "최종 커밋"},
-            {"id": "n21", "type": "documentation_task", "title": "기술 문서 작성(README/저작권/개발가이드)"},
-            {"id": "n22", "type": "push_branch", "title": "브랜치 푸시"},
-            {"id": "n23", "type": "create_pr", "title": "PR 생성"},
+            {"id": "n3", "type": "idea_to_product_brief", "title": "제품 정의"},
+            {"id": "n4", "type": "generate_user_flows", "title": "사용자 흐름 정의"},
+            {"id": "n5", "type": "define_mvp_scope", "title": "MVP 범위 결정"},
+            {"id": "n6", "type": "architecture_planning", "title": "아키텍처 계획"},
+            {"id": "n7", "type": "gemini_plan", "title": "큰틀 플랜"},
+            {"id": "n8", "type": "designer_task", "title": "디자인 시스템 기획"},
+            {"id": "n9", "type": "publisher_task", "title": "퍼블리싱(디자인 시스템 반영)"},
+            {"id": "n10", "type": "copywriter_task", "title": "카피라이팅(고객 문구 기획/작성)"},
+            {"id": "n11", "type": "gemini_plan", "title": "개발 기획(기술/라이브러리 확정)"},
+            {"id": "n12", "type": "codex_implement", "title": "코딩(기능 구현)"},
+            {"id": "n13", "type": "code_change_summary", "title": "코드 변경 요약"},
+            {"id": "n14", "type": "test_after_implement", "title": "1차 기능 테스트"},
+            {"id": "n15", "type": "tester_run_e2e", "title": "1차 E2E/타입별 테스트"},
+            {"id": "n16", "type": "ux_e2e_review", "title": "UX E2E 검수(PC/모바일 스샷)"},
+            {"id": "n17", "type": "coder_fix_from_test_report", "title": "UX/E2E 실패 우선 수정"},
+            {"id": "n18", "type": "tester_run_e2e", "title": "수정 + E2E/타입별 루프(최대 3회)"},
+            {"id": "n19", "type": "gemini_review", "title": "리뷰어 점검"},
+            {"id": "n20", "type": "product_review", "title": "제품 품질 리뷰"},
+            {"id": "n21", "type": "improvement_stage", "title": "개선 우선순위/전략 계획"},
+            {"id": "n22", "type": "gemini_plan", "title": "리뷰 반영 고도화 플랜"},
+            {"id": "n23", "type": "coder_fix_from_test_report", "title": "고도화 반영 구현"},
+            {"id": "n24", "type": "tester_retest_e2e", "title": "고도화 후 E2E/타입별 재테스트"},
+            {"id": "n25", "type": "gemini_review", "title": "최종 리뷰 게이트"},
+            {"id": "n26", "type": "product_review", "title": "최종 제품 리뷰"},
+            {"id": "n27", "type": "improvement_stage", "title": "다음 개선 루프 준비"},
+            {"id": "n28", "type": "commit_fix", "title": "최종 커밋"},
+            {"id": "n29", "type": "documentation_task", "title": "기술 문서 작성(README/저작권/개발가이드)"},
+            {"id": "n30", "type": "push_branch", "title": "브랜치 푸시"},
+            {"id": "n31", "type": "create_pr", "title": "PR 생성"},
         ],
         "edges": [
             {"from": "n1", "to": "n2", "on": "success"},
@@ -99,6 +113,14 @@ def default_workflow_template() -> Dict[str, Any]:
             {"from": "n20", "to": "n21", "on": "success"},
             {"from": "n21", "to": "n22", "on": "success"},
             {"from": "n22", "to": "n23", "on": "success"},
+            {"from": "n23", "to": "n24", "on": "success"},
+            {"from": "n24", "to": "n25", "on": "success"},
+            {"from": "n25", "to": "n26", "on": "success"},
+            {"from": "n26", "to": "n27", "on": "success"},
+            {"from": "n27", "to": "n28", "on": "success"},
+            {"from": "n28", "to": "n29", "on": "success"},
+            {"from": "n29", "to": "n30", "on": "success"},
+            {"from": "n30", "to": "n31", "on": "success"},
         ],
     }
 
@@ -122,7 +144,7 @@ def load_workflows(path: Path) -> Dict[str, Any]:
     """Load workflow config from JSON with safe fallback."""
 
     if not path.exists():
-        defaults = {"default_workflow_id": "default_design_first_v4", "workflows": [default_workflow_template()]}
+        defaults = {"default_workflow_id": "default_product_dev_loop_v5", "workflows": [default_workflow_template()]}
         save_workflows(path, defaults)
         return defaults
 
@@ -137,7 +159,7 @@ def load_workflows(path: Path) -> Dict[str, Any]:
     if not isinstance(workflows, list) or not workflows:
         loaded["workflows"] = [default_workflow_template()]
     if not isinstance(loaded.get("default_workflow_id"), str):
-        loaded["default_workflow_id"] = "default_design_first_v4"
+        loaded["default_workflow_id"] = "default_product_dev_loop_v5"
     return loaded
 
 
