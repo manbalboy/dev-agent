@@ -194,6 +194,146 @@ def build_spec_json(
     }
 
 
+def build_product_brief_prompt(spec_path: str, product_brief_path: str) -> str:
+    """Prompt for AI to generate PRODUCT_BRIEF.md from spec context."""
+
+    return dedent(
+        f"""
+        당신은 제품 정의 전문가입니다. PRODUCT_BRIEF.md 전체를 한국어로 작성하세요.
+
+        입력 참고 자료:
+        - {spec_path}  (SPEC.md — 이슈 원문, 목표, 범위)
+
+        출력 대상 경로(참고용):
+        - {product_brief_path}
+
+        필수 섹션:
+        1. Product Goal — 이 제품이 해결하는 핵심 문제 한 문장
+        2. Problem Statement — 현재 사용자가 겪는 고통 포인트
+        3. Target Users — 1차 사용자와 2차 사용자 구분
+        4. Core Value — 경쟁 대안 대비 차별 가치
+        5. Scope Inputs — 이번 버전에 포함될 핵심 기능 (SPEC의 scope_in 반영)
+        6. Success Metrics — 이 제품이 성공했다고 판단하는 정량/정성 기준
+        7. Non-Goals — 이 제품에서 의도적으로 제외하는 것
+
+        작성 규칙:
+        - 반드시 한국어로 작성 (섹션 제목 영문 유지).
+        - 추상적 표현 금지. 각 항목은 검증 가능한 구체 문장으로 작성.
+        - 저장소의 기존 코드/README를 검색해 현재 제품 상태를 파악한 뒤 작성.
+        - markdown 본문만 출력. 작업 과정 설명, 메타 코멘트 금지.
+        """
+    ).strip() + "\n"
+
+
+def build_user_flows_prompt(product_brief_path: str, user_flows_path: str) -> str:
+    """Prompt for AI to generate USER_FLOWS.md from product brief."""
+
+    return dedent(
+        f"""
+        당신은 UX 설계 전문가입니다. USER_FLOWS.md 전체를 한국어로 작성하세요.
+
+        입력 참고 자료:
+        - {product_brief_path}  (PRODUCT_BRIEF.md — 제품 목표, 사용자, 가치)
+
+        출력 대상 경로(참고용):
+        - {user_flows_path}
+
+        필수 섹션:
+        1. Primary Flow — 핵심 사용자 여정 (단계별 번호 목록, 최소 5단계)
+        2. Secondary Flows — 부수적 흐름 (설정, 오류 복구, 엣지케이스 등)
+        3. UX State Checklist — 각 화면/기능에 대해 아래 3가지 상태를 명시:
+           - Loading 상태: 어떤 스피너/스켈레톤/진행 메시지가 필요한가
+           - Empty 상태: 데이터 없을 때 사용자에게 무엇을 보여줘야 하는가
+           - Error 상태: 실패 원인과 복구 액션을 어떻게 안내하는가
+        4. Entry/Exit Points — 각 흐름의 진입 조건과 종료 조건
+
+        작성 규칙:
+        - 반드시 한국어로 작성 (섹션 제목 영문 유지).
+        - 각 단계는 사용자 행동(User Action)과 시스템 반응(System Response)을 구분.
+        - 저장소의 기존 UI 코드/컴포넌트를 검색해 현실에 맞게 작성.
+        - markdown 본문만 출력. 작업 과정 설명 금지.
+        """
+    ).strip() + "\n"
+
+
+def build_mvp_scope_prompt(
+    product_brief_path: str,
+    user_flows_path: str,
+    spec_json_path: str,
+    mvp_scope_path: str,
+) -> str:
+    """Prompt for AI to generate MVP_SCOPE.md."""
+
+    return dedent(
+        f"""
+        당신은 제품 범위 결정 전문가입니다. MVP_SCOPE.md 전체를 한국어로 작성하세요.
+
+        입력 참고 자료:
+        - {product_brief_path}  (PRODUCT_BRIEF.md)
+        - {user_flows_path}     (USER_FLOWS.md)
+        - {spec_json_path}      (SPEC.json — scope_in / scope_out)
+
+        출력 대상 경로(참고용):
+        - {mvp_scope_path}
+
+        필수 섹션:
+        1. In Scope — 이번 MVP에 반드시 포함되는 기능 목록 (우선순위 표기)
+        2. Out of Scope — 의도적으로 제외한 기능과 제외 이유
+        3. MVP Acceptance Gates — MVP가 완료되었다고 판단하는 최소 조건 (최소 3개)
+        4. Post-MVP Candidates — MVP 이후 개선 루프에서 다룰 후보 기능
+        5. Scope Decision Rationale — 범위 결정의 근거 (리소스, 리스크, 사용자 우선순위)
+
+        작성 규칙:
+        - 반드시 한국어로 작성 (섹션 제목 영문 유지).
+        - "In Scope" 각 항목에는 우선순위(P1/P2)와 완료 조건을 함께 작성.
+        - MVP Acceptance Gates는 재현 가능하고 검증 가능한 조건이어야 함.
+        - 저장소 현황을 검색해 이미 구현된 기능은 In Scope에서 제외하거나 개선 범위로 표기.
+        - markdown 본문만 출력. 작업 과정 설명 금지.
+        """
+    ).strip() + "\n"
+
+
+def build_architecture_plan_prompt(
+    mvp_scope_path: str,
+    user_flows_path: str,
+    architecture_plan_path: str,
+) -> str:
+    """Prompt for AI to generate ARCHITECTURE_PLAN.md."""
+
+    return dedent(
+        f"""
+        당신은 소프트웨어 아키텍트입니다. ARCHITECTURE_PLAN.md 전체를 한국어로 작성하세요.
+
+        입력 참고 자료:
+        - {mvp_scope_path}   (MVP_SCOPE.md — 구현 범위)
+        - {user_flows_path}  (USER_FLOWS.md — 사용자 흐름)
+
+        출력 대상 경로(참고용):
+        - {architecture_plan_path}
+
+        필수 섹션:
+        1. Layer Structure — 제품 레이어 구성 (Presentation / Application / Data / Infrastructure)
+        2. Component Boundaries — 각 컴포넌트의 책임과 경계 (무엇을 하고, 무엇을 하지 않는가)
+        3. Data Contracts — 단계 간 데이터 전달 방식 (파일/JSON/API 스키마 요약)
+        4. Quality Gates — 구현 진입/완료 조건 (어떤 산출물이 없으면 다음 단계 진행 불가)
+        5. Loop Safety Rules — 무한 개선 루프 방지 규칙:
+           - 동일 문제 반복 제한 조건
+           - 품질 점수 정체 감지 기준
+           - 품질 하락 감지 기준
+           - 전략 변경 트리거 조건
+           - 복구 후보(git rollback) 정책
+        6. Technology Decisions — 기술 스택 결정과 선택 이유
+        7. Extension Points — 새 단계/도구/에이전트를 추가하는 방법
+
+        작성 규칙:
+        - 반드시 한국어로 작성 (섹션 제목 영문 유지).
+        - 저장소의 기존 코드 구조를 검색해 현실 아키텍처에 맞게 작성.
+        - 품질 게이트는 정량적 기준(점수 임계값, 반복 횟수 등)으로 명시.
+        - markdown 본문만 출력. 작업 과정 설명 금지.
+        """
+    ).strip() + "\n"
+
+
 def _infer_app_type(issue_title: str, issue_body: str) -> str:
     """Infer app type for test orchestration routing."""
 

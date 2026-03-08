@@ -26,7 +26,7 @@
 - refine loop and finalize
 
 ## 4) 단계별 계약
-상세 계약은 `_docs/STAGE_CONTRACTS.md` 자동 생성 파일을 표준으로 사용한다.
+상세 계약은 `_docs/STAGE_CONTRACTS.md`, `_docs/STAGE_CONTRACTS.json` 자동 생성 파일을 표준으로 사용한다.
 
 요약 계약:
 - `idea_to_product_brief`: 입력(SPEC) -> 출력(PRODUCT_BRIEF.md)
@@ -46,6 +46,11 @@
 - `_docs/IMPROVEMENT_BACKLOG.json`
 - `_docs/IMPROVEMENT_LOOP_STATE.json`
 - `_docs/IMPROVEMENT_PLAN.md`
+- `_docs/NEXT_IMPROVEMENT_TASKS.json`
+- `_docs/STAGE_CONTRACTS.md`
+- `_docs/STAGE_CONTRACTS.json`
+- `_docs/PIPELINE_ANALYSIS.md`
+- `_docs/PIPELINE_ANALYSIS.json`
 
 ## 6) PRODUCT_REVIEW.json 스키마
 - 제안 스키마: `docs/schemas/PRODUCT_REVIEW.schema.json`
@@ -65,6 +70,7 @@
 - `REVIEW_HISTORY.json`에 점수 이력 누적
 - `IMPROVEMENT_BACKLOG.json` 우선순위 항목 생성
 - `IMPROVEMENT_PLAN.md`로 다음 루프 전략 생성
+- `NEXT_IMPROVEMENT_TASKS.json`로 다음 루프 실행 가능한 작업 목록 생성
 
 ## 8) 무한 루프 방지 설계
 - 같은 문제 반복 제한: 최근 top issue 반복 감지

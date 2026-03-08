@@ -217,6 +217,23 @@ def test_orchestrator_runs_stages_in_fixed_order(app_components):
     assert (repo_path / "_docs" / "ARCHITECTURE_PLAN.md").exists()
     assert (repo_path / "_docs" / "PRODUCT_REVIEW.json").exists()
     assert (repo_path / "_docs" / "IMPROVEMENT_PLAN.md").exists()
+    assert (repo_path / "_docs" / "NEXT_IMPROVEMENT_TASKS.json").exists()
+    assert (repo_path / "_docs" / "STAGE_CONTRACTS.md").exists()
+    assert (repo_path / "_docs" / "STAGE_CONTRACTS.json").exists()
+    assert (repo_path / "_docs" / "PIPELINE_ANALYSIS.md").exists()
+    assert (repo_path / "_docs" / "PIPELINE_ANALYSIS.json").exists()
+    product_review_payload = json.loads(
+        (repo_path / "_docs" / "PRODUCT_REVIEW.json").read_text(encoding="utf-8")
+    )
+    assert product_review_payload["schema_version"] == "1.1"
+    assert "validation" in product_review_payload
+    assert product_review_payload["validation"]["passed"] is True
+    assert "quality_signals" in product_review_payload
+    assert "recommended_next_tasks" in product_review_payload
+    next_tasks_payload = json.loads(
+        (repo_path / "_docs" / "NEXT_IMPROVEMENT_TASKS.json").read_text(encoding="utf-8")
+    )
+    assert isinstance(next_tasks_payload.get("tasks"), list)
 
     log_text = (settings.logs_debug_dir / stored.log_file).read_text(encoding="utf-8")
     stage_lines = [
@@ -233,7 +250,7 @@ def test_orchestrator_runs_stages_in_fixed_order(app_components):
         JobStage.GENERATE_USER_FLOWS.value,
         JobStage.DEFINE_MVP_SCOPE.value,
         JobStage.ARCHITECTURE_PLANNING.value,
-        JobStage.COPYWRITER_TASK.value,
+        JobStage.PLAN_WITH_GEMINI.value,
         JobStage.DESIGN_WITH_CODEX.value,
         JobStage.IMPLEMENT_WITH_CODEX.value,
         JobStage.IMPLEMENT_WITH_CODEX.value,

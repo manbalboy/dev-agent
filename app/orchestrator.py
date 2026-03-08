@@ -30,18 +30,22 @@ from app.command_runner import (
 from app.config import AppSettings
 from app.models import JobRecord, JobStage, JobStatus, utc_now_iso
 from app.prompt_builder import (
+    build_architecture_plan_prompt,
     build_commit_message_prompt,
     build_copywriter_prompt,
     build_coder_prompt,
     build_documentation_prompt,
     build_designer_prompt,
+    build_mvp_scope_prompt,
     build_planner_prompt,
+    build_product_brief_prompt,
     build_publisher_prompt,
     build_pr_summary_prompt,
     build_reviewer_prompt,
     build_spec_json,
     build_spec_markdown,
     build_status_markdown,
+    build_user_flows_prompt,
 )
 from app.planner_graph import build_refinement_instruction, evaluate_plan_markdown
 from app.spec_tools import (
@@ -959,8 +963,11 @@ class Orchestrator:
         improvement_backlog_path = self._docs_file(repository_path, "IMPROVEMENT_BACKLOG.json")
         improvement_loop_state_path = self._docs_file(repository_path, "IMPROVEMENT_LOOP_STATE.json")
         improvement_plan_path = self._docs_file(repository_path, "IMPROVEMENT_PLAN.md")
+        next_improvement_tasks_path = self._docs_file(repository_path, "NEXT_IMPROVEMENT_TASKS.json")
         stage_contracts_path = self._docs_file(repository_path, "STAGE_CONTRACTS.md")
+        stage_contracts_json_path = self._docs_file(repository_path, "STAGE_CONTRACTS.json")
         pipeline_analysis_path = self._docs_file(repository_path, "PIPELINE_ANALYSIS.md")
+        pipeline_analysis_json_path = self._docs_file(repository_path, "PIPELINE_ANALYSIS.json")
         readme_path = repository_path / "README.md"
         copyright_path = repository_path / "COPYRIGHT.md"
         development_guide_path = repository_path / "DEVELOPMENT_GUIDE.md"
@@ -1062,8 +1069,8 @@ class Orchestrator:
                 "ORCHESTRATOR",
                 "SPEC quality gate not passed, but continuing by non-blocking assist policy.",
             )
-        self._write_stage_contracts_doc(stage_contracts_path)
-        self._write_pipeline_analysis_doc(pipeline_analysis_path)
+        self._write_stage_contracts_doc(stage_contracts_path, stage_contracts_json_path)
+        self._write_pipeline_analysis_doc(pipeline_analysis_path, pipeline_analysis_json_path)
 
         # Keep job metadata in sync with canonical issue data.
         self.store.update_job(
@@ -1095,8 +1102,11 @@ class Orchestrator:
             "improvement_backlog": improvement_backlog_path,
             "improvement_loop_state": improvement_loop_state_path,
             "improvement_plan": improvement_plan_path,
+            "next_improvement_tasks": next_improvement_tasks_path,
             "stage_contracts": stage_contracts_path,
+            "stage_contracts_json": stage_contracts_json_path,
             "pipeline_analysis": pipeline_analysis_path,
+            "pipeline_analysis_json": pipeline_analysis_json_path,
             "readme": readme_path,
             "copyright": copyright_path,
             "development_guide": development_guide_path,
@@ -1110,22 +1120,343 @@ class Orchestrator:
         paths: Dict[str, Path],
         log_path: Path,
     ) -> None:
-        """Create PRODUCT_BRIEF.md from issue/spec context."""
+        """Create PRODUCT_BRIEF.md — AI-generated from spec context."""
 
         self._set_stage(job.job_id, JobStage.IDEA_TO_PRODUCT_BRIEF, log_path)
         product_brief_path = paths.get("product_brief", self._docs_file(repository_path, "PRODUCT_BRIEF.md"))
+        prompt_path = self._docs_file(repository_path, "PRODUCT_BRIEF_PROMPT.md")
+        prompt_path.write_text(
+            build_product_brief_prompt(
+                spec_path=str(paths.get("spec", "")),
+                product_brief_path=str(product_brief_path),
+            ),
+            encoding="utf-8",
+        )
+        template_vars = {
+            **self._build_template_variables(job, paths, prompt_path),
+            "plan_path": str(product_brief_path),
+        }
+        try:
+            result = self.command_templates.run_template(
+                template_name=self._template_for_profile("planner"),
+                variables=template_vars,
+                cwd=repository_path,
+                log_writer=self._actor_log_writer(log_path, "PRODUCT_BRIEF"),
+            )
+            if not product_brief_path.exists() and result.stdout.strip():
+                product_brief_path.write_text(result.stdout, encoding="utf-8")
+        except Exception as error:  # noqa: BLE001
+            self._append_actor_log(
+                log_path, "ORCHESTRATOR",
+                f"PRODUCT_BRIEF AI call failed, using template fallback: {error}",
+            )
+            self._write_product_brief_fallback(job, paths, product_brief_path)
+        self._ensure_markdown_stage_contract(
+            stage_name=JobStage.IDEA_TO_PRODUCT_BRIEF.value,
+            path=product_brief_path,
+            required_sections={
+                "product_goal": ["product goal", "제품 목표", "goal"],
+                "problem_statement": ["problem statement", "문제 정의", "pain"],
+                "target_users": ["target users", "타겟 사용자", "사용자"],
+                "core_value": ["core value", "핵심 가치", "차별 가치"],
+                "scope_inputs": ["scope inputs", "in scope", "범위"],
+                "success_metrics": ["success metrics", "성공 지표", "지표"],
+                "non_goals": ["non-goals", "non goals", "비범위", "제외"],
+            },
+            fallback_writer=lambda: self._write_product_brief_fallback(job, paths, product_brief_path),
+            log_path=log_path,
+        )
+        self._append_actor_log(log_path, "ORCHESTRATOR", f"PRODUCT_BRIEF.md ready: {product_brief_path}")
+
+    def _stage_generate_user_flows(
+        self,
+        job: JobRecord,
+        repository_path: Path,
+        paths: Dict[str, Path],
+        log_path: Path,
+    ) -> None:
+        """Create USER_FLOWS.md — AI-generated from product brief."""
+
+        self._set_stage(job.job_id, JobStage.GENERATE_USER_FLOWS, log_path)
+        user_flows_path = paths.get("user_flows", self._docs_file(repository_path, "USER_FLOWS.md"))
+        product_brief_path = paths.get("product_brief", self._docs_file(repository_path, "PRODUCT_BRIEF.md"))
+        prompt_path = self._docs_file(repository_path, "USER_FLOWS_PROMPT.md")
+        prompt_path.write_text(
+            build_user_flows_prompt(
+                product_brief_path=str(product_brief_path),
+                user_flows_path=str(user_flows_path),
+            ),
+            encoding="utf-8",
+        )
+        template_vars = {
+            **self._build_template_variables(job, paths, prompt_path),
+            "plan_path": str(user_flows_path),
+        }
+        try:
+            result = self.command_templates.run_template(
+                template_name=self._template_for_profile("planner"),
+                variables=template_vars,
+                cwd=repository_path,
+                log_writer=self._actor_log_writer(log_path, "USER_FLOWS"),
+            )
+            if not user_flows_path.exists() and result.stdout.strip():
+                user_flows_path.write_text(result.stdout, encoding="utf-8")
+        except Exception as error:  # noqa: BLE001
+            self._append_actor_log(
+                log_path, "ORCHESTRATOR",
+                f"USER_FLOWS AI call failed, using template fallback: {error}",
+            )
+            self._write_user_flows_fallback(user_flows_path)
+        self._ensure_markdown_stage_contract(
+            stage_name=JobStage.GENERATE_USER_FLOWS.value,
+            path=user_flows_path,
+            required_sections={
+                "primary_flow": ["primary flow", "핵심 흐름", "user journey"],
+                "secondary_flows": ["secondary flows", "보조 흐름", "엣지"],
+                "ux_state_checklist": ["ux state checklist", "loading", "empty", "error", "상태"],
+                "entry_exit_points": ["entry/exit points", "entry", "exit", "진입", "종료"],
+            },
+            fallback_writer=lambda: self._write_user_flows_fallback(user_flows_path),
+            log_path=log_path,
+        )
+        self._append_actor_log(log_path, "ORCHESTRATOR", f"USER_FLOWS.md ready: {user_flows_path}")
+
+    def _stage_define_mvp_scope(
+        self,
+        job: JobRecord,
+        repository_path: Path,
+        paths: Dict[str, Path],
+        log_path: Path,
+    ) -> None:
+        """Create MVP_SCOPE.md — AI-generated with in/out scope and acceptance gates."""
+
+        self._set_stage(job.job_id, JobStage.DEFINE_MVP_SCOPE, log_path)
+        mvp_scope_path = paths.get("mvp_scope", self._docs_file(repository_path, "MVP_SCOPE.md"))
+        product_brief_path = paths.get("product_brief", self._docs_file(repository_path, "PRODUCT_BRIEF.md"))
+        user_flows_path = paths.get("user_flows", self._docs_file(repository_path, "USER_FLOWS.md"))
+        prompt_path = self._docs_file(repository_path, "MVP_SCOPE_PROMPT.md")
+        prompt_path.write_text(
+            build_mvp_scope_prompt(
+                product_brief_path=str(product_brief_path),
+                user_flows_path=str(user_flows_path),
+                spec_json_path=str(paths.get("spec_json", "")),
+                mvp_scope_path=str(mvp_scope_path),
+            ),
+            encoding="utf-8",
+        )
+        template_vars = {
+            **self._build_template_variables(job, paths, prompt_path),
+            "plan_path": str(mvp_scope_path),
+        }
+        try:
+            result = self.command_templates.run_template(
+                template_name=self._template_for_profile("planner"),
+                variables=template_vars,
+                cwd=repository_path,
+                log_writer=self._actor_log_writer(log_path, "MVP_SCOPE"),
+            )
+            if not mvp_scope_path.exists() and result.stdout.strip():
+                mvp_scope_path.write_text(result.stdout, encoding="utf-8")
+        except Exception as error:  # noqa: BLE001
+            self._append_actor_log(
+                log_path, "ORCHESTRATOR",
+                f"MVP_SCOPE AI call failed, using template fallback: {error}",
+            )
+            self._write_mvp_scope_fallback(paths, mvp_scope_path)
+        self._ensure_markdown_stage_contract(
+            stage_name=JobStage.DEFINE_MVP_SCOPE.value,
+            path=mvp_scope_path,
+            required_sections={
+                "in_scope": ["in scope", "포함", "범위"],
+                "out_of_scope": ["out of scope", "비범위", "제외"],
+                "acceptance_gates": ["acceptance gate", "완료 조건", "게이트"],
+            },
+            fallback_writer=lambda: self._write_mvp_scope_fallback(paths, mvp_scope_path),
+            log_path=log_path,
+        )
+        self._append_actor_log(log_path, "ORCHESTRATOR", f"MVP_SCOPE.md ready: {mvp_scope_path}")
+
+    def _stage_architecture_planning(
+        self,
+        job: JobRecord,
+        repository_path: Path,
+        paths: Dict[str, Path],
+        log_path: Path,
+    ) -> None:
+        """Create ARCHITECTURE_PLAN.md — AI-generated for implementation constraints."""
+
+        self._set_stage(job.job_id, JobStage.ARCHITECTURE_PLANNING, log_path)
+        architecture_plan_path = paths.get("architecture_plan", self._docs_file(repository_path, "ARCHITECTURE_PLAN.md"))
+        mvp_scope_path = paths.get("mvp_scope", self._docs_file(repository_path, "MVP_SCOPE.md"))
+        user_flows_path = paths.get("user_flows", self._docs_file(repository_path, "USER_FLOWS.md"))
+        prompt_path = self._docs_file(repository_path, "ARCHITECTURE_PLAN_PROMPT.md")
+        prompt_path.write_text(
+            build_architecture_plan_prompt(
+                mvp_scope_path=str(mvp_scope_path),
+                user_flows_path=str(user_flows_path),
+                architecture_plan_path=str(architecture_plan_path),
+            ),
+            encoding="utf-8",
+        )
+        template_vars = {
+            **self._build_template_variables(job, paths, prompt_path),
+            "plan_path": str(architecture_plan_path),
+        }
+        try:
+            result = self.command_templates.run_template(
+                template_name=self._template_for_profile("planner"),
+                variables=template_vars,
+                cwd=repository_path,
+                log_writer=self._actor_log_writer(log_path, "ARCHITECTURE"),
+            )
+            if not architecture_plan_path.exists() and result.stdout.strip():
+                architecture_plan_path.write_text(result.stdout, encoding="utf-8")
+        except Exception as error:  # noqa: BLE001
+            self._append_actor_log(
+                log_path, "ORCHESTRATOR",
+                f"ARCHITECTURE_PLAN AI call failed, using template fallback: {error}",
+            )
+            self._write_architecture_plan_fallback(architecture_plan_path)
+        self._ensure_markdown_stage_contract(
+            stage_name=JobStage.ARCHITECTURE_PLANNING.value,
+            path=architecture_plan_path,
+            required_sections={
+                "layer_structure": ["layer structure", "레이어", "layer"],
+                "component_boundaries": ["component boundaries", "컴포넌트 경계", "boundary"],
+                "data_contracts": ["data contracts", "데이터 계약", "contract"],
+                "quality_gates": ["quality gates", "품질 게이트", "quality gate"],
+                "loop_safety_rules": ["loop safety", "루프 안전", "regression", "stagnation"],
+            },
+            fallback_writer=lambda: self._write_architecture_plan_fallback(architecture_plan_path),
+            log_path=log_path,
+        )
+        self._append_actor_log(log_path, "ORCHESTRATOR", f"ARCHITECTURE_PLAN.md ready: {architecture_plan_path}")
+
+    def _ensure_markdown_stage_contract(
+        self,
+        *,
+        stage_name: str,
+        path: Path,
+        required_sections: Dict[str, List[str]],
+        fallback_writer: Optional[Callable[[], None]],
+        log_path: Path,
+    ) -> None:
+        """Validate markdown contract for one stage and optionally recover via fallback."""
+
+        missing = self._missing_markdown_sections(path, required_sections)
+        if not missing:
+            return
+        self._append_actor_log(
+            log_path,
+            "ORCHESTRATOR",
+            f"{stage_name} contract missing sections: {', '.join(missing)}",
+        )
+        if fallback_writer is not None:
+            fallback_writer()
+            missing = self._missing_markdown_sections(path, required_sections)
+            if not missing:
+                self._append_actor_log(
+                    log_path,
+                    "ORCHESTRATOR",
+                    f"{stage_name} contract recovered by fallback writer.",
+                )
+                return
+        raise CommandExecutionError(
+            f"{stage_name} contract validation failed. Missing sections: {', '.join(missing)}"
+        )
+
+    @staticmethod
+    def _missing_markdown_sections(path: Path, required_sections: Dict[str, List[str]]) -> List[str]:
+        """Return missing section keys based on keyword presence checks."""
+
+        text = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
+        lowered = text.lower()
+        if not lowered.strip():
+            return list(required_sections.keys())
+        missing: List[str] = []
+        for section_key, keywords in required_sections.items():
+            matched = any(keyword.lower() in lowered for keyword in keywords if keyword.strip())
+            if not matched:
+                missing.append(section_key)
+        return missing
+
+    def _ensure_product_definition_ready(
+        self,
+        paths: Dict[str, Path],
+        log_path: Path,
+    ) -> None:
+        """Hard gate: block implementation when product-definition artifacts are weak."""
+
+        validations = [
+            (
+                "PRODUCT_BRIEF.md",
+                paths.get("product_brief"),
+                {
+                    "product_goal": ["product goal", "goal"],
+                    "target_users": ["target users", "사용자"],
+                    "success_metrics": ["success metrics", "지표"],
+                },
+            ),
+            (
+                "USER_FLOWS.md",
+                paths.get("user_flows"),
+                {
+                    "primary_flow": ["primary flow", "핵심 흐름"],
+                    "ux_state_checklist": ["loading", "empty", "error", "상태"],
+                },
+            ),
+            (
+                "MVP_SCOPE.md",
+                paths.get("mvp_scope"),
+                {
+                    "in_scope": ["in scope", "범위"],
+                    "out_of_scope": ["out of scope", "비범위"],
+                    "acceptance_gates": ["acceptance gate", "완료 조건", "게이트"],
+                },
+            ),
+            (
+                "ARCHITECTURE_PLAN.md",
+                paths.get("architecture_plan"),
+                {
+                    "component_boundaries": ["component boundaries", "경계", "boundary"],
+                    "quality_gates": ["quality gate", "품질 게이트"],
+                    "loop_safety_rules": ["loop safety", "루프 안전", "stagnation", "regression"],
+                },
+            ),
+        ]
+        failures: List[str] = []
+        for label, path, required in validations:
+            if not isinstance(path, Path):
+                failures.append(f"{label}: file path missing")
+                continue
+            missing = self._missing_markdown_sections(path, required)
+            if missing:
+                failures.append(f"{label}: missing {', '.join(missing)}")
+        if failures:
+            self._append_actor_log(
+                log_path,
+                "ORCHESTRATOR",
+                "Product-definition hard gate blocked implementation: " + " | ".join(failures),
+            )
+            raise CommandExecutionError(
+                "Product-definition artifacts are insufficient. "
+                + " ; ".join(failures)
+            )
+
+    # ------------------------------------------------------------------
+    # Fallback writers — used when AI call fails for product-def stages
+    # ------------------------------------------------------------------
+
+    def _write_product_brief_fallback(
+        self,
+        job: JobRecord,
+        paths: Dict[str, Path],
+        product_brief_path: Path,
+    ) -> None:
         spec_json = self._read_json_file(paths.get("spec_json"))
-        goal = str(spec_json.get("goal", "")).strip() or job.issue_title
+        goal = str(spec_json.get("goal", "")).strip() if isinstance(spec_json, dict) else ""
+        goal = goal or job.issue_title
         scope_in = spec_json.get("scope_in", []) if isinstance(spec_json, dict) else []
-        target_users = [
-            "문제를 직접 겪는 1차 사용자",
-            "기능 품질을 유지보수하는 운영/개발 사용자",
-        ]
-        success_metrics = [
-            "MVP 핵심 시나리오 1개 이상이 재현 가능해야 함",
-            "테스트 리포트와 제품 리뷰 점수가 누적 저장되어야 함",
-            "다음 개선 작업이 자동 우선순위로 생성되어야 함",
-        ]
         lines: List[str] = [
             "# PRODUCT BRIEF",
             "",
@@ -1136,133 +1467,108 @@ class Orchestrator:
             "- 이슈 아이디어를 단발성 코드 생성이 아닌 제품 단위 개발 루프로 전환한다.",
             "",
             "## Target Users",
+            "- 문제를 직접 겪는 1차 사용자",
+            "- 기능 품질을 유지보수하는 운영/개발 사용자",
+            "",
+            "## Core Value",
+            "- 아이디어 입력부터 MVP 구현, 품질 리뷰, 반복 개선까지 한 파이프라인으로 수행한다.",
+            "- 코드 생성보다 품질 평가와 개선 우선순위 결정을 시스템적으로 강제한다.",
+            "",
+            "## Scope Inputs",
         ]
-        lines.extend(f"- {item}" for item in target_users)
-        lines.extend(
-            [
-                "",
-                "## Core Value",
-                "- 아이디어 입력부터 MVP 구현, 품질 리뷰, 반복 개선까지 한 파이프라인으로 수행한다.",
-                "- 코드 생성보다 품질 평가와 개선 우선순위 결정을 시스템적으로 강제한다.",
-                "",
-                "## Scope Inputs",
-            ]
-        )
         for item in (scope_in[:7] if isinstance(scope_in, list) else []):
             if str(item).strip():
                 lines.append(f"- {str(item).strip()}")
-        lines.extend(
-            [
-                "",
-                "## Success Metrics",
-            ]
-        )
-        lines.extend(f"- {item}" for item in success_metrics)
-        lines.append("")
+        lines.extend([
+            "",
+            "## Success Metrics",
+            "- MVP 핵심 시나리오 1개 이상이 재현 가능해야 함",
+            "- 테스트 리포트와 제품 리뷰 점수가 누적 저장되어야 함",
+            "- 다음 개선 작업이 자동 우선순위로 생성되어야 함",
+            "",
+            "## Non-Goals",
+            "- 이번 MVP 범위 외 신규 대기능 추가",
+            "- 자동 배포, 자동 머지",
+            "",
+        ])
         product_brief_path.write_text("\n".join(lines), encoding="utf-8")
 
-    def _stage_generate_user_flows(
-        self,
-        job: JobRecord,
-        repository_path: Path,
-        paths: Dict[str, Path],
-        log_path: Path,
-    ) -> None:
-        """Create USER_FLOWS.md with explicit product/user flows."""
-
-        self._set_stage(job.job_id, JobStage.GENERATE_USER_FLOWS, log_path)
-        user_flows_path = paths.get("user_flows", self._docs_file(repository_path, "USER_FLOWS.md"))
+    @staticmethod
+    def _write_user_flows_fallback(user_flows_path: Path) -> None:
         lines = [
             "# USER FLOWS",
             "",
-            "## Flow 1: 아이디어 입력 -> 제품 정의",
+            "## Primary Flow",
             "1. 사용자가 이슈/아이디어를 입력한다.",
-            "2. 시스템이 PRODUCT_BRIEF.md를 생성한다.",
-            "3. 목표/문제/사용자/성공지표가 합의 가능한 형태로 정리된다.",
+            "2. 시스템이 PRODUCT_BRIEF.md, USER_FLOWS.md, MVP_SCOPE.md, ARCHITECTURE_PLAN.md를 생성한다.",
+            "3. AI가 PLAN.md를 작성하고 MVP 범위 내 구현을 진행한다.",
+            "4. 테스트/리뷰 단계로 이동 가능한 실행 산출물이 생긴다.",
+            "5. PRODUCT_REVIEW.json으로 품질 점수를 계산한다.",
+            "6. IMPROVEMENT_BACKLOG.json에 우선순위 작업을 생성한다.",
+            "7. 다음 루프 전략을 확정하고 반복 개선한다.",
             "",
-            "## Flow 2: 제품 정의 -> MVP 구현",
-            "1. USER_FLOWS.md, MVP_SCOPE.md, ARCHITECTURE_PLAN.md를 순차 생성한다.",
-            "2. PLAN.md를 작성하고 범위 내 구현을 진행한다.",
-            "3. 테스트/리뷰 단계로 이동 가능한 실행 산출물이 생긴다.",
-            "",
-            "## Flow 3: 리뷰 -> 개선 루프",
-            "1. PRODUCT_REVIEW.json으로 품질 점수를 계산한다.",
-            "2. IMPROVEMENT_BACKLOG.json에 우선순위 작업을 생성한다.",
-            "3. IMPROVEMENT_PLAN.md로 다음 루프 전략을 확정한다.",
+            "## Secondary Flows",
+            "- 오류 발생 시: STATUS.md에 중단 원인과 재개 액션을 기록한다.",
+            "- 품질 정체 감지 시: 전략 변경 플래그를 활성화하고 범위를 축소한다.",
+            "- 품질 하락 감지 시: 마지막 안정 git HEAD로 롤백 후보를 기록한다.",
             "",
             "## UX State Checklist",
             "- Loading 상태: 스피너/스켈레톤/진행 메시지 존재 여부",
             "- Empty 상태: 데이터 없음 시 안내/유도 문구 존재 여부",
             "- Error 상태: 실패 사유/복구 액션/재시도 경로 존재 여부",
             "",
+            "## Entry/Exit Points",
+            "- 진입: GitHub 이슈 생성 또는 웹훅 트리거",
+            "- 종료: PR 생성 완료 또는 최대 재시도 횟수 초과",
+            "",
         ]
         user_flows_path.write_text("\n".join(lines), encoding="utf-8")
 
-    def _stage_define_mvp_scope(
-        self,
-        job: JobRecord,
-        repository_path: Path,
-        paths: Dict[str, Path],
-        log_path: Path,
-    ) -> None:
-        """Create MVP_SCOPE.md with in/out scope and acceptance gates."""
-
-        self._set_stage(job.job_id, JobStage.DEFINE_MVP_SCOPE, log_path)
-        mvp_scope_path = paths.get("mvp_scope", self._docs_file(repository_path, "MVP_SCOPE.md"))
+    def _write_mvp_scope_fallback(self, paths: Dict[str, Path], mvp_scope_path: Path) -> None:
         spec_json = self._read_json_file(paths.get("spec_json"))
         scope_in = spec_json.get("scope_in", []) if isinstance(spec_json, dict) else []
         scope_out = spec_json.get("scope_out", []) if isinstance(spec_json, dict) else []
-        lines = [
-            "# MVP SCOPE",
-            "",
-            "## In Scope",
-        ]
+        lines = ["# MVP SCOPE", "", "## In Scope"]
         for item in (scope_in[:8] if isinstance(scope_in, list) else []):
             if str(item).strip():
-                lines.append(f"- {str(item).strip()}")
-        lines.extend(
-            [
-                "",
-                "## Out of Scope",
-            ]
-        )
+                lines.append(f"- [P1] {str(item).strip()} — 완료 조건: 기능 재현 가능")
+        lines.extend(["", "## Out of Scope"])
         for item in (scope_out[:8] if isinstance(scope_out, list) else []):
             if str(item).strip():
                 lines.append(f"- {str(item).strip()}")
-        lines.extend(
-            [
-                "",
-                "## MVP Acceptance Gates",
-                "- 핵심 사용자 플로우 1개 이상이 end-to-end로 동작한다.",
-                "- PRODUCT_REVIEW.json이 생성되고 필수 카테고리 점수가 기록된다.",
-                "- 최소 1개 테스트 리포트가 생성된다.",
-                "",
-                "## Post-MVP Candidate",
-                "- 성능 최적화, 리팩토링, 고급 UX polish는 개선 루프에서 처리한다.",
-                "",
-            ]
-        )
+        lines.extend([
+            "",
+            "## MVP Acceptance Gates",
+            "- [G1] 핵심 사용자 플로우 1개 이상이 end-to-end로 동작한다.",
+            "- [G2] PRODUCT_REVIEW.json이 생성되고 필수 카테고리 점수가 기록된다.",
+            "- [G3] 최소 1개 테스트 리포트가 생성된다.",
+            "- [G4] 에러/빈 상태/로딩 상태 처리가 각각 1개 이상 구현된다.",
+            "",
+            "## Post-MVP Candidates",
+            "- 성능 최적화, 리팩토링, 고급 UX polish",
+            "- 추가 사용자 플로우, 확장 기능",
+            "",
+            "## Scope Decision Rationale",
+            "- 최소 기능으로 빠른 검증 후 반복 개선하는 MVP 전략을 따른다.",
+            "",
+        ])
         mvp_scope_path.write_text("\n".join(lines), encoding="utf-8")
 
-    def _stage_architecture_planning(
-        self,
-        job: JobRecord,
-        repository_path: Path,
-        paths: Dict[str, Path],
-        log_path: Path,
-    ) -> None:
-        """Create ARCHITECTURE_PLAN.md for implementation constraints."""
-
-        self._set_stage(job.job_id, JobStage.ARCHITECTURE_PLANNING, log_path)
-        architecture_plan_path = paths.get("architecture_plan", self._docs_file(repository_path, "ARCHITECTURE_PLAN.md"))
+    @staticmethod
+    def _write_architecture_plan_fallback(architecture_plan_path: Path) -> None:
         lines = [
             "# ARCHITECTURE PLAN",
             "",
-            "## Components",
+            "## Layer Structure",
             "- Product Definition Layer: PRODUCT_BRIEF.md / USER_FLOWS.md / MVP_SCOPE.md",
             "- Delivery Layer: PLAN.md / 구현 코드 / TEST_REPORT_*",
             "- Review Layer: REVIEW.md / PRODUCT_REVIEW.json",
             "- Improvement Loop Layer: REVIEW_HISTORY.json / IMPROVEMENT_BACKLOG.json / IMPROVEMENT_PLAN.md",
+            "",
+            "## Component Boundaries",
+            "- Orchestrator: 단계 순서, 재시도 정책, 종료 조건 결정 (AI 사용 금지)",
+            "- AI Workers: 프롬프트 입력 -> 산출물 파일 출력 (제어 로직 금지)",
+            "- Store: 잡 상태, 단계, 에러 메시지 영속화",
             "",
             "## Data Contracts",
             "- 각 단계는 `_docs` 아래 파일(또는 JSON) 산출물을 남긴다.",
@@ -1271,13 +1577,25 @@ class Orchestrator:
             "",
             "## Quality Gates",
             "- 설계 산출물(brief/flows/mvp/architecture) 누락 시 구현 단계 진행 금지",
-            "- 제품 리뷰 점수 하락/정체/반복 이슈 발생 시 전략 변경 플래그 활성화",
+            "- PRODUCT_REVIEW overall < 3.0 이면 improvement_stage에서 전략 변경 검토",
             "",
-            "## Loop Safety",
-            "- 같은 문제 반복 제한: 동일 top issue 연속 반복 감지",
-            "- 품질 점수 정체 감지: 최근 N회 개선폭 임계치 이하",
-            "- 품질 하락 감지: 직전 대비 점수 하락",
-            "- 복구 고려: 마지막 안정 상태(git sha) 기록",
+            "## Loop Safety Rules",
+            "- 동일 top issue 2회 이상 연속 → repeated_issue_limit_hit = True",
+            "- 최근 3회 overall 변화폭 ≤ 0.15 → score_stagnation_detected = True",
+            "- 직전 대비 overall 0.2 이상 하락 → quality_regression_detected = True",
+            "- 위 3가지 중 1개라도 True → strategy_change_required = True (범위 축소 전략)",
+            "- 복구 후보: git HEAD sha 기록, 품질 하락 시 롤백 검토",
+            "",
+            "## Technology Decisions",
+            "- 웹: React/Nuxt 기반 프레임워크",
+            "- API: FastAPI 기반",
+            "- 모바일: React Native",
+            "- AI 에이전트: Gemini(계획/리뷰) / Codex(구현/수정)",
+            "",
+            "## Extension Points",
+            "- 새 단계: workflow_design.py SUPPORTED_NODE_TYPES에 타입 추가",
+            "- 새 에이전트: config/ai_commands.json에 템플릿 추가",
+            "- 새 평가 기준: _stage_product_review scores 딕셔너리에 카테고리 추가",
             "",
         ]
         architecture_plan_path.write_text("\n".join(lines), encoding="utf-8")
@@ -1308,63 +1626,200 @@ class Orchestrator:
         architecture_exists = bool(self._read_text_file(paths.get("architecture_plan")))
         user_flows_exists = bool(self._read_text_file(paths.get("user_flows")))
         mvp_scope_exists = bool(self._read_text_file(paths.get("mvp_scope")))
+        product_brief_exists = bool(self._read_text_file(paths.get("product_brief")))
         ux_review_text = self._read_text_file(self._docs_file(repository_path, "UX_REVIEW.md"))
         spec_text = self._read_text_file(paths.get("spec"))
+        plan_text = self._read_text_file(paths.get("plan"))
         review_lower = review_text.lower()
         spec_lower = spec_text.lower()
+        plan_lower = plan_text.lower()
         todo_penalty = min(3, len(todo_items) // 2)
 
+        # ── 코드 품질 ────────────────────────────────────────────────────
+        # TODO 수, REVIEW.md 내 버그/보안/크래시 언급 여부로 가중치 계산
+        critical_keywords = ["bug", "보안", "security", "crash", "크래시", "취약", "취약점"]
+        has_critical = any(kw in review_lower for kw in critical_keywords)
+        code_quality_score = max(1, 5 - todo_penalty - (1 if has_critical else 0))
+        code_quality_reason = (
+            f"TODO {len(todo_items)}개"
+            + (", 크리티컬 이슈(버그/보안/크래시) 감지" if has_critical else "")
+        )
+
+        # ── 아키텍처 구조 ─────────────────────────────────────────────────
+        # ARCHITECTURE_PLAN 존재 + 레이어/게이트/루프안전 섹션 포함 여부
+        arch_text = self._read_text_file(paths.get("architecture_plan")).lower()
+        arch_has_layers = "layer" in arch_text or "레이어" in arch_text
+        arch_has_gates = "quality gate" in arch_text or "품질 게이트" in arch_text
+        arch_has_loop_safety = "loop safety" in arch_text or "루프 안전" in arch_text or "loop_safety" in arch_text
+        arch_bonus = sum([arch_has_layers, arch_has_gates, arch_has_loop_safety])
+        architecture_score = min(5, (3 if architecture_exists else 1) + (arch_bonus if architecture_exists else 0))
+        architecture_reason = (
+            f"ARCHITECTURE_PLAN {'있음' if architecture_exists else '없음'}"
+            + (f", 레이어{'O' if arch_has_layers else 'X'}"
+               f"/게이트{'O' if arch_has_gates else 'X'}"
+               f"/루프안전{'O' if arch_has_loop_safety else 'X'}")
+        )
+
+        # ── 유지보수성 ────────────────────────────────────────────────────
+        # MVP_SCOPE + 비범위 명시 여부 + PRODUCT_BRIEF 존재 여부
+        mvp_text = self._read_text_file(paths.get("mvp_scope")).lower()
+        mvp_has_out_of_scope = "out of scope" in mvp_text or "비범위" in mvp_text or "out_of_scope" in mvp_text
+        mvp_has_gates = "acceptance gate" in mvp_text or "완료 조건" in mvp_text
+        maintainability_score = (
+            (3 if mvp_scope_exists else 1)
+            + (1 if mvp_has_out_of_scope else 0)
+            + (1 if product_brief_exists else 0)
+        )
+        maintainability_score = min(5, maintainability_score)
+        maintainability_reason = (
+            f"MVP_SCOPE {'있음' if mvp_scope_exists else '없음'}"
+            + (f", 비범위정의{'O' if mvp_has_out_of_scope else 'X'}"
+               f", PRODUCT_BRIEF{'O' if product_brief_exists else 'X'}"
+               f", 완료조건{'O' if mvp_has_gates else 'X'}")
+        )
+
+        # ── 사용성 ────────────────────────────────────────────────────────
+        # USER_FLOWS 존재 + primary flow 단계 수 + 진입/종료 조건 명시
+        flows_text = self._read_text_file(paths.get("user_flows")).lower()
+        flows_has_primary = "primary flow" in flows_text or "primary" in flows_text
+        flows_has_entry_exit = ("entry" in flows_text and "exit" in flows_text) or "진입" in flows_text
+        usability_score = (
+            (3 if user_flows_exists else 1)
+            + (1 if flows_has_primary else 0)
+            + (1 if flows_has_entry_exit else 0)
+        )
+        usability_score = min(5, usability_score)
+        usability_reason = (
+            f"USER_FLOWS {'있음' if user_flows_exists else '없음'}"
+            + (f", primary flow{'O' if flows_has_primary else 'X'}"
+               f", entry/exit{'O' if flows_has_entry_exit else 'X'}")
+        )
+
+        # ── UX 명확성 ─────────────────────────────────────────────────────
+        # UX_REVIEW 존재 + 실패 없음 + UX state checklist 포함 여부
+        ux_lower = ux_review_text.lower()
+        ux_no_failure = bool(ux_review_text) and ("실패/누락 없음" in ux_review_text or "all pass" in ux_lower)
+        ux_has_state_check = "loading" in ux_lower or "empty" in ux_lower or "로딩" in ux_lower
+        ux_clarity_score = (
+            (2 if ux_review_text else 1)
+            + (2 if ux_no_failure else 0)
+            + (1 if ux_has_state_check else 0)
+        )
+        ux_clarity_score = min(5, ux_clarity_score)
+        ux_clarity_reason = (
+            f"UX_REVIEW {'있음' if ux_review_text else '없음'}"
+            + (f", 실패없음{'O' if ux_no_failure else 'X'}"
+               f", 상태체크리스트{'O' if ux_has_state_check else 'X'}")
+        )
+
+        # ── 테스트 커버리지 ───────────────────────────────────────────────
+        # 리포트 수, 실패 수, PLAN에 테스트 전략 포함 여부
+        plan_has_test_strategy = "test strategy" in plan_lower or "테스트 전략" in plan_lower or "test_strategy" in plan_lower
+        test_base = 3 if test_report_paths else 1
+        test_score = max(1, test_base - min(2, test_failures) + (1 if plan_has_test_strategy else 0))
+        test_score = min(5, test_score)
+        test_reason = (
+            f"테스트 리포트 {len(test_report_paths)}개 (pass={test_passes}, fail={test_failures})"
+            + (", PLAN 테스트전략 있음" if plan_has_test_strategy else "")
+        )
+
+        # ── Error/Empty/Loading 상태 처리 ─────────────────────────────────
+        # 각각 spec, review, plan에서 키워드 조합으로 점수 산출
+        def _state_score(keywords_spec: List[str], keywords_review: List[str], keywords_plan: List[str]) -> int:
+            hits = (
+                sum(1 for k in keywords_spec if k in spec_lower)
+                + sum(1 for k in keywords_review if k in review_lower)
+                + sum(1 for k in keywords_plan if k in plan_lower)
+            )
+            return min(5, max(1, 1 + hits))
+
+        error_score = _state_score(
+            ["error", "오류", "에러", "exception"],
+            ["오류", "error", "에러", "실패", "fail"],
+            ["error handling", "에러 처리", "오류 처리"],
+        )
+        empty_score = _state_score(
+            ["empty", "빈 상태", "데이터 없음"],
+            ["빈 상태", "empty state", "empty"],
+            ["empty state", "빈 상태 처리"],
+        )
+        loading_score = _state_score(
+            ["loading", "로딩", "spinner"],
+            ["로딩", "loading", "스피너"],
+            ["loading state", "로딩 처리", "skeleton"],
+        )
+
         scores = {
-            "code_quality": max(1, 5 - todo_penalty),
-            "architecture_structure": 4 if architecture_exists else 2,
-            "maintainability": 4 if mvp_scope_exists else 2,
-            "usability": 4 if user_flows_exists else 2,
-            "ux_clarity": 4 if ux_review_text and "실패/누락 없음" in ux_review_text else (3 if ux_review_text else 2),
-            "test_coverage": max(1, 4 - min(2, test_failures)) if test_report_paths else 1,
-            "error_state_handling": 4 if ("error" in spec_lower or "오류" in review_lower) else 2,
-            "empty_state_handling": 4 if ("empty" in spec_lower or "빈 상태" in review_lower) else 2,
-            "loading_state_handling": 4 if ("loading" in spec_lower or "로딩" in review_lower) else 2,
+            "code_quality": code_quality_score,
+            "architecture_structure": architecture_score,
+            "maintainability": maintainability_score,
+            "usability": usability_score,
+            "ux_clarity": ux_clarity_score,
+            "test_coverage": test_score,
+            "error_state_handling": error_score,
+            "empty_state_handling": empty_score,
+            "loading_state_handling": loading_score,
         }
         overall = round(sum(scores.values()) / float(len(scores)), 2)
 
+        score_reasons = {
+            "code_quality": code_quality_reason,
+            "architecture_structure": architecture_reason,
+            "maintainability": maintainability_reason,
+            "usability": usability_reason,
+            "ux_clarity": ux_clarity_reason,
+            "test_coverage": test_reason,
+            "error_state_handling": f"에러 상태 키워드 점수: {error_score}/5",
+            "empty_state_handling": f"빈 상태 키워드 점수: {empty_score}/5",
+            "loading_state_handling": f"로딩 상태 키워드 점수: {loading_score}/5",
+        }
+
         findings = [
-            {"category": "code_quality", "summary": f"TODO 항목 {len(todo_items)}개 감지"},
-            {"category": "architecture_structure", "summary": "ARCHITECTURE_PLAN.md 존재 여부 기반 평가"},
-            {"category": "maintainability", "summary": "MVP/문서 산출물 존재 여부 기반 평가"},
-            {"category": "usability", "summary": "USER_FLOWS.md 존재 여부 기반 평가"},
-            {"category": "ux_clarity", "summary": "UX_REVIEW.md 내용 기반 평가"},
             {
-                "category": "test_coverage",
-                "summary": f"테스트 리포트 {len(test_report_paths)}개, 실패 {test_failures}개",
-            },
-            {"category": "error_state_handling", "summary": "오류 상태 안내 관련 키워드 기반 점검"},
-            {"category": "empty_state_handling", "summary": "빈 상태 안내 관련 키워드 기반 점검"},
-            {"category": "loading_state_handling", "summary": "로딩 상태 안내 관련 키워드 기반 점검"},
+                "category": cat,
+                "score": scores[cat],
+                "max_score": 5,
+                "summary": score_reasons[cat],
+                "action_needed": scores[cat] <= 2,
+            }
+            for cat in scores
         ]
 
+        # ── 개선 후보 생성 ────────────────────────────────────────────────
+        # TODO 항목 + 점수 ≤ 2 카테고리 → P1/P2 분류
         candidates: List[Dict[str, Any]] = []
+        p1_keywords = ["bug", "fail", "error", "security", "crash", "보안", "크래시", "취약"]
         for item in todo_items:
-            priority = "P1" if any(key in item.lower() for key in ["bug", "fail", "error", "security", "crash"]) else "P2"
-            candidates.append(
-                {
-                    "id": self._stable_issue_id(item),
-                    "source": "review_todo",
-                    "title": item,
-                    "priority": priority,
-                    "reason": "REVIEW.md TODO 항목",
-                }
-            )
+            priority = "P1" if any(k in item.lower() for k in p1_keywords) else "P2"
+            candidates.append({
+                "id": self._stable_issue_id(item),
+                "source": "review_todo",
+                "title": item,
+                "priority": priority,
+                "reason": "REVIEW.md TODO 항목",
+                "action": "REVIEW.md의 해당 TODO를 해소하는 코드 수정",
+            })
         for category, score in scores.items():
             if score <= 2:
-                candidates.append(
-                    {
-                        "id": self._stable_issue_id(category),
-                        "source": "quality_score",
-                        "title": f"{category} 점수 개선",
-                        "priority": "P1",
-                        "reason": f"{category} 점수 {score}/5",
-                    }
-                )
+                action_map = {
+                    "code_quality": "TODO 항목 해소 및 크리티컬 이슈 수정",
+                    "architecture_structure": "ARCHITECTURE_PLAN.md에 레이어/게이트/루프안전 섹션 추가",
+                    "maintainability": "MVP_SCOPE.md에 비범위 정의 및 완료 조건 보강",
+                    "usability": "USER_FLOWS.md에 Primary Flow 및 진입/종료 조건 추가",
+                    "ux_clarity": "UX_REVIEW.md 생성 또는 UX 상태 체크리스트 보강",
+                    "test_coverage": "테스트 리포트 추가 및 PLAN에 테스트 전략 명시",
+                    "error_state_handling": "에러 상태 UI 컴포넌트 및 메시지 구현",
+                    "empty_state_handling": "빈 상태 UI 컴포넌트 및 안내 문구 구현",
+                    "loading_state_handling": "로딩 스피너/스켈레톤 컴포넌트 구현",
+                }
+                candidates.append({
+                    "id": self._stable_issue_id(category),
+                    "source": "quality_score",
+                    "title": f"{category} 점수 개선 (현재 {score}/5)",
+                    "priority": "P1",
+                    "reason": score_reasons[category],
+                    "action": action_map.get(category, f"{category} 개선"),
+                })
         dedup: Dict[str, Dict[str, Any]] = {}
         for item in candidates:
             dedup[item["id"]] = item
@@ -1372,24 +1827,69 @@ class Orchestrator:
             dedup.values(),
             key=lambda x: (0 if x.get("priority") == "P1" else 1, str(x.get("title", ""))),
         )
+        priority_summary = {
+            "P0": sum(1 for item in ordered_candidates if item.get("priority") == "P0"),
+            "P1": sum(1 for item in ordered_candidates if item.get("priority") == "P1"),
+            "P2": sum(1 for item in ordered_candidates if item.get("priority") == "P2"),
+            "P3": sum(1 for item in ordered_candidates if item.get("priority") == "P3"),
+        }
+        recommended_next_tasks = [
+            {
+                "id": str(item.get("id", "")),
+                "title": str(item.get("title", "")),
+                "priority": str(item.get("priority", "P2")),
+                "reason": str(item.get("reason", "")),
+                "action": str(item.get("action", "")),
+            }
+            for item in ordered_candidates[:5]
+        ]
+        quality_signals = {
+            "todo_items_count": len(todo_items),
+            "critical_issue_keywords_detected": has_critical,
+            "test_report_count": len(test_report_paths),
+            "test_failures_count": test_failures,
+            "test_passes_count": test_passes,
+            "has_product_brief": product_brief_exists,
+            "has_user_flows": user_flows_exists,
+            "has_mvp_scope": mvp_scope_exists,
+            "has_architecture_plan": architecture_exists,
+            "has_ux_review": bool(ux_review_text),
+        }
 
         payload = {
-            "schema_version": "1.0",
+            "schema_version": "1.1",
             "generated_at": utc_now_iso(),
             "job_id": job.job_id,
             "review_basis": {
                 "spec": str(paths.get("spec", "")),
                 "plan": str(paths.get("plan", "")),
                 "review": str(review_path),
+                "product_brief": str(paths.get("product_brief", "")),
+                "user_flows": str(paths.get("user_flows", "")),
+                "mvp_scope": str(paths.get("mvp_scope", "")),
+                "architecture_plan": str(paths.get("architecture_plan", "")),
             },
             "scores": {**scores, "overall": overall},
+            "score_reasons": score_reasons,
             "findings": findings,
             "improvement_candidates": ordered_candidates,
+            "priority_summary": priority_summary,
+            "recommended_next_tasks": recommended_next_tasks,
+            "quality_signals": quality_signals,
             "quality_gate": {
                 "passed": overall >= 3.0,
-                "reason": "overall >= 3.0",
+                "threshold": 3.0,
+                "reason": "overall >= 3.0 (1~5 척도, 각 카테고리 키워드+문서 존재 기반)",
+                "categories_below_threshold": [c for c, s in scores.items() if s <= 2],
             },
         }
+        validation = self._validate_product_review_payload(payload)
+        payload["validation"] = validation
+        if not bool(validation.get("passed")):
+            raise CommandExecutionError(
+                "PRODUCT_REVIEW payload validation failed: "
+                + "; ".join(str(item) for item in validation.get("errors", []))
+            )
         product_review_path = paths.get("product_review", self._docs_file(repository_path, "PRODUCT_REVIEW.json"))
         product_review_path.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
@@ -1498,38 +1998,136 @@ class Orchestrator:
             encoding="utf-8",
         )
 
+        overall_score = float(review_payload.get("scores", {}).get("overall", 0.0)) if isinstance(review_payload, dict) else 0.0
+        categories_below = (
+            review_payload.get("quality_gate", {}).get("categories_below_threshold", [])
+            if isinstance(review_payload, dict)
+            else []
+        )
+
+        # ── 전략 변경 시 실행 범위 제한 ──────────────────────────────────
+        # strategy_change_required = True일 때:
+        # - P1 항목만 처리하도록 next_scope_restriction 활성화
+        # - 품질 하락이면 rollback_recommended 활성화
+        next_scope_restriction = "P1_only" if strategy_change_required else "normal"
+        rollback_recommended = quality_regression_detected and bool(git_head)
+        loop_state["next_scope_restriction"] = next_scope_restriction
+        loop_state["rollback_recommended"] = rollback_recommended
+        loop_state["categories_below_threshold"] = categories_below
+        loop_state["overall_score"] = overall_score
+        # 전략 변경 이유를 명시적으로 기록
+        change_reasons: List[str] = []
+        if repeated_issue_limit_hit:
+            change_reasons.append(f"동일 이슈 {top_issue_id!r}가 최근 3회 내 2회 이상 반복됨")
+        if score_stagnation_detected:
+            scores_str = ", ".join(f"{s:.2f}" for s in recent_scores)
+            change_reasons.append(f"최근 3회 점수 정체 감지 ({scores_str}) — 변화폭 ≤ 0.15")
+        if quality_regression_detected and len(history_entries) >= 2:
+            prev_s = float(history_entries[-2].get("overall", 0.0))
+            curr_s = float(history_entries[-1].get("overall", 0.0))
+            change_reasons.append(f"품질 하락 감지: {prev_s:.2f} → {curr_s:.2f} (0.2 이상 하락)")
+        loop_state["strategy_change_reasons"] = change_reasons
+
+        loop_state_path = paths.get("improvement_loop_state", self._docs_file(repository_path, "IMPROVEMENT_LOOP_STATE.json"))
+        loop_state_path.write_text(
+            json.dumps(loop_state, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        # 전략 변경 시 P1만 처리하도록 backlog를 필터링
+        if strategy_change_required:
+            next_items = [item for item in backlog_items if item.get("priority") == "P1"][:3]
+        else:
+            next_items = backlog_items[:5]
+        next_tasks_payload = {
+            "generated_at": utc_now_iso(),
+            "strategy": loop_state.get("strategy", "normal_iterative_improvement"),
+            "scope_restriction": next_scope_restriction,
+            "tasks": [
+                {
+                    "task_id": f"next_{index + 1}",
+                    "source_issue_id": str(item.get("id", "")),
+                    "title": str(item.get("title", "")),
+                    "priority": str(item.get("priority", "P2")),
+                    "reason": str(item.get("reason", "")),
+                    "action": str(item.get("action", "")),
+                    "recommended_node_type": (
+                        "coder_fix_from_test_report"
+                        if str(item.get("priority", "P2")) in {"P0", "P1"}
+                        else "gemini_plan"
+                    ),
+                }
+                for index, item in enumerate(next_items)
+            ],
+        }
+        next_tasks_path = paths.get(
+            "next_improvement_tasks",
+            self._docs_file(repository_path, "NEXT_IMPROVEMENT_TASKS.json"),
+        )
+        next_tasks_path.write_text(
+            json.dumps(next_tasks_payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
         plan_lines = [
             "# IMPROVEMENT PLAN",
             "",
             f"- Generated at: {loop_state['generated_at']}",
             f"- Strategy: `{loop_state['strategy']}`",
-            f"- Current overall score: `{review_payload.get('scores', {}).get('overall', 'n/a')}`",
+            f"- Current overall score: `{overall_score}`",
+            f"- Next scope restriction: `{next_scope_restriction}`",
             "",
             "## Loop Guard Signals",
             f"- repeated_issue_limit_hit: `{repeated_issue_limit_hit}`",
             f"- score_stagnation_detected: `{score_stagnation_detected}`",
             f"- quality_regression_detected: `{quality_regression_detected}`",
             f"- strategy_change_required: `{strategy_change_required}`",
-            "",
-            "## Next Improvements (Top 5)",
+            f"- rollback_recommended: `{rollback_recommended}`",
         ]
-        for item in backlog_items[:5]:
+        if change_reasons:
+            plan_lines.extend(["", "## Strategy Change Reasons"])
+            for reason in change_reasons:
+                plan_lines.append(f"- {reason}")
+
+        plan_lines.extend(["", "## Next Improvements"])
+        if strategy_change_required:
+            plan_lines.append("> **전략 변경 모드**: P1 항목만 처리합니다. 범위를 축소하고 안정화 작업을 우선 수행하세요.")
+        for item in next_items:
+            action = str(item.get("action", "")).strip()
             plan_lines.append(
-                f"- [{item.get('priority', 'P2')}] {str(item.get('title', '')).strip()} ({item.get('reason', '')})"
+                f"- [{item.get('priority', 'P2')}] {str(item.get('title', '')).strip()}"
+                + (f"\n  - 원인: {item.get('reason', '')}" if item.get("reason") else "")
+                + (f"\n  - 액션: {action}" if action else "")
             )
-        if not backlog_items:
-            plan_lines.append("- 개선 백로그 항목 없음")
-        plan_lines.extend(
-            [
-                "",
-                "## Recovery Option",
-                f"- last_known_head: `{git_head or 'unavailable'}`",
-                "- 전략 변경이 필요하면 범위를 축소하고 안정화 작업을 우선 수행한다.",
-                "",
-            ]
-        )
+        if not next_items:
+            plan_lines.append("- 개선 백로그 항목 없음 (품질 목표 달성)")
+
+        if categories_below:
+            plan_lines.extend(["", "## Categories Below Threshold (≤2/5)"])
+            for cat in categories_below:
+                plan_lines.append(f"- {cat}")
+
+        plan_lines.extend([
+            "",
+            "## Recovery Option",
+            f"- last_known_head: `{git_head or 'unavailable'}`",
+            f"- next_tasks_file: `{next_tasks_path}`",
+        ])
+        if rollback_recommended:
+            plan_lines.append(
+                f"- **롤백 권장**: 품질 하락이 감지되었습니다. `git reset --hard {git_head}` 검토 후 P1 항목만 수정하세요."
+            )
+        else:
+            plan_lines.append("- 전략 변경이 필요하면 범위를 축소하고 P1 항목부터 안정화 작업을 우선 수행한다.")
+        plan_lines.append("")
+
         improvement_plan_path = paths.get("improvement_plan", self._docs_file(repository_path, "IMPROVEMENT_PLAN.md"))
         improvement_plan_path.write_text("\n".join(plan_lines), encoding="utf-8")
+        self._append_actor_log(
+            log_path, "ORCHESTRATOR",
+            f"IMPROVEMENT_PLAN.md 생성 완료 — strategy={loop_state['strategy']}, "
+            f"next_scope={next_scope_restriction}, rollback={rollback_recommended}",
+        )
 
     def _stage_plan_with_gemini(
         self,
@@ -1539,7 +2137,7 @@ class Orchestrator:
         log_path: Path,
         planning_mode: str = "general",
     ) -> None:
-        self._set_stage(job.job_id, JobStage.COPYWRITER_TASK, log_path)
+        self._set_stage(job.job_id, JobStage.PLAN_WITH_GEMINI, log_path)
 
         if not self._planner_graph_enabled():
             self._append_actor_log(
@@ -1959,6 +2557,7 @@ class Orchestrator:
         log_path: Path,
     ) -> None:
         self._set_stage(job.job_id, JobStage.IMPLEMENT_WITH_CODEX, log_path)
+        self._ensure_product_definition_ready(paths, log_path)
 
         coder_prompt_path = self._docs_file(repository_path, "CODER_PROMPT_IMPLEMENT.md")
         coder_prompt_path.write_text(
@@ -2027,6 +2626,7 @@ class Orchestrator:
         """Run publisher-specific codex step and enforce handoff artifacts."""
 
         self._set_stage(job.job_id, JobStage.IMPLEMENT_WITH_CODEX, log_path)
+        self._ensure_product_definition_ready(paths, log_path)
         prompt_path = self._docs_file(repository_path, "CODER_PROMPT_PUBLISH.md")
         prompt_path.write_text(
             build_publisher_prompt(
@@ -2055,7 +2655,7 @@ class Orchestrator:
     ) -> None:
         """Run copywriter step and produce customer-facing Korean copy docs."""
 
-        self._set_stage(job.job_id, JobStage.PLAN_WITH_GEMINI, log_path)
+        self._set_stage(job.job_id, JobStage.COPYWRITER_TASK, log_path)
         prompt_path = self._docs_file(repository_path, "CODER_PROMPT_COPYWRITER.md")
         prompt_path.write_text(
             build_copywriter_prompt(
@@ -4639,6 +5239,11 @@ class Orchestrator:
             "improvement_backlog_path": str(paths.get("improvement_backlog", Path("_docs/IMPROVEMENT_BACKLOG.json"))),
             "improvement_loop_state_path": str(paths.get("improvement_loop_state", Path("_docs/IMPROVEMENT_LOOP_STATE.json"))),
             "improvement_plan_path": str(paths.get("improvement_plan", Path("_docs/IMPROVEMENT_PLAN.md"))),
+            "next_improvement_tasks_path": str(paths.get("next_improvement_tasks", Path("_docs/NEXT_IMPROVEMENT_TASKS.json"))),
+            "stage_contracts_path": str(paths.get("stage_contracts", Path("_docs/STAGE_CONTRACTS.md"))),
+            "stage_contracts_json_path": str(paths.get("stage_contracts_json", Path("_docs/STAGE_CONTRACTS.json"))),
+            "pipeline_analysis_path": str(paths.get("pipeline_analysis", Path("_docs/PIPELINE_ANALYSIS.md"))),
+            "pipeline_analysis_json_path": str(paths.get("pipeline_analysis_json", Path("_docs/PIPELINE_ANALYSIS.json"))),
             "readme_path": str(paths.get("readme", Path("README.md"))),
             "copyright_path": str(paths.get("copyright", Path("COPYRIGHT.md"))),
             "development_guide_path": str(paths.get("development_guide", Path("DEVELOPMENT_GUIDE.md"))),
@@ -4975,77 +5580,192 @@ class Orchestrator:
         return f"issue_{digest}"
 
     @staticmethod
-    def _write_stage_contracts_doc(path: Path) -> None:
-        """Persist stage IO/success/failure contracts for product-dev pipeline."""
+    def _validate_product_review_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate PRODUCT_REVIEW payload at runtime without external schema libs."""
 
-        if path.exists():
-            return
-        content = (
-            "# STAGE CONTRACTS\n\n"
-            "## idea_to_product_brief\n"
-            "- 입력: SPEC.md, SPEC.json, issue metadata\n"
-            "- 출력: PRODUCT_BRIEF.md\n"
-            "- 성공 조건: 목표/문제/사용자/가치/지표 섹션 존재\n"
-            "- 실패 조건: 파일 미생성 또는 핵심 섹션 누락\n"
-            "- 다음 단계 전달 데이터: goal, target_users, constraints\n\n"
-            "## generate_user_flows\n"
-            "- 입력: PRODUCT_BRIEF.md\n"
-            "- 출력: USER_FLOWS.md\n"
-            "- 성공 조건: 최소 3개 흐름 + UX 상태 체크리스트\n"
-            "- 실패 조건: 흐름 단계 정의 부재\n"
-            "- 다음 단계 전달 데이터: flow list, UX states\n\n"
-            "## define_mvp_scope\n"
-            "- 입력: PRODUCT_BRIEF.md, USER_FLOWS.md, SPEC.json\n"
-            "- 출력: MVP_SCOPE.md\n"
-            "- 성공 조건: in-scope / out-of-scope / acceptance gates 명시\n"
-            "- 실패 조건: 범위 구분 미정의\n"
-            "- 다음 단계 전달 데이터: 구현 범위, 비범위, 게이트\n\n"
-            "## architecture_planning\n"
-            "- 입력: MVP_SCOPE.md, USER_FLOWS.md\n"
-            "- 출력: ARCHITECTURE_PLAN.md\n"
-            "- 성공 조건: 컴포넌트/데이터계약/품질게이트/루프안전 정의\n"
-            "- 실패 조건: 품질 게이트/루프 가드 누락\n"
-            "- 다음 단계 전달 데이터: 아키텍처 제약과 품질 정책\n\n"
-            "## product_review\n"
-            "- 입력: REVIEW.md, TEST_REPORT_*.md, UX_REVIEW.md, ARCHITECTURE_PLAN.md\n"
-            "- 출력: PRODUCT_REVIEW.json, REVIEW_HISTORY.json, IMPROVEMENT_BACKLOG.json\n"
-            "- 성공 조건: 9개 품질 카테고리 점수 + 개선 후보 생성\n"
-            "- 실패 조건: 필수 카테고리 누락 또는 JSON 구조 파손\n"
-            "- 다음 단계 전달 데이터: overall score, top issues, backlog\n\n"
-            "## improvement_stage\n"
-            "- 입력: PRODUCT_REVIEW.json, REVIEW_HISTORY.json, IMPROVEMENT_BACKLOG.json\n"
-            "- 출력: IMPROVEMENT_LOOP_STATE.json, IMPROVEMENT_PLAN.md\n"
-            "- 성공 조건: 반복/정체/하락 감지 및 전략 결정\n"
-            "- 실패 조건: 루프 가드 계산 불가\n"
-            "- 다음 단계 전달 데이터: next strategy, top priorities, rollback candidate\n"
-        )
-        path.write_text(content, encoding="utf-8")
+        required_scores = [
+            "code_quality",
+            "architecture_structure",
+            "maintainability",
+            "usability",
+            "ux_clarity",
+            "test_coverage",
+            "error_state_handling",
+            "empty_state_handling",
+            "loading_state_handling",
+            "overall",
+        ]
+        errors: List[str] = []
+        if not isinstance(payload, dict):
+            return {"passed": False, "errors": ["payload must be object"]}
+        scores = payload.get("scores")
+        if not isinstance(scores, dict):
+            errors.append("scores must be object")
+            scores = {}
+        for key in required_scores:
+            value = scores.get(key)
+            if not isinstance(value, (int, float)):
+                errors.append(f"scores.{key} must be number")
+                continue
+            if value < 0 or value > 5:
+                errors.append(f"scores.{key} out of range (0..5): {value}")
+        findings = payload.get("findings")
+        if not isinstance(findings, list) or not findings:
+            errors.append("findings must be non-empty array")
+        candidates = payload.get("improvement_candidates")
+        if not isinstance(candidates, list):
+            errors.append("improvement_candidates must be array")
+        gate = payload.get("quality_gate")
+        if not isinstance(gate, dict) or "passed" not in gate:
+            errors.append("quality_gate.passed is required")
+        return {
+            "passed": not errors,
+            "errors": errors,
+            "checked_at": utc_now_iso(),
+        }
 
     @staticmethod
-    def _write_pipeline_analysis_doc(path: Path) -> None:
-        """Persist phase-1 pipeline analysis and missing-stage summary."""
+    def _write_stage_contracts_doc(path: Path, json_path: Path) -> None:
+        """Persist stage contracts in markdown and machine-readable JSON."""
 
-        if path.exists():
-            return
-        content = (
-            "# PIPELINE ANALYSIS\n\n"
-            "## 현재 구조 요약\n"
-            "- 기존 파이프라인은 issue -> spec -> plan -> implement -> test -> review -> fix 중심.\n"
-            "- 제품 정의(사용자 흐름, MVP 경계, 아키텍처 의사결정)가 코드 생성 전에 충분히 분리되지 않음.\n"
-            "- 리뷰 결과를 다음 개선 작업으로 구조화해 넘기는 계약이 약함.\n\n"
-            "## 부족 단계\n"
-            "- idea_to_product_brief\n"
-            "- generate_user_flows\n"
-            "- define_mvp_scope\n"
-            "- architecture_planning\n"
-            "- product_review(정량 평가)\n"
-            "- improvement_stage(자동 우선순위/루프가드)\n\n"
-            "## 제품 개발 관점의 공백\n"
-            "- MVP 우선 정책 강제 장치 부족\n"
-            "- UX empty/loading/error 상태 점검이 일관된 점수 체계로 연결되지 않음\n"
-            "- 동일 문제 반복/점수 정체/품질 하락 감지 규칙이 표준화되지 않음\n"
+        stages = [
+            {
+                "name": "idea_to_product_brief",
+                "input": ["SPEC.md", "SPEC.json", "issue metadata"],
+                "output": ["PRODUCT_BRIEF.md"],
+                "success_condition": "Goal/Problem/Target Users/Core Value/Success Metrics 섹션 존재",
+                "failure_condition": "문서 미생성 또는 핵심 섹션 누락",
+                "handoff_data": ["goal", "target_users", "scope_inputs", "success_metrics"],
+            },
+            {
+                "name": "generate_user_flows",
+                "input": ["PRODUCT_BRIEF.md"],
+                "output": ["USER_FLOWS.md"],
+                "success_condition": "Primary/Secondary Flow + UX State Checklist(loading/empty/error) 존재",
+                "failure_condition": "흐름 단계 또는 상태 정의 누락",
+                "handoff_data": ["primary_flow_steps", "secondary_flows", "ux_state_checklist"],
+            },
+            {
+                "name": "define_mvp_scope",
+                "input": ["PRODUCT_BRIEF.md", "USER_FLOWS.md", "SPEC.json"],
+                "output": ["MVP_SCOPE.md"],
+                "success_condition": "In Scope / Out of Scope / Acceptance Gates 명시",
+                "failure_condition": "범위 구분 누락 또는 게이트 미정의",
+                "handoff_data": ["in_scope", "out_of_scope", "acceptance_gates"],
+            },
+            {
+                "name": "architecture_planning",
+                "input": ["MVP_SCOPE.md", "USER_FLOWS.md"],
+                "output": ["ARCHITECTURE_PLAN.md"],
+                "success_condition": "Layer/Component/Data Contract/Quality Gate/Loop Safety 섹션 존재",
+                "failure_condition": "아키텍처 경계나 루프 안전 규칙 누락",
+                "handoff_data": ["component_boundaries", "quality_gates", "loop_safety_rules"],
+            },
+            {
+                "name": "product_review",
+                "input": ["REVIEW.md", "TEST_REPORT_*.md", "UX_REVIEW.md", "ARCHITECTURE_PLAN.md"],
+                "output": ["PRODUCT_REVIEW.json", "REVIEW_HISTORY.json", "IMPROVEMENT_BACKLOG.json"],
+                "success_condition": "9개 품질 카테고리 점수 + 개선 후보 + quality gate 생성",
+                "failure_condition": "필수 점수 누락 또는 payload validation 실패",
+                "handoff_data": ["overall_score", "categories_below_threshold", "improvement_candidates"],
+            },
+            {
+                "name": "improvement_stage",
+                "input": ["PRODUCT_REVIEW.json", "REVIEW_HISTORY.json", "IMPROVEMENT_BACKLOG.json"],
+                "output": ["IMPROVEMENT_LOOP_STATE.json", "IMPROVEMENT_PLAN.md", "NEXT_IMPROVEMENT_TASKS.json"],
+                "success_condition": "반복/정체/하락 감지 + 전략 변경 여부 + 다음 작업 리스트 생성",
+                "failure_condition": "루프 가드 계산 실패 또는 개선 작업 산출물 미생성",
+                "handoff_data": ["strategy", "next_scope_restriction", "rollback_recommended", "next_tasks"],
+            },
+        ]
+        payload = {
+            "schema_version": "1.0",
+            "generated_at": utc_now_iso(),
+            "stages": stages,
+        }
+        lines: List[str] = [
+            "# STAGE CONTRACTS",
+            "",
+            "자동 생성 문서입니다. 각 단계의 입출력 계약을 정의합니다.",
+            "",
+        ]
+        for stage in stages:
+            lines.append(f"## {stage['name']}")
+            lines.append(f"- 입력: {', '.join(stage['input'])}")
+            lines.append(f"- 출력: {', '.join(stage['output'])}")
+            lines.append(f"- 성공 조건: {stage['success_condition']}")
+            lines.append(f"- 실패 조건: {stage['failure_condition']}")
+            lines.append(f"- 다음 단계 전달 데이터: {', '.join(stage['handoff_data'])}")
+            lines.append("")
+        path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+        json_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
         )
-        path.write_text(content, encoding="utf-8")
+
+    @staticmethod
+    def _write_pipeline_analysis_doc(path: Path, json_path: Path) -> None:
+        """Persist current pipeline analysis in markdown and JSON."""
+
+        current_pipeline = [
+            "read_issue",
+            "write_spec",
+            "idea_to_product_brief",
+            "generate_user_flows",
+            "define_mvp_scope",
+            "architecture_planning",
+            "plan_with_gemini",
+            "implement_with_codex",
+            "review_with_gemini",
+            "product_review",
+            "improvement_stage",
+            "fix_with_codex",
+            "test_after_fix",
+        ]
+        missing_or_weak = [
+            "project_scaffolding 단계가 명시적 노드로 분리되지 않음 (현재는 implement 단계 내부 암묵 처리)",
+            "제품 품질 리뷰 점수는 아직 키워드/문서 기반 휴리스틱 중심",
+            "개선 백로그 자동 실행 노드는 2차 개선 대상",
+        ]
+        product_gaps = [
+            "아이디어→제품 정의→MVP→아키텍처 흐름은 반영됨",
+            "반복 개선 루프의 자동 실행기는 미도입",
+            "장기 리포지토리 단위 품질 추세 분석은 미도입",
+        ]
+        payload = {
+            "schema_version": "1.0",
+            "generated_at": utc_now_iso(),
+            "current_pipeline": current_pipeline,
+            "missing_or_weak_stages": missing_or_weak,
+            "product_gaps": product_gaps,
+            "phase1_focus": [
+                "제품 개발형 파이프라인 뼈대 구축",
+                "품질 평가 체계 구축",
+                "반복 개선 루프 기반 구축",
+                "2차 고도화를 위한 계약/산출물 표준화",
+            ],
+        }
+        lines = [
+            "# PIPELINE ANALYSIS",
+            "",
+            "## Current Pipeline",
+            " -> ".join(current_pipeline),
+            "",
+            "## Missing Or Weak Stages",
+        ]
+        for item in missing_or_weak:
+            lines.append(f"- {item}")
+        lines.extend(["", "## Product Gaps"])
+        for item in product_gaps:
+            lines.append(f"- {item}")
+        lines.extend(["", "## Phase-1 Focus"])
+        for item in payload["phase1_focus"]:
+            lines.append(f"- {item}")
+        path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+        json_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
 
     @staticmethod
     def _sha256_file(path: Optional[Path]) -> str:

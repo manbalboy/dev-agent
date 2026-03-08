@@ -8,8 +8,13 @@
     "generated_at",
     "job_id",
     "scores",
+    "score_reasons",
     "findings",
     "improvement_candidates",
+    "priority_summary",
+    "recommended_next_tasks",
+    "quality_signals",
+    "validation",
     "quality_gate"
   ],
   "properties": {
@@ -53,6 +58,32 @@
       },
       "additionalProperties": false
     },
+    "score_reasons": {
+      "type": "object",
+      "required": [
+        "code_quality",
+        "architecture_structure",
+        "maintainability",
+        "usability",
+        "ux_clarity",
+        "test_coverage",
+        "error_state_handling",
+        "empty_state_handling",
+        "loading_state_handling"
+      ],
+      "properties": {
+        "code_quality": { "type": "string" },
+        "architecture_structure": { "type": "string" },
+        "maintainability": { "type": "string" },
+        "usability": { "type": "string" },
+        "ux_clarity": { "type": "string" },
+        "test_coverage": { "type": "string" },
+        "error_state_handling": { "type": "string" },
+        "empty_state_handling": { "type": "string" },
+        "loading_state_handling": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
     "findings": {
       "type": "array",
       "items": {
@@ -79,6 +110,70 @@
         },
         "additionalProperties": true
       }
+    },
+    "priority_summary": {
+      "type": "object",
+      "required": ["P0", "P1", "P2", "P3"],
+      "properties": {
+        "P0": { "type": "integer", "minimum": 0 },
+        "P1": { "type": "integer", "minimum": 0 },
+        "P2": { "type": "integer", "minimum": 0 },
+        "P3": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "recommended_next_tasks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "title", "priority", "reason", "action"],
+        "properties": {
+          "id": { "type": "string" },
+          "title": { "type": "string" },
+          "priority": { "type": "string", "enum": ["P0", "P1", "P2", "P3"] },
+          "reason": { "type": "string" },
+          "action": { "type": "string" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "quality_signals": {
+      "type": "object",
+      "required": [
+        "todo_items_count",
+        "critical_issue_keywords_detected",
+        "test_report_count",
+        "test_failures_count",
+        "test_passes_count",
+        "has_product_brief",
+        "has_user_flows",
+        "has_mvp_scope",
+        "has_architecture_plan",
+        "has_ux_review"
+      ],
+      "properties": {
+        "todo_items_count": { "type": "integer", "minimum": 0 },
+        "critical_issue_keywords_detected": { "type": "boolean" },
+        "test_report_count": { "type": "integer", "minimum": 0 },
+        "test_failures_count": { "type": "integer", "minimum": 0 },
+        "test_passes_count": { "type": "integer", "minimum": 0 },
+        "has_product_brief": { "type": "boolean" },
+        "has_user_flows": { "type": "boolean" },
+        "has_mvp_scope": { "type": "boolean" },
+        "has_architecture_plan": { "type": "boolean" },
+        "has_ux_review": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "validation": {
+      "type": "object",
+      "required": ["passed", "errors", "checked_at"],
+      "properties": {
+        "passed": { "type": "boolean" },
+        "errors": { "type": "array", "items": { "type": "string" } },
+        "checked_at": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": false
     },
     "quality_gate": {
       "type": "object",
