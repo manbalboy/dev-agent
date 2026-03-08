@@ -57,7 +57,18 @@
         <dt>생성</dt><dd id="job-created" class="js-time" data-utc="{{ job.created_at }}">{{ job.created_at }}</dd>
         <dt>시작</dt><dd id="job-started" class="js-time" data-utc="{{ job.started_at or '' }}">{{ job.started_at or "-" }}</dd>
         <dt>종료</dt><dd id="job-finished" class="js-time" data-utc="{{ job.finished_at or '' }}">{{ job.finished_at or "-" }}</dd>
+        <dt>하트비트</dt><dd id="job-heartbeat" class="js-time" data-utc="{{ job.heartbeat_at or '' }}">{{ job.heartbeat_at or "-" }}</dd>
+        <dt>복구 상태</dt><dd id="job-recovery-status">{{ job.recovery_status or "-" }}</dd>
+        <dt>복구 사유</dt><dd id="job-recovery-reason">{{ job.recovery_reason or "-" }}</dd>
       </dl>
+
+      <section class="panel runtime-health-panel">
+        <div class="panel-head">
+          <h2>운영 상태</h2>
+          <p class="hint">리뷰 점수, 개선 전략, 재개 모드를 한 화면에서 확인합니다.</p>
+        </div>
+        <div id="runtime-health-grid" class="runtime-health-grid">운영 상태를 준비 중...</div>
+      </section>
 
       <section class="panel">
         <div class="panel-head">
@@ -74,6 +85,7 @@
         </section>
         <section id="detail-tab-debug" class="detail-tab-panel">
           <div id="failure-summary" class="failure-summary"></div>
+          <div id="debug-flow-summary" class="failure-summary"></div>
           <div class="terminal-wrap">
             <div class="terminal-topbar">
               <span class="terminal-dot red"></span>
@@ -85,6 +97,37 @@
           </div>
         </section>
         <section id="detail-tab-workflow" class="detail-tab-panel">
+          <div id="workflow-resume-board" class="failure-summary"></div>
+          <section id="workflow-manual-panel" class="workflow-manual-panel">
+            <div class="panel-head">
+              <h3>수동 재개</h3>
+              <p class="hint">실패 노드부터 재개하거나 선택한 안전 노드부터 다시 시작할 수 있습니다.</p>
+            </div>
+            <div class="workflow-manual-grid">
+              <label class="detail-field">
+                <span>모드</span>
+                <select id="workflow-manual-mode">
+                  <option value="resume_failed_node">실패 노드부터 재개</option>
+                  <option value="resume_from_node">선택 노드부터 재개</option>
+                  <option value="full_rerun">처음부터 재실행</option>
+                </select>
+              </label>
+              <label class="detail-field">
+                <span>시작 노드</span>
+                <select id="workflow-manual-node">
+                  <option value="">노드를 불러오는 중...</option>
+                </select>
+              </label>
+              <label class="detail-field detail-field-wide">
+                <span>메모</span>
+                <input id="workflow-manual-note" type="text" maxlength="300" placeholder="예: UX review부터 다시 확인" />
+              </label>
+            </div>
+            <div class="workflow-manual-actions">
+              <button id="workflow-manual-submit" type="button" class="action-button">재개 작업 큐잉</button>
+              <span id="workflow-manual-status" class="hint"></span>
+            </div>
+          </section>
           <div id="workflow-lane-board" class="task-log-board">워크플로우를 준비 중...</div>
         </section>
       </section>
@@ -112,8 +155,13 @@
       let debugEntriesCache = [];
       let workspaceMdFilesCache = [];
       let workspaceMdSignature = "";
+      let nodeRunsCache = [];
+      let resumeStateCache = null;
+      let runtimeSignalsCache = null;
+      let manualRetryOptionsCache = null;
       let currentJobAttempt = 1;
       let currentStageCode = "queued";
+      let currentWorkflowId = "{{ job.workflow_id or '' }}";
 
       function esc(value) {
         return String(value ?? "")
@@ -191,12 +239,16 @@
         document.getElementById("job-app").textContent = job.app_code || "default";
         document.getElementById("job-track").textContent = job.track || "enhance";
         document.getElementById("job-attempt").textContent = `${job.attempt} / ${job.max_attempts}`;
+        currentWorkflowId = String(job.workflow_id || "");
         document.getElementById("job-repo").textContent = job.repository;
         document.getElementById("job-branch").textContent = job.branch_name;
         document.getElementById("job-error").textContent = job.error_message || "-";
         document.getElementById("job-created").textContent = formatKstDateTime(job.created_at);
         document.getElementById("job-started").textContent = formatKstDateTime(job.started_at);
         document.getElementById("job-finished").textContent = formatKstDateTime(job.finished_at);
+        document.getElementById("job-heartbeat").textContent = formatKstDateTime(job.heartbeat_at);
+        document.getElementById("job-recovery-status").textContent = job.recovery_status || "-";
+        document.getElementById("job-recovery-reason").textContent = job.recovery_reason || "-";
 
         const issue = document.getElementById("job-issue");
         issue.innerHTML = `<a href="${esc(job.issue_url)}" target="_blank" rel="noreferrer">#${esc(job.issue_number)} - ${esc(job.issue_title)}</a>`;
@@ -212,6 +264,83 @@
         if (stopButton) {
           stopButton.disabled = !(job.status === "queued" || job.status === "running");
         }
+      }
+
+      function renderRuntimeHealth(runtimeSignals) {
+        const node = document.getElementById("runtime-health-grid");
+        if (!node) return;
+        const runtime = runtimeSignals && typeof runtimeSignals === "object" ? runtimeSignals : {};
+        const reviewOverall = runtime.review_overall !== undefined && runtime.review_overall !== null
+          ? `${runtime.review_overall}/5`
+          : "-";
+        const qualityGate = runtime.quality_gate_passed === true
+          ? `<span class="badge status-done">통과</span>`
+          : runtime.quality_gate_passed === false
+            ? `<span class="badge status-failed">미통과</span>`
+            : `<span class="badge status-queued">대기</span>`;
+        const categories = Array.isArray(runtime.quality_gate_categories)
+          ? runtime.quality_gate_categories
+          : [];
+        const nextTask = runtime.next_task_title || "-";
+        const scopeRestriction = runtime.scope_restriction || "-";
+        const strategy = runtime.strategy || "-";
+        const maturityLevel = runtime.maturity_level || "-";
+        const maturityScore = runtime.maturity_score !== undefined && runtime.maturity_score !== null
+          ? `${runtime.maturity_score}/100`
+          : "-";
+        const maturityProgression = runtime.maturity_progression || "-";
+        const qualityTrend = runtime.quality_trend_direction || "-";
+        const qualityDelta = runtime.quality_delta_from_previous !== undefined && runtime.quality_delta_from_previous !== null
+          ? String(runtime.quality_delta_from_previous)
+          : "-";
+        const reviewRounds = runtime.quality_review_rounds !== undefined && runtime.quality_review_rounds !== null
+          ? String(runtime.quality_review_rounds)
+          : "-";
+        const resumeMode = runtime.resume_mode && runtime.resume_mode !== "none"
+          ? runtime.resume_mode
+          : "none";
+        const recommendedNodeType = runtime.recommended_node_type || "-";
+        const resumeReason = runtime.resume_reason || "-";
+
+        node.innerHTML = `
+          <article class="runtime-health-card">
+            <h3>리뷰 상태</h3>
+            <dl class="runtime-health-list">
+              <dt>Overall</dt><dd>${esc(reviewOverall)}</dd>
+              <dt>품질 게이트</dt><dd>${qualityGate}</dd>
+              <dt>취약 카테고리</dt><dd>${esc(categories.length ? categories.join(", ") : "-")}</dd>
+            </dl>
+          </article>
+          <article class="runtime-health-card">
+            <h3>개선 전략</h3>
+            <dl class="runtime-health-list">
+              <dt>전략</dt><dd>${esc(strategy)}</dd>
+              <dt>범위 제한</dt><dd>${esc(scopeRestriction)}</dd>
+              <dt>다음 작업</dt><dd>${esc(nextTask)}</dd>
+              <dt>권장 노드</dt><dd>${esc(recommendedNodeType)}</dd>
+            </dl>
+          </article>
+          <article class="runtime-health-card">
+            <h3>재개 / 복구</h3>
+            <dl class="runtime-health-list">
+              <dt>모드</dt><dd>${esc(resumeMode)}</dd>
+              <dt>사유</dt><dd>${esc(resumeReason)}</dd>
+              <dt>복구 상태</dt><dd>${esc(document.getElementById("job-recovery-status")?.textContent || "-")}</dd>
+              <dt>복구 메모</dt><dd>${esc(document.getElementById("job-recovery-reason")?.textContent || "-")}</dd>
+            </dl>
+          </article>
+          <article class="runtime-health-card">
+            <h3>성숙도 / 추세</h3>
+            <dl class="runtime-health-list">
+              <dt>성숙도</dt><dd>${esc(maturityLevel)}</dd>
+              <dt>성숙도 점수</dt><dd>${esc(maturityScore)}</dd>
+              <dt>변화</dt><dd>${esc(maturityProgression)}</dd>
+              <dt>품질 추세</dt><dd>${esc(qualityTrend)}</dd>
+              <dt>직전 대비</dt><dd>${esc(qualityDelta)}</dd>
+              <dt>리뷰 라운드</dt><dd>${esc(reviewRounds)}</dd>
+            </dl>
+          </article>
+        `;
       }
 
       function isNearBottom(element) {
@@ -326,8 +455,10 @@
       function classifyLogEntry(entry) {
         const msg = String(entry.message || "");
         if (msg.startsWith("Attempt ") && msg.includes(" failed:")) return "error";
+        if (/^\[(LONG|ULTRA10|ULTRA)\]\s+.*failed:/i.test(msg)) return "error";
         if (msg.includes("Maximum retry count reached")) return "error";
         if (msg.startsWith("Attempt ")) return "attempt";
+        if (/^\[(LONG|ULTRA10|ULTRA)\]\s+Round\s+\d+/i.test(msg)) return "attempt";
         if (msg.startsWith("[STAGE] ")) return "stage";
         if (msg.startsWith("[RUN] ")) return "run";
         if (msg.startsWith("[DONE] ")) {
@@ -443,6 +574,21 @@
         if (attemptFail) {
           return `시도 ${attemptFail[1]} 실패: ${attemptFail[2] || "(상세 로그 참조)"}`;
         }
+        const roundStart = msg.match(/^\[(LONG|ULTRA10|ULTRA)\]\s+Round\s+(\d+)(?:\/(\d+))?\s+started$/);
+        if (roundStart) {
+          const total = roundStart[3] ? `/${roundStart[3]}` : "";
+          return `${roundStart[1]} 라운드 ${roundStart[2]}${total} 시작`;
+        }
+        const roundDone = msg.match(/^\[(LONG|ULTRA10|ULTRA)\]\s+Round\s+(\d+)(?:\/(\d+))?\s+completed.*$/);
+        if (roundDone) {
+          const total = roundDone[3] ? `/${roundDone[3]}` : "";
+          return `${roundDone[1]} 라운드 ${roundDone[2]}${total} 완료`;
+        }
+        const roundFailed = msg.match(/^\[(LONG|ULTRA10|ULTRA)\]\s+Round\s+(\d+)(?:\/(\d+))?\s+failed:\s*(.*)$/);
+        if (roundFailed) {
+          const total = roundFailed[3] ? `/${roundFailed[3]}` : "";
+          return `${roundFailed[1]} 라운드 ${roundFailed[2]}${total} 실패: ${roundFailed[4] || "(상세 로그 참조)"}`;
+        }
 
         if (msg.startsWith("[RUN] ")) {
           const command = msg.replace("[RUN] ", "").trim();
@@ -461,10 +607,59 @@
       }
 
       function summarizeGroup(group) {
-        const latest = group.entries[0];
-        const stage = stageDisplayName((latest.stage || "unknown").replace(/^stage:/, ""));
-        const attempt = (latest.attempt || "1").replace(/^attempt:/, "");
-        return `시도 ${attempt} · ${stage} · ${group.entries.length}줄`;
+        const first = group.entries[0] || {};
+        const stage = stageDisplayName(String(first.stage || "unknown").replace(/^stage:/, ""));
+        const attempt = String(first.attempt || "1").replace(/^attempt:/, "");
+        const round = String(first.roundLabel || "").trim();
+        const mode = String(first.mode || "").trim();
+        const roundText = round ? ` · ${round}` : (mode ? ` · ${mode}` : "");
+        return `시도 ${attempt}${roundText} · ${stage} · ${group.entries.length}줄`;
+      }
+
+      function parseAttemptContext(message) {
+        const msg = String(message || "");
+        const attemptStart = msg.match(/^Attempt\s+(\d+)(?:\/(\d+))?\s+started$/);
+        if (attemptStart) {
+          const current = Number(attemptStart[1] || 0);
+          const total = attemptStart[2] ? Number(attemptStart[2]) : 0;
+          return {
+            attempt: current || 1,
+            mode: "retry",
+            roundLabel: total > 0 ? `시도 ${current}/${total}` : `시도 ${current}`,
+          };
+        }
+
+        const longRound = msg.match(/^\[(LONG|ULTRA10|ULTRA)\]\s+Round\s+(\d+)(?:\/(\d+))?/);
+        if (longRound) {
+          const mode = longRound[1];
+          const current = Number(longRound[2] || 0);
+          const total = longRound[3] ? Number(longRound[3]) : 0;
+          return {
+            attempt: current || 1,
+            mode,
+            roundLabel: total > 0 ? `${mode} ${current}/${total}` : `${mode} ${current}`,
+          };
+        }
+
+        const ultraPrimaryFail = msg.match(/^\[(ULTRA10|ULTRA)\]\s+Primary agents failed in round\s+(\d+)/);
+        if (ultraPrimaryFail) {
+          return {
+            attempt: Number(ultraPrimaryFail[2] || 0) || 1,
+            mode: ultraPrimaryFail[1],
+            roundLabel: `${ultraPrimaryFail[1]} ${ultraPrimaryFail[2]}`,
+          };
+        }
+
+        const ultraFallback = msg.match(/^\[(ULTRA10|ULTRA)\]\s+Trying fallback agents for round\s+(\d+)/);
+        if (ultraFallback) {
+          return {
+            attempt: Number(ultraFallback[2] || 0) || 1,
+            mode: ultraFallback[1],
+            roundLabel: `${ultraFallback[1]} ${ultraFallback[2]}`,
+          };
+        }
+
+        return null;
       }
 
       function parseEpochMillis(rawTs) {
@@ -738,6 +933,11 @@
         const map = {
           gh_read_issue: "이슈 읽기",
           write_spec: "SPEC 작성",
+          idea_to_product_brief: "제품 브리프 작성",
+          generate_user_flows: "사용자 흐름 작성",
+          define_mvp_scope: "MVP 범위 정의",
+          architecture_planning: "아키텍처 설계",
+          project_scaffolding: "프로젝트 스캐폴딩",
           gemini_plan: "플랜 작성",
           designer_task: "디자인 시스템 기획",
           publisher_task: "퍼블리싱",
@@ -756,6 +956,200 @@
           create_pr: "PR 생성",
         };
         return map[String(nodeType || "").trim()] || String(nodeType || "unknown");
+      }
+
+      function workflowNodeRunLabel(nodeRun) {
+        const title = String(nodeRun?.node_title || "").trim();
+        if (title) return title;
+        return workflowNodeLabel(nodeRun?.node_type);
+      }
+
+      function workflowResumeNodeLabel(node) {
+        const title = String(node?.title || node?.node_title || "").trim();
+        if (title) return title;
+        return workflowNodeLabel(node?.type || node?.node_type);
+      }
+
+      function workflowNodeRunsForLatestAttempt(nodeRuns) {
+        const records = Array.isArray(nodeRuns) ? nodeRuns : [];
+        if (!records.length) return [];
+        const latestAttempt = records.reduce((maxAttempt, item) => {
+          const attempt = Number(item?.attempt || 0);
+          return attempt > maxAttempt ? attempt : maxAttempt;
+        }, 0);
+        return records
+          .filter((item) => Number(item?.attempt || 0) === latestAttempt)
+          .sort((a, b) => {
+            const aStarted = Date.parse(String(a?.started_at || "")) || 0;
+            const bStarted = Date.parse(String(b?.started_at || "")) || 0;
+            if (aStarted !== bStarted) return aStarted - bStarted;
+            return String(a?.node_run_id || "").localeCompare(String(b?.node_run_id || ""));
+          });
+      }
+
+      function workflowRunStatusClass(status) {
+        const normalized = String(status || "").trim().toLowerCase();
+        if (normalized === "success") return "done";
+        if (normalized === "failed") return "failed";
+        return "running";
+      }
+
+      function workflowRunStatusLabel(status) {
+        const normalized = String(status || "").trim().toLowerCase();
+        if (normalized === "success") return "완료";
+        if (normalized === "failed") return "실패";
+        return "실행 중";
+      }
+
+      function renderWorkflowResumeBoard(resumeState) {
+        const board = document.getElementById("workflow-resume-board");
+        if (!board) return;
+        const state = (resumeState && typeof resumeState === "object") ? resumeState : null;
+        if (!state || !state.mode || state.mode === "none") {
+          board.innerHTML = `<p class="failure-empty">재개 전략 정보가 아직 없습니다.</p>`;
+          return;
+        }
+
+        const failedLabel = state.failed_node_id
+          ? workflowResumeNodeLabel({ title: state.failed_node_title, node_title: state.failed_node_title, type: state.failed_node_type })
+          : "-";
+        const nextLabel = state.resume_from_node_id
+          ? workflowResumeNodeLabel({ title: state.resume_from_node_title, node_title: state.resume_from_node_title, type: state.resume_from_node_type })
+          : "처음부터 재실행";
+        const statusClass = state.mode === "resume" ? "running" : "queued";
+        const skippedCount = Array.isArray(state.skipped_nodes) ? state.skipped_nodes.length : 0;
+        board.innerHTML = `
+          <h3>재개 전략</h3>
+          <ul class="failure-list">
+            <li class="failure-item">
+              <span class="failure-type">모드</span>
+              <span class="failure-text"><span class="badge status-${statusClass}">${esc(state.mode === "resume" ? "실패 노드부터 재개" : "처음부터 재실행")}</span></span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">근거</span>
+              <span class="failure-text">${esc(state.reason || "-")}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">실패 노드</span>
+              <span class="failure-text">${esc(failedLabel)}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">다음 시작</span>
+              <span class="failure-text">${esc(nextLabel)}${state.mode === "resume" ? ` · 재사용 ${skippedCount}개` : ""}</span>
+            </li>
+          </ul>
+        `;
+      }
+
+      function renderWorkflowManualPanel(options, resumeState) {
+        const panel = document.getElementById("workflow-manual-panel");
+        const modeSelect = document.getElementById("workflow-manual-mode");
+        const nodeSelect = document.getElementById("workflow-manual-node");
+        const submitButton = document.getElementById("workflow-manual-submit");
+        const statusNode = document.getElementById("workflow-manual-status");
+        if (!panel || !modeSelect || !nodeSelect || !submitButton || !statusNode) return;
+
+        const data = options && typeof options === "object" ? options : {};
+        const safeNodes = Array.isArray(data.safe_nodes) ? data.safe_nodes : [];
+        const canManualRetry = Boolean(data.can_manual_retry);
+        const failedNodeId = String(data.failed_node_id || "").trim();
+        const defaultMode = String(data.default_mode || "full_rerun").trim();
+        const overrideMode = String(resumeState?.override_mode || "").trim();
+        const selectedMode = overrideMode || defaultMode;
+
+        panel.classList.toggle("is-disabled", !canManualRetry);
+        submitButton.disabled = !canManualRetry;
+        modeSelect.disabled = !canManualRetry;
+        nodeSelect.disabled = !canManualRetry;
+
+        const nodeOptions = safeNodes.length
+          ? safeNodes.map((item) => {
+              const nodeId = String(item.id || "").trim();
+              const label = workflowResumeNodeLabel(item);
+              const suffix = nodeId === failedNodeId ? " (최근 실패)" : "";
+              return `<option value="${esc(nodeId)}">${esc(label + suffix)}</option>`;
+            }).join("")
+          : `<option value="">재개 가능한 노드 없음</option>`;
+        nodeSelect.innerHTML = nodeOptions;
+
+        if (!safeNodes.length) {
+          modeSelect.value = "full_rerun";
+        } else if (
+          selectedMode === "resume_failed_node"
+          && !safeNodes.some((item) => String(item.id || "").trim() === failedNodeId)
+        ) {
+          modeSelect.value = "resume_from_node";
+        } else {
+          modeSelect.value = selectedMode;
+        }
+
+        if (safeNodes.length) {
+          if (modeSelect.value === "resume_failed_node" && failedNodeId) {
+            nodeSelect.value = failedNodeId;
+          } else if (resumeState?.resume_from_node_id) {
+            nodeSelect.value = String(resumeState.resume_from_node_id);
+          } else if (!nodeSelect.value) {
+            nodeSelect.value = String(safeNodes[0]?.id || "");
+          }
+        } else {
+          nodeSelect.value = "";
+        }
+
+        const syncNodeDisabled = () => {
+          const mode = modeSelect.value;
+          nodeSelect.disabled = !canManualRetry || mode !== "resume_from_node";
+        };
+        syncNodeDisabled();
+        modeSelect.onchange = syncNodeDisabled;
+
+        if (!canManualRetry) {
+          statusNode.textContent = "대기/실행 중 작업에는 수동 재개를 설정할 수 없습니다.";
+        } else if (resumeState?.override_active) {
+          statusNode.textContent = `예약됨: ${resumeState.reason || "수동 재개 정책이 적용됩니다."}`;
+        } else {
+          statusNode.textContent = "";
+        }
+      }
+
+      async function submitManualWorkflowRetry() {
+        const modeSelect = document.getElementById("workflow-manual-mode");
+        const nodeSelect = document.getElementById("workflow-manual-node");
+        const noteInput = document.getElementById("workflow-manual-note");
+        const submitButton = document.getElementById("workflow-manual-submit");
+        const statusNode = document.getElementById("workflow-manual-status");
+        if (!modeSelect || !nodeSelect || !noteInput || !submitButton || !statusNode) return;
+
+        const mode = String(modeSelect.value || "").trim();
+        const nodeId = String(nodeSelect.value || "").trim();
+        const note = String(noteInput.value || "").trim();
+        submitButton.disabled = true;
+        statusNode.textContent = "재개 작업을 큐에 등록하는 중...";
+        try {
+          const response = await fetch(`/api/jobs/${JOB_ID}/workflow/manual-retry`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              mode,
+              node_id: nodeId,
+              note,
+            }),
+          });
+          const payload = await response.json().catch(() => ({}));
+          if (!response.ok) {
+            statusNode.textContent = payload.detail || "수동 재개 요청에 실패했습니다.";
+            return;
+          }
+          const resumeState = payload.resume_state && typeof payload.resume_state === "object"
+            ? payload.resume_state
+            : null;
+          statusNode.textContent = resumeState?.reason || "재개 작업이 큐에 등록되었습니다.";
+          noteInput.value = "";
+          await refreshJob();
+        } catch {
+          statusNode.textContent = "네트워크 오류로 수동 재개 요청에 실패했습니다.";
+        } finally {
+          submitButton.disabled = false;
+        }
       }
 
       function defaultWorkflowNodeOrder() {
@@ -793,6 +1187,11 @@
           prepare_repo: "gh_read_issue",
           read_issue: "gh_read_issue",
           write_spec: "write_spec",
+          idea_to_product_brief: "idea_to_product_brief",
+          generate_user_flows: "generate_user_flows",
+          define_mvp_scope: "define_mvp_scope",
+          architecture_planning: "architecture_planning",
+          project_scaffolding: "project_scaffolding",
           plan_with_gemini: "gemini_plan",
           design_with_codex: "designer_task",
           publisher_task: "publisher_task",
@@ -842,6 +1241,58 @@
       function renderWorkflowLane(entriesNewestFirst, stageCode) {
         const board = document.getElementById("workflow-lane-board");
         if (!board) return;
+
+        const latestRuns = workflowNodeRunsForLatestAttempt(nodeRunsCache);
+        const resumeState = (resumeStateCache && typeof resumeStateCache === "object") ? resumeStateCache : {};
+        renderWorkflowResumeBoard(resumeState);
+        if (latestRuns.length) {
+          const latestAttempt = Number(latestRuns[0]?.attempt || currentJobAttempt || 1);
+          const reusedRows = Array.isArray(resumeState.skipped_nodes) && resumeState.mode === "resume"
+            ? resumeState.skipped_nodes.map((item, idx) => `<li class="workflow-lane-item done reused">
+              <span class="workflow-lane-index">${idx + 1}</span>
+              <span class="workflow-lane-label">${esc(workflowResumeNodeLabel(item))}</span>
+              <span class="workflow-lane-state badge status-done">재사용</span>
+            </li>`).join("")
+            : "";
+          const doneCount = latestRuns.filter((item) => workflowRunStatusClass(item?.status) === "done").length
+            + (Array.isArray(resumeState.skipped_nodes) && resumeState.mode === "resume" ? resumeState.skipped_nodes.length : 0);
+          const failedCount = latestRuns.filter((item) => workflowRunStatusClass(item?.status) === "failed").length;
+          const runningCount = latestRuns.filter((item) => workflowRunStatusClass(item?.status) === "running").length;
+          const lastRun = latestRuns[latestRuns.length - 1];
+          const workflowHint = currentWorkflowId ? `workflow: ${esc(currentWorkflowId)} · ` : "";
+          const rows = latestRuns.map((item, idx) => {
+            const statusClass = workflowRunStatusClass(item?.status);
+            const statusLabel = workflowRunStatusLabel(item?.status);
+            const offset = Array.isArray(resumeState.skipped_nodes) && resumeState.mode === "resume"
+              ? resumeState.skipped_nodes.length
+              : 0;
+            return `<li class="workflow-lane-item ${statusClass}">
+              <span class="workflow-lane-index">${idx + 1 + offset}</span>
+              <span class="workflow-lane-label">${esc(workflowNodeRunLabel(item))}</span>
+              <span class="workflow-lane-state badge status-${statusClass}">${esc(statusLabel)}</span>
+            </li>`;
+          }).join("");
+
+          board.innerHTML = `<article class="task-log-card user-log-card">
+            <header class="task-log-head">
+              <div class="task-log-title">
+                <strong>워크플로우 실행 이력</strong>
+                <span class="hint">${workflowHint}attempt ${latestAttempt} · 최근 노드: ${esc(workflowNodeRunLabel(lastRun))}</span>
+              </div>
+            </header>
+            <section class="stage-snapshot">
+              <div class="workflow-lane-summary">
+                <span>성공 <strong>${doneCount}</strong></span>
+                <span>실패 <strong>${failedCount}</strong></span>
+                <span>실행 중 <strong>${runningCount}</strong></span>
+                <span>기록 <strong>${latestRuns.length}</strong></span>
+              </div>
+              <ul class="workflow-lane-list">${reusedRows}${rows}</ul>
+            </section>
+          </article>`;
+          return;
+        }
+
         const order = defaultWorkflowNodeOrder();
         const visited = visitedWorkflowNodes(entriesNewestFirst);
         const current = currentWorkflowNodeFromLogs(entriesNewestFirst) || stageToWorkflowNode(stageCode);
@@ -1127,43 +1578,124 @@
 
       function buildGroupedEntries(entriesNewestFirst) {
         const chronological = [...entriesNewestFirst].reverse();
+        const grouped = [];
         let currentAttempt = `attempt:${Math.max(1, Number(currentJobAttempt || 1))}`;
         let currentStage = "stage:queued";
+        let currentRoundLabel = "";
+        let currentMode = "";
+        let segmentIndex = 0;
+        let activeGroup = null;
 
         for (const entry of chronological) {
-          const attemptMatch = String(entry.message || "").match(/^Attempt\s+(\d+)/);
-          if (attemptMatch) {
-            currentAttempt = `attempt:${attemptMatch[1]}`;
-          }
+          const attemptContext = parseAttemptContext(entry.message || "");
+          const nextAttempt = attemptContext ? `attempt:${attemptContext.attempt}` : currentAttempt;
+          const nextRoundLabel = attemptContext ? attemptContext.roundLabel : currentRoundLabel;
+          const nextMode = attemptContext ? attemptContext.mode : currentMode;
           const stageMatch = String(entry.message || "").match(/^\[STAGE\]\s+([a-zA-Z0-9_:-]+)/);
-          if (stageMatch) {
-            currentStage = `stage:${stageMatch[1]}`;
+          const nextStage = stageMatch ? `stage:${stageMatch[1]}` : currentStage;
+
+          const mustStartNewGroup = !activeGroup
+            || activeGroup.attempt !== nextAttempt
+            || activeGroup.stage !== nextStage
+            || activeGroup.roundLabel !== nextRoundLabel
+            || Boolean(attemptContext)
+            || Boolean(stageMatch);
+
+          if (mustStartNewGroup) {
+            segmentIndex += 1;
+            activeGroup = {
+              key: `${nextAttempt}|${nextStage}|segment:${segmentIndex}`,
+              attempt: nextAttempt,
+              stage: nextStage,
+              roundLabel: nextRoundLabel,
+              mode: nextMode,
+              entries: [],
+            };
+            grouped.push(activeGroup);
           }
-          entry.attempt = currentAttempt;
-          entry.stage = currentStage;
+
+          entry.attempt = nextAttempt;
+          entry.stage = nextStage;
+          entry.roundLabel = nextRoundLabel;
+          entry.mode = nextMode;
+          activeGroup.entries.push(entry);
+
+          currentAttempt = nextAttempt;
+          currentStage = nextStage;
+          currentRoundLabel = nextRoundLabel;
+          currentMode = nextMode;
         }
 
-        const grouped = [];
-        const map = new Map();
-        for (const entry of entriesNewestFirst) {
-          if (entry.attempt === "attempt:0") {
-            const stageCode = String(entry.stage || "").replace(/^stage:/, "");
-            const inferred = Number(stageLatestAttemptMap.get(stageCode) || 0);
-            if (inferred > 0) {
-              entry.attempt = `attempt:${inferred}`;
-            } else {
-              entry.attempt = `attempt:${Math.max(1, Number(currentJobAttempt || 1))}`;
-            }
-          }
-          const key = `${entry.attempt}|${entry.stage}`;
-          if (!map.has(key)) {
-            const group = { key, attempt: entry.attempt, stage: entry.stage, entries: [] };
-            map.set(key, group);
-            grouped.push(group);
-          }
-          map.get(key).entries.push(entry);
-        }
         return grouped;
+      }
+
+      function renderDebugFlowSummary(groups) {
+        const box = document.getElementById("debug-flow-summary");
+        if (!box) return;
+
+        const list = Array.isArray(groups) ? groups : [];
+        if (!list.length) {
+          box.innerHTML = `<p class="failure-empty">시도/라운드 흐름 정보가 아직 없습니다.</p>`;
+          return;
+        }
+
+        const attempts = new Map();
+        for (const group of list) {
+          const first = group.entries[0] || {};
+          const attemptKey = String(first.attempt || "attempt:1");
+          if (!attempts.has(attemptKey)) {
+            attempts.set(attemptKey, {
+              attemptKey,
+              roundLabel: String(first.roundLabel || ""),
+              mode: String(first.mode || ""),
+              groups: [],
+            });
+          }
+          attempts.get(attemptKey).groups.push(group);
+          if (!attempts.get(attemptKey).roundLabel && first.roundLabel) {
+            attempts.get(attemptKey).roundLabel = String(first.roundLabel);
+          }
+          if (!attempts.get(attemptKey).mode && first.mode) {
+            attempts.get(attemptKey).mode = String(first.mode);
+          }
+        }
+
+        const attemptCards = [...attempts.values()]
+          .sort((a, b) => {
+            const aa = Number(String(a.attemptKey).replace(/^attempt:/, "")) || 0;
+            const bb = Number(String(b.attemptKey).replace(/^attempt:/, "")) || 0;
+            return aa - bb;
+          })
+          .map((attemptInfo) => {
+            const attemptNumber = String(attemptInfo.attemptKey).replace(/^attempt:/, "");
+            const stageNames = attemptInfo.groups
+              .map((group) => {
+                const stageCode = String(group.stage || "").replace(/^stage:/, "");
+                return stageDisplayName(stageCode);
+              })
+              .filter((value, index, arr) => arr.indexOf(value) === index);
+            const lastGroup = attemptInfo.groups[attemptInfo.groups.length - 1] || { entries: [] };
+            const progress = summarizeGroupProgress(lastGroup);
+            const label = attemptInfo.roundLabel || `시도 ${attemptNumber}`;
+            const chips = stageNames
+              .slice(0, 6)
+              .map((name) => `<span class="workflow-kpi">${esc(name)}</span>`)
+              .join("");
+            return `<article class="debug-flow-card">
+              <div class="debug-flow-head">
+                <strong>${esc(label)}</strong>
+                <span class="badge status-${progress.startsWith("실패") ? "failed" : (progress === "완료" ? "done" : "running")}">${esc(progress)}</span>
+              </div>
+              <p class="hint">그룹 ${attemptInfo.groups.length}개 · 단계 ${stageNames.length}개</p>
+              <div class="workflow-kpis">${chips || `<span class="workflow-kpi">단계 기록 없음</span>`}</div>
+            </article>`;
+          })
+          .join("");
+
+        box.innerHTML = `
+          <h3>실행 흐름 요약</h3>
+          <div class="debug-flow-grid">${attemptCards}</div>
+        `;
       }
 
       function renderFailureSummary(entriesNewestFirst) {
@@ -1201,9 +1733,11 @@
         const terminal = document.getElementById("terminal-log");
         if (!terminal) return;
 
-        const shouldStickToTop = isNearTop(terminal) || isNearBottom(terminal);
+        const shouldStickToBottom = isNearBottom(terminal);
+        const shouldStickToTop = !shouldStickToBottom && isNearTop(terminal);
         if (!logText || !logText.trim()) {
           renderFailureSummary([]);
+          renderDebugFlowSummary([]);
           terminal.textContent = "[로그 대기 중]";
           return;
         }
@@ -1217,6 +1751,7 @@
         renderWorkflowInsights(entries);
         renderWorkflowLane(entries, currentStageCode);
         const groups = buildGroupedEntries(entries);
+        renderDebugFlowSummary(groups);
         terminal.innerHTML = groups
           .map((group) => {
             const rows = group.entries
@@ -1240,7 +1775,9 @@
           })
           .join("");
 
-        if (shouldStickToTop) {
+        if (shouldStickToBottom) {
+          terminal.scrollTop = terminal.scrollHeight;
+        } else if (shouldStickToTop) {
           terminal.scrollTop = 0;
         }
       }
@@ -1337,11 +1874,24 @@
           updateMeta(payload.job);
           currentJobAttempt = Math.max(1, Number((payload.job || {}).attempt || 1));
           stageSnapshotMap = buildStageSnapshotMap(payload.stage_md_snapshots || []);
+          nodeRunsCache = Array.isArray(payload.node_runs) ? payload.node_runs : [];
+          resumeStateCache = payload.resume_state && typeof payload.resume_state === "object"
+            ? payload.resume_state
+            : null;
+          manualRetryOptionsCache = payload.manual_retry_options && typeof payload.manual_retry_options === "object"
+            ? payload.manual_retry_options
+            : null;
+          runtimeSignalsCache = payload.runtime_signals && typeof payload.runtime_signals === "object"
+            ? payload.runtime_signals
+            : null;
           const nextMdFiles = Array.isArray(payload.md_files) ? payload.md_files : [];
           const nextMdSignature = buildWorkspaceMdSignature(nextMdFiles);
           const docsChanged = nextMdSignature !== workspaceMdSignature;
           workspaceMdFilesCache = nextMdFiles;
           workspaceMdSignature = nextMdSignature;
+          renderRuntimeHealth(runtimeSignalsCache);
+          renderWorkflowLane(debugEntriesCache, currentStageCode);
+          renderWorkflowManualPanel(manualRetryOptionsCache, resumeStateCache);
           if (docsChanged && firstUserLogLoaded && lastUserLogText) {
             renderUserLog(lastUserLogText);
           }
@@ -1381,6 +1931,12 @@
         });
       }
 
+      function bindWorkflowManualButton() {
+        const button = document.getElementById("workflow-manual-submit");
+        if (!button) return;
+        button.addEventListener("click", submitManualWorkflowRetry);
+      }
+
       async function refreshAll() {
         await Promise.all([refreshJob(), refreshLogs()]);
       }
@@ -1388,6 +1944,7 @@
       initThemeToggle();
       bindDetailTabs();
       bindStopButton();
+      bindWorkflowManualButton();
       hydrateRenderedTimes();
       refreshAll();
       setInterval(refreshAll, 1500);

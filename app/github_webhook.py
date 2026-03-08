@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+from pathlib import Path
 from typing import Any, Dict
 import uuid
 
@@ -13,9 +14,12 @@ from app.config import AppSettings
 from app.dependencies import get_settings, get_store
 from app.models import JobRecord, JobStage, JobStatus, utc_now_iso
 from app.store import JobStore
+from app.workflow_resolution import list_known_workflow_ids, resolve_workflow_selection
 
 
 router = APIRouter(tags=["webhook"])
+_APPS_CONFIG_PATH = Path.cwd() / "config" / "apps.json"
+_WORKFLOWS_CONFIG_PATH = Path.cwd() / "config" / "workflows.json"
 
 
 
@@ -77,9 +81,18 @@ async def receive_github_issue_webhook(
     labels = issue.get("labels") or []
     app_code = _extract_prefixed_label(labels, "app:", default="default")
     track = _normalize_track(_extract_prefixed_label(labels, "track:", default="enhance"))
+    requested_workflow_id = _extract_prefixed_label(labels, "workflow:", default="")
     title_track = _detect_title_track(issue_title)
     if title_track:
         track = title_track
+    if requested_workflow_id:
+        known_workflow_ids = list_known_workflow_ids(_WORKFLOWS_CONFIG_PATH)
+        if requested_workflow_id not in known_workflow_ids:
+            return {
+                "accepted": False,
+                "reason": "invalid_workflow_id",
+                "workflow_id": requested_workflow_id,
+            }
 
     existing = _find_active_job(store, repository_name, issue_number)
     if existing is not None:
@@ -95,6 +108,13 @@ async def receive_github_issue_webhook(
     job_id = str(uuid.uuid4())
     branch_name = _build_branch_name(app_code, issue_number, track, job_id)
     log_file = f"{app_code}--{job_id}.log"
+    workflow_selection = resolve_workflow_selection(
+        requested_workflow_id=requested_workflow_id,
+        app_code=app_code,
+        repository=repository_name,
+        apps_path=_APPS_CONFIG_PATH,
+        workflows_path=_WORKFLOWS_CONFIG_PATH,
+    )
 
     job = JobRecord(
         job_id=job_id,
@@ -116,6 +136,7 @@ async def receive_github_issue_webhook(
         finished_at=None,
         app_code=app_code,
         track=track,
+        workflow_id=workflow_selection.workflow_id,
     )
 
     store.create_job(job)
@@ -128,6 +149,8 @@ async def receive_github_issue_webhook(
         "stage": job.stage,
         "app_code": app_code,
         "track": track,
+        "workflow_id": workflow_selection.workflow_id,
+        "workflow_source": workflow_selection.source,
     }
 
 

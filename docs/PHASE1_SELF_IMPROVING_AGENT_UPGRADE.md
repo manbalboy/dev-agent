@@ -1,5 +1,7 @@
 # Phase 1: Self-Improving Product Agent Upgrade
 
+상위 운영 원칙은 [AI_AGENT_OPERATING_PRINCIPLES.md](./AI_AGENT_OPERATING_PRINCIPLES.md)를 따른다.
+
 ## 1) 현재 구조 문제점
 - 현재 기본 흐름은 `issue -> spec -> plan -> implement -> review` 중심으로, 제품 정의 단계가 약함.
 - `PRODUCT_BRIEF`, `USER_FLOWS`, `MVP_SCOPE`, `ARCHITECTURE_PLAN` 같은 제품 산출물이 기본 계약에 없었음.
@@ -19,11 +21,18 @@
 - generate_user_flows
 - define_mvp_scope
 - architecture_planning
+- project_scaffolding
 - planning / implementation / testing
 - review_with_gemini
 - product_review
 - improvement_stage
 - refine loop and finalize
+
+## 3-1) AI 역할군 전략
+- `Gemini`: planner / reviewer 계열 주 담당
+- `Codex`: coder / designer / publisher / fix 계열 주 담당
+- `Claude` / `Copilot`: documentation / escalation / helper 계열 보조 담당
+- 실제 매핑은 `config/ai_role_routing.json`에서 관리하고, 오케스트레이터는 논리 역할명으로만 템플릿을 조회한다.
 
 ## 4) 단계별 계약
 상세 계약은 `_docs/STAGE_CONTRACTS.md`, `_docs/STAGE_CONTRACTS.json` 자동 생성 파일을 표준으로 사용한다.
@@ -33,6 +42,7 @@
 - `generate_user_flows`: 입력(BRIEF) -> 출력(USER_FLOWS.md)
 - `define_mvp_scope`: 입력(BRIEF/FLOWS/SPEC) -> 출력(MVP_SCOPE.md)
 - `architecture_planning`: 입력(MVP/FLOWS) -> 출력(ARCHITECTURE_PLAN.md)
+- `project_scaffolding`: 입력(ARCH/MVP/SPEC/repo context) -> 출력(SCAFFOLD_PLAN.md + BOOTSTRAP_REPORT.json)
 - `product_review`: 입력(REVIEW/TEST/UX) -> 출력(PRODUCT_REVIEW.json + backlog/history)
 - `improvement_stage`: 입력(product_review/history/backlog) -> 출력(loop_state/plan)
 
@@ -41,6 +51,8 @@
 - `_docs/USER_FLOWS.md`
 - `_docs/MVP_SCOPE.md`
 - `_docs/ARCHITECTURE_PLAN.md`
+- `_docs/SCAFFOLD_PLAN.md`
+- `_docs/BOOTSTRAP_REPORT.json`
 - `_docs/PRODUCT_REVIEW.json`
 - `_docs/REVIEW_HISTORY.json`
 - `_docs/IMPROVEMENT_BACKLOG.json`

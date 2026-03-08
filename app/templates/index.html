@@ -60,53 +60,167 @@
           <article class="stat-card"><h2>완료</h2><p id="stat-done">0</p></article>
           <article class="stat-card"><h2>실패</h2><p id="stat-failed">0</p></article>
         </section>
-        <div class="issue-form-actions">
-          <button id="requeue-failed-button" class="action-button" type="button">실패 전체 재큐잉</button>
-          <p id="requeue-failed-result" class="hint"></p>
-        </div>
-
-        <table class="jobs-table">
-          <thead>
-            <tr>
-              <th>작업 ID</th>
-              <th>앱/트랙</th>
-              <th>상태</th>
-              <th>단계</th>
-              <th>이슈</th>
-              <th>PR</th>
-              <th>작업</th>
-              <th>갱신 시각</th>
-            </tr>
-          </thead>
-          <tbody id="jobs-table-body">
-            {% for job in jobs %}
-            <tr>
-              <td><a href="/jobs/{{ job.job_id }}">{{ job.job_id[:8] }}</a></td>
-              <td><code>{{ job.app_code or "default" }}</code> / <code>{{ job.track or "enhance" }}</code></td>
-              <td><span class="badge status-{{ job.status }}">{{ job.status }}</span></td>
-              <td>{{ job.stage }}</td>
-              <td><a href="{{ job.issue_url }}" target="_blank" rel="noreferrer">#{{ job.issue_number }}</a></td>
-              <td>
-                {% if job.pr_url %}
-                <a href="{{ job.pr_url }}" target="_blank" rel="noreferrer">PR</a>
-                {% else %}
-                -
-                {% endif %}
-              </td>
-              <td>
-                {% if job.status == "failed" %}
-                <button type="button" class="action-button job-requeue" data-job-id="{{ job.job_id }}">재큐잉</button>
-                {% else %}
-                -
-                {% endif %}
-              </td>
-              <td class="js-time" data-utc="{{ job.updated_at }}">{{ job.updated_at }}</td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-
-        <p class="hint" id="last-updated">마지막 갱신: -</p>
+        <section class="quick-panel jobs-filter-panel">
+          <div class="quick-panel-head">
+            <div>
+              <h2>작업 필터</h2>
+              <p class="hint">최근 작업을 검색하고 상태별로 필터를 적용할 수 있습니다.</p>
+            </div>
+          </div>
+          <form id="jobs-filter-form" class="jobs-filter-form">
+            <div class="jobs-search-field">
+              <span class="jobs-search-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" focusable="false"><path d="M10 4a6 6 0 1 1 0 12 6 6 0 0 1 0-12zm0-2a8 8 0 1 0 4.9 14.3l4.4 4.4 1.4-1.4-4.4-4.4A8 8 0 0 0 10 2z"/></svg>
+              </span>
+              <input id="jobs-filter-query" type="search" maxlength="200" placeholder="작업 ID, 제목, 에러, 브랜치 이름 입력 등" />
+            </div>
+            <label class="jobs-filter-control" for="jobs-filter-status">
+              <span>전체 상태</span>
+              <select id="jobs-filter-status">
+                <option value="">전체 상태</option>
+              </select>
+            </label>
+            <label class="jobs-filter-control" for="jobs-filter-track">
+              <span>전체 트랙</span>
+              <select id="jobs-filter-track">
+                <option value="">전체 트랙</option>
+                <option value="bug">bug</option>
+                <option value="enhance">enhance</option>
+                <option value="long">long</option>
+                <option value="new">new</option>
+                <option value="ultra">ultra</option>
+                <option value="ultra10">ultra10</option>
+              </select>
+            </label>
+            <label class="jobs-filter-control" for="jobs-filter-app-code">
+              <span>전체 앱</span>
+              <select id="jobs-filter-app-code">
+                <option value="">전체 앱</option>
+              </select>
+            </label>
+            <label class="jobs-filter-control" for="jobs-filter-stage">
+              <span>전체 단계</span>
+              <select id="jobs-filter-stage">
+                <option value="">전체 단계</option>
+              </select>
+            </label>
+            <label class="jobs-filter-control" for="jobs-filter-recovery-status">
+              <span>복구 상태</span>
+              <select id="jobs-filter-recovery-status">
+                <option value="">전체 복구</option>
+              </select>
+            </label>
+            <label class="jobs-filter-control" for="jobs-filter-strategy">
+              <span>개선 전략</span>
+              <select id="jobs-filter-strategy">
+                <option value="">전체 전략</option>
+              </select>
+            </label>
+            <label class="jobs-filter-control" for="jobs-page-size">
+              <span>목록 수</span>
+              <select id="jobs-page-size">
+                <option value="10">10개씩</option>
+                <option value="20" selected>20개씩</option>
+                <option value="50">50개씩</option>
+                <option value="100">100개씩</option>
+              </select>
+            </label>
+            <div class="issue-form-actions jobs-filter-actions">
+              <button id="jobs-filter-apply" class="action-button" type="submit">적용</button>
+              <button id="jobs-filter-reset" class="action-button" type="button">초기화</button>
+            </div>
+          </form>
+          <div class="jobs-filter-footer">
+            <p id="jobs-filter-summary" class="hint">검색 결과 준비 중...</p>
+            <div class="jobs-pagination">
+              <button id="jobs-page-prev" class="action-button" type="button">이전</button>
+              <span id="jobs-page-status" class="hint">1 / 1</span>
+              <button id="jobs-page-next" class="action-button" type="button">다음</button>
+            </div>
+          </div>
+        </section>
+        <section class="quick-panel jobs-table-panel">
+          <div class="jobs-table-panel-head">
+            <div>
+              <h2>실제 진행 상황/로그</h2>
+            </div>
+            <div class="issue-form-actions jobs-table-actions">
+              <button id="requeue-failed-button" class="action-button" type="button">실패 전체 재큐잉</button>
+              <p id="requeue-failed-result" class="hint"></p>
+            </div>
+          </div>
+          <div class="jobs-table-wrap">
+            <table class="jobs-table">
+              <thead>
+                <tr>
+                  <th>작업 ID</th>
+                  <th>템플릿</th>
+                  <th>상태</th>
+                  <th>단계</th>
+                  <th>이슈</th>
+                  <th>PR</th>
+                  <th>작업</th>
+                  <th>생성 시각</th>
+                </tr>
+              </thead>
+              <tbody id="jobs-table-body">
+                {% for job in jobs %}
+                <tr>
+                  <td><a class="job-id-pill" href="/jobs/{{ job.job_id }}">{{ job.job_id[:8] }}</a></td>
+                  <td>
+                    <div class="job-template-cell">
+                      <span class="job-template-app">{{ job.app_code or "default" }}</span>
+                      <span class="job-template-sep">/</span>
+                      <span class="job-template-track">{{ job.track or "enhance" }}</span>
+                    </div>
+                  </td>
+                  <td>
+                    <span class="badge status-{{ job.status }}">{{ job.status }}</span>
+                    {% if job.recovery_status %}
+                    <div class="table-cell-hint">{{ job.recovery_status }}</div>
+                    {% endif %}
+                    {% if job.resume_mode and job.resume_mode != "none" %}
+                    <div class="table-cell-hint">resume · {{ job.resume_mode }}</div>
+                    {% endif %}
+                    {% if job.strategy %}
+                    <div class="table-cell-hint">strategy · {{ job.strategy }}</div>
+                    {% endif %}
+                    {% if job.review_overall is not none %}
+                    <div class="table-cell-hint">review · {{ job.review_overall }}/5</div>
+                    {% endif %}
+                    {% if job.runtime_signals and job.runtime_signals.maturity_level %}
+                    <div class="table-cell-hint">maturity · {{ job.runtime_signals.maturity_level }}</div>
+                    {% endif %}
+                    {% if job.runtime_signals and job.runtime_signals.quality_trend_direction %}
+                    <div class="table-cell-hint">trend · {{ job.runtime_signals.quality_trend_direction }}</div>
+                    {% endif %}
+                  </td>
+                  <td>{{ job.stage }}</td>
+                  <td><a class="job-issue-link" href="{{ job.issue_url }}" target="_blank" rel="noreferrer">#{{ job.issue_number }}</a></td>
+                  <td>
+                    {% if job.pr_url %}
+                    <a class="table-pill-link" href="{{ job.pr_url }}" target="_blank" rel="noreferrer">PR</a>
+                    {% else %}
+                    -
+                    {% endif %}
+                  </td>
+                  <td>
+                    {% if job.status == "failed" %}
+                    <button type="button" class="action-button table-action-button job-requeue" data-job-id="{{ job.job_id }}">재실행</button>
+                    {% else %}
+                    -
+                    {% endif %}
+                  </td>
+                  <td class="js-time" data-utc="{{ job.created_at or job.updated_at }}">{{ job.created_at or job.updated_at }}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          <div class="jobs-table-footer">
+            <p class="hint" id="last-updated">마지막 행동: -</p>
+          </div>
+        </section>
       </section>
 
       <section id="panel-settings" class="tab-panel">
@@ -122,6 +236,12 @@
               <svg viewBox="0 0 24 24" focusable="false"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5s-3 1.34-3 3 1.34 3 3 3zM8 11c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5C15 14.17 10.33 13 8 13zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.94 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>
             </span>
             <span>앱 관리</span>
+          </button>
+          <button type="button" class="settings-tab" data-settings-tab="workflows">
+            <span class="tab-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" focusable="false"><path d="M5 4h14a2 2 0 0 1 2 2v3h-2V6H5v12h5v2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zm9 5h7v2h-7V9zm0 4h7v2h-7v-2zm0 4h7v2h-7v-2zm-5-6h3v3H9v-3zm0 4h3v3H9v-3z"/></svg>
+            </span>
+            <span>워크플로우</span>
           </button>
           <button type="button" class="settings-tab" data-settings-tab="agents">
             <span class="tab-icon" aria-hidden="true">
@@ -167,6 +287,11 @@
               <option value="">(선택 안 함)</option>
             </select>
 
+            <label for="issue-workflow-id">Workflow Override</label>
+            <select id="issue-workflow-id" name="workflow_id">
+              <option value="">앱 기본값 사용</option>
+            </select>
+
             <label for="issue-title">제목</label>
             <input id="issue-title" name="title" type="text" maxlength="200" placeholder="예: 대시보드 필터 추가" required />
 
@@ -207,6 +332,54 @@
 
             <div id="app-list-box" class="cli-check-box hint">앱 목록 불러오는 중...</div>
           </form>
+        </section>
+
+        <section class="quick-panel settings-section" data-settings-section="workflows">
+          <div class="quick-panel-head">
+            <div>
+              <h2>워크플로우 실행 설정</h2>
+              <p class="hint">기본 workflow와 앱별 workflow를 운영 화면에서 바로 바꿉니다.</p>
+            </div>
+          </div>
+          <p id="workflow-config-result" class="hint workflow-config-result">기본값과 앱별 매핑을 불러오는 중...</p>
+          <div class="workflow-settings-grid">
+            <section class="workflow-settings-card">
+              <div class="workflow-settings-head">
+                <div>
+                  <h3>기본 Workflow</h3>
+                  <p class="hint">유효한 app/job override가 없을 때 사용됩니다.</p>
+                </div>
+              </div>
+              <div id="workflow-default-box" class="workflow-settings-box hint">불러오는 중...</div>
+            </section>
+            <section class="workflow-settings-card">
+              <div class="workflow-settings-head">
+                <div>
+                  <h3>Workflow Catalog</h3>
+                  <p class="hint">저장된 workflow 목록과 기본 지정 상태를 확인합니다.</p>
+                </div>
+              </div>
+              <div id="workflow-list-box" class="workflow-settings-box hint">불러오는 중...</div>
+            </section>
+            <section class="workflow-settings-card workflow-settings-card-wide">
+              <div class="workflow-settings-head">
+                <div>
+                  <h3>앱별 Workflow 매핑</h3>
+                  <p class="hint">앱 단위로 실제 실행 workflow를 바꿉니다.</p>
+                </div>
+              </div>
+              <div id="workflow-app-map-box" class="workflow-settings-box hint">불러오는 중...</div>
+            </section>
+            <section class="workflow-settings-card workflow-settings-card-wide">
+              <div class="workflow-settings-head">
+                <div>
+                  <h3>Workflow Editor</h3>
+                  <p class="hint">노드/엣지 구조를 직접 편집하고 검증한 뒤 저장합니다.</p>
+                </div>
+              </div>
+              <div id="workflow-editor-box" class="workflow-settings-box hint">에디터를 준비 중...</div>
+            </section>
+          </div>
         </section>
 
         <section class="quick-panel settings-section" data-settings-section="agents">
@@ -404,19 +577,51 @@
       </section>
 
       <section id="panel-assistant" class="tab-panel">
-        <section class="quick-panel">
+        <section class="quick-panel assistant-panel">
           <div class="quick-panel-head">
             <div>
-              <h2>시스템 도우미 AI (Codex)</h2>
-              <p class="hint">현재 레포 기준으로 질문하고 답변을 받을 수 있습니다.</p>
+              <h2>시스템 로그 분석 도우미</h2>
+              <p class="hint">Claude / Copilot / Gemini / Codex 중 하나를 골라 로그 문제점을 분석합니다.</p>
             </div>
           </div>
           <div id="assistant-messages" class="assistant-messages"></div>
           <form id="assistant-form" class="assistant-form">
-            <label for="assistant-input">메시지</label>
-            <textarea id="assistant-input" rows="4" maxlength="8000" placeholder="예: 지금 실패 원인 빠르게 요약해줘"></textarea>
-            <div class="issue-form-actions">
-              <button type="submit" id="assistant-submit" class="action-button">Codex에게 보내기</button>
+            <div class="assistant-form-grid">
+              <label class="assistant-field" for="assistant-provider">
+                <span>도우미 선택</span>
+                <select id="assistant-provider">
+                  <option value="codex">Codex</option>
+                  <option value="gemini">Gemini</option>
+                  <option value="claude">Claude</option>
+                  <option value="copilot">Copilot</option>
+                </select>
+              </label>
+
+              <label class="assistant-field assistant-field-wide" for="assistant-job-id">
+                <span>대상 Job ID (선택)</span>
+                <div class="assistant-combo-shell">
+                  <input
+                    id="assistant-job-id"
+                    list="assistant-job-options"
+                    type="text"
+                    maxlength="128"
+                    autocomplete="off"
+                    placeholder="입력하거나 선택하세요"
+                  />
+                  <span class="assistant-combo-caret" aria-hidden="true">▾</span>
+                </div>
+              </label>
+              <datalist id="assistant-job-options"></datalist>
+
+              <p id="assistant-job-preview" class="hint assistant-field-note">미선택 시 최근 전체 작업 로그 기준으로 분석합니다.</p>
+
+              <label class="assistant-field assistant-field-wide" for="assistant-input">
+                <span>메시지</span>
+                <textarea id="assistant-input" rows="4" maxlength="8000" placeholder="예: 최근 실패 로그 기준으로 핵심 문제점 3개와 즉시 조치안을 알려줘"></textarea>
+              </label>
+            </div>
+            <div class="issue-form-actions assistant-form-actions">
+              <button type="submit" id="assistant-submit" class="action-button">로그 분석 요청</button>
               <p id="assistant-status" class="hint"></p>
             </div>
           </form>
@@ -502,25 +707,301 @@
         document.getElementById("stat-failed").textContent = summary.failed ?? 0;
       }
 
+      const jobsFilterState = {
+        page: 1,
+        page_size: 20,
+        status: "",
+        track: "",
+        app_code: "",
+        stage: "",
+        recovery_status: "",
+        strategy: "",
+        q: "",
+      };
+      const appCatalogState = {
+        apps: [],
+      };
+      const workflowCatalogState = {
+        workflows: [],
+        defaultWorkflowId: "",
+      };
+      const workflowEditorState = {
+        schema: null,
+        selectedWorkflowId: "",
+        currentWorkflow: null,
+        resultMessage: "",
+        resultIsError: false,
+      };
+
+      function workflowEditorBaseTemplate() {
+        return {
+          workflow_id: "",
+          name: "",
+          description: "",
+          version: 1,
+          entry_node_id: "n1",
+          nodes: [
+            {
+              id: "n1",
+              type: "gh_read_issue",
+              title: "이슈 읽기",
+            },
+          ],
+          edges: [],
+        };
+      }
+
+      function cloneWorkflowDefinition(item) {
+        return JSON.parse(JSON.stringify(item || workflowEditorBaseTemplate()));
+      }
+
+      function normalizeWorkflowDefinition(item) {
+        const base = workflowEditorBaseTemplate();
+        const workflow = item && typeof item === "object" ? cloneWorkflowDefinition(item) : cloneWorkflowDefinition(base);
+        workflow.workflow_id = String(workflow.workflow_id || "").trim();
+        workflow.name = String(workflow.name || "").trim();
+        workflow.description = String(workflow.description || "").trim();
+        workflow.version = Number(workflow.version || 1) || 1;
+        workflow.entry_node_id = String(workflow.entry_node_id || "").trim();
+        workflow.nodes = Array.isArray(workflow.nodes) && workflow.nodes.length
+          ? workflow.nodes.map((node, index) => ({
+              id: String(node?.id || `n${index + 1}`).trim(),
+              type: String(node?.type || "gh_read_issue").trim(),
+              title: String(node?.title || "").trim(),
+            }))
+          : cloneWorkflowDefinition(base).nodes;
+        workflow.edges = Array.isArray(workflow.edges)
+          ? workflow.edges.map((edge) => ({
+              from: String(edge?.from || "").trim(),
+              to: String(edge?.to || "").trim(),
+              on: String(edge?.on || "success").trim() || "success",
+            }))
+          : [];
+        if (!workflow.entry_node_id && workflow.nodes.length) {
+          workflow.entry_node_id = String(workflow.nodes[0].id || "").trim();
+        }
+        return workflow;
+      }
+
+      function nextWorkflowNodeId(nodes) {
+        const used = new Set((nodes || []).map((item) => String(item?.id || "").trim()).filter(Boolean));
+        let index = Math.max(1, used.size + 1);
+        while (used.has(`n${index}`)) {
+          index += 1;
+        }
+        return `n${index}`;
+      }
+
+      function readWorkflowEditorDom() {
+        const box = document.getElementById("workflow-editor-box");
+        if (!box) return workflowEditorBaseTemplate();
+        const previousWorkflow = normalizeWorkflowDefinition(workflowEditorState.currentWorkflow || workflowEditorBaseTemplate());
+        const workflowId = box.querySelector("#workflow-editor-id");
+        const name = box.querySelector("#workflow-editor-name");
+        const description = box.querySelector("#workflow-editor-description");
+        const version = box.querySelector("#workflow-editor-version");
+        const entryNode = box.querySelector("#workflow-editor-entry-node");
+        const rawNodes = Array.from(box.querySelectorAll(".workflow-editor-node-row")).map((row, index) => ({
+          index,
+          id: String(row.querySelector(".workflow-editor-node-id")?.value || "").trim(),
+          type: String(row.querySelector(".workflow-editor-node-type")?.value || "gh_read_issue").trim(),
+          title: String(row.querySelector(".workflow-editor-node-title")?.value || "").trim(),
+        }));
+        const nodeIdRemap = new Map();
+        const nodes = rawNodes
+          .map((node) => {
+            const previousId = String(previousWorkflow.nodes[node.index]?.id || "").trim();
+            if (previousId && node.id && previousId !== node.id) {
+              nodeIdRemap.set(previousId, node.id);
+            }
+            return { id: node.id, type: node.type, title: node.title };
+          })
+          .filter((node) => node.id);
+        const edges = Array.from(box.querySelectorAll(".workflow-editor-edge-row")).map((row) => ({
+          from: nodeIdRemap.get(String(row.querySelector(".workflow-editor-edge-from")?.value || "").trim())
+            || String(row.querySelector(".workflow-editor-edge-from")?.value || "").trim(),
+          to: nodeIdRemap.get(String(row.querySelector(".workflow-editor-edge-to")?.value || "").trim())
+            || String(row.querySelector(".workflow-editor-edge-to")?.value || "").trim(),
+          on: String(row.querySelector(".workflow-editor-edge-on")?.value || "success").trim() || "success",
+        })).filter((edge) => edge.from && edge.to);
+        return normalizeWorkflowDefinition({
+          workflow_id: workflowId?.value || "",
+          name: name?.value || "",
+          description: description?.value || "",
+          version: Number(version?.value || 1) || 1,
+          entry_node_id: nodeIdRemap.get(String(entryNode?.value || "").trim()) || entryNode?.value || "",
+          nodes,
+          edges,
+        });
+      }
+
+      function applyJobsFilterStateToForm() {
+        const query = document.getElementById("jobs-filter-query");
+        const status = document.getElementById("jobs-filter-status");
+        const track = document.getElementById("jobs-filter-track");
+        const appCode = document.getElementById("jobs-filter-app-code");
+        const stage = document.getElementById("jobs-filter-stage");
+        const recoveryStatus = document.getElementById("jobs-filter-recovery-status");
+        const strategy = document.getElementById("jobs-filter-strategy");
+        const pageSize = document.getElementById("jobs-page-size");
+        if (query) query.value = jobsFilterState.q || "";
+        if (status) status.value = jobsFilterState.status || "";
+        if (track) track.value = jobsFilterState.track || "";
+        if (appCode) appCode.value = jobsFilterState.app_code || "";
+        if (stage) stage.value = jobsFilterState.stage || "";
+        if (recoveryStatus) recoveryStatus.value = jobsFilterState.recovery_status || "";
+        if (strategy) strategy.value = jobsFilterState.strategy || "";
+        if (pageSize) pageSize.value = String(jobsFilterState.page_size || 20);
+      }
+
+      function syncJobsFilterStateFromForm({ resetPage = false } = {}) {
+        const query = document.getElementById("jobs-filter-query");
+        const status = document.getElementById("jobs-filter-status");
+        const track = document.getElementById("jobs-filter-track");
+        const appCode = document.getElementById("jobs-filter-app-code");
+        const stage = document.getElementById("jobs-filter-stage");
+        const recoveryStatus = document.getElementById("jobs-filter-recovery-status");
+        const strategy = document.getElementById("jobs-filter-strategy");
+        const pageSize = document.getElementById("jobs-page-size");
+        jobsFilterState.q = query?.value.trim() || "";
+        jobsFilterState.status = status?.value || "";
+        jobsFilterState.track = track?.value || "";
+        jobsFilterState.app_code = appCode?.value || "";
+        jobsFilterState.stage = stage?.value || "";
+        jobsFilterState.recovery_status = recoveryStatus?.value || "";
+        jobsFilterState.strategy = strategy?.value || "";
+        jobsFilterState.page_size = Number(pageSize?.value || 20) || 20;
+        if (resetPage) jobsFilterState.page = 1;
+      }
+
+      function jobsQueryString() {
+        const params = new URLSearchParams();
+        params.set("page", String(jobsFilterState.page || 1));
+        params.set("page_size", String(jobsFilterState.page_size || 20));
+        if (jobsFilterState.status) params.set("status", jobsFilterState.status);
+        if (jobsFilterState.track) params.set("track", jobsFilterState.track);
+        if (jobsFilterState.app_code) params.set("app_code", jobsFilterState.app_code);
+        if (jobsFilterState.stage) params.set("stage", jobsFilterState.stage);
+        if (jobsFilterState.recovery_status) params.set("recovery_status", jobsFilterState.recovery_status);
+        if (jobsFilterState.strategy) params.set("strategy", jobsFilterState.strategy);
+        if (jobsFilterState.q) params.set("q", jobsFilterState.q);
+        return params.toString();
+      }
+
+      function renderJobFilterOptions(options) {
+        const statusSelect = document.getElementById("jobs-filter-status");
+        const stageSelect = document.getElementById("jobs-filter-stage");
+        const recoveryStatusSelect = document.getElementById("jobs-filter-recovery-status");
+        const strategySelect = document.getElementById("jobs-filter-strategy");
+        if (statusSelect) {
+          const statuses = options?.statuses || [];
+          statusSelect.innerHTML = `<option value="">전체 상태</option>${statuses
+            .map((status) => `<option value="${esc(status)}">${esc(status)}</option>`)
+            .join("")}`;
+          statusSelect.value = jobsFilterState.status || "";
+        }
+        if (stageSelect) {
+          const stages = options?.stages || [];
+          stageSelect.innerHTML = `<option value="">전체 단계</option>${stages
+            .map((item) => `<option value="${esc(item)}">${esc(item)}</option>`)
+            .join("")}`;
+          stageSelect.value = jobsFilterState.stage || "";
+        }
+        if (recoveryStatusSelect) {
+          const recoveryStatuses = options?.recovery_statuses || [];
+          recoveryStatusSelect.innerHTML = `<option value="">전체 복구</option>${recoveryStatuses
+            .map((item) => `<option value="${esc(item)}">${esc(item)}</option>`)
+            .join("")}`;
+          recoveryStatusSelect.value = jobsFilterState.recovery_status || "";
+        }
+        if (strategySelect) {
+          const strategies = options?.strategies || [];
+          strategySelect.innerHTML = `<option value="">전체 전략</option>${strategies
+            .map((item) => `<option value="${esc(item)}">${esc(item)}</option>`)
+            .join("")}`;
+          strategySelect.value = jobsFilterState.strategy || "";
+        }
+      }
+
+      function renderJobFilterSummary(filteredSummary, pagination, filters) {
+        const node = document.getElementById("jobs-filter-summary");
+        if (!node) return;
+        const total = filteredSummary?.total ?? 0;
+        const startIndex = pagination?.start_index ?? 0;
+        const endIndex = pagination?.end_index ?? 0;
+        const filteredLabel = filters?.applied ? "필터 적용" : "전체 목록";
+        if (total === 0) {
+          node.textContent = `${filteredLabel}: 결과 없음`;
+          return;
+        }
+        node.textContent = `${filteredLabel}: ${total}건 중 ${startIndex}-${endIndex} 보임`;
+      }
+
+      function renderJobsPagination(pagination) {
+        const prev = document.getElementById("jobs-page-prev");
+        const next = document.getElementById("jobs-page-next");
+        const status = document.getElementById("jobs-page-status");
+        const currentPage = pagination?.page ?? 1;
+        const totalPages = pagination?.total_pages ?? 1;
+        jobsFilterState.page = currentPage;
+        if (prev) prev.disabled = !(pagination?.has_prev);
+        if (next) next.disabled = !(pagination?.has_next);
+        if (status) status.textContent = `${currentPage} / ${totalPages}`;
+      }
+
       function renderJobs(jobs) {
         const body = document.getElementById("jobs-table-body");
+        if (!jobs || jobs.length === 0) {
+          body.innerHTML = `<tr><td colspan="8" class="jobs-empty">조건에 맞는 작업이 없습니다.</td></tr>`;
+          return;
+        }
         body.innerHTML = jobs
           .map((job) => {
             const prCell = job.pr_url
-              ? `<a href="${esc(job.pr_url)}" target="_blank" rel="noreferrer">PR</a>`
+              ? `<a class="table-pill-link" href="${esc(job.pr_url)}" target="_blank" rel="noreferrer">PR</a>`
               : "-";
             const appCode = job.app_code || "default";
             const track = job.track || "enhance";
+            const runtime = job.runtime_signals && typeof job.runtime_signals === "object"
+              ? job.runtime_signals
+              : {};
+            const hints = [
+              job.recovery_status ? `<div class="table-cell-hint">${esc(job.recovery_status)}</div>` : "",
+              runtime.resume_mode && runtime.resume_mode !== "none"
+                ? `<div class="table-cell-hint">resume · ${esc(runtime.resume_mode)}</div>`
+                : "",
+              runtime.strategy
+                ? `<div class="table-cell-hint">strategy · ${esc(runtime.strategy)}</div>`
+                : "",
+              runtime.review_overall !== undefined && runtime.review_overall !== null
+                ? `<div class="table-cell-hint">review · ${esc(String(runtime.review_overall))}/5</div>`
+                : "",
+              runtime.maturity_level
+                ? `<div class="table-cell-hint">maturity · ${esc(runtime.maturity_level)}</div>`
+                : "",
+              runtime.quality_trend_direction
+                ? `<div class="table-cell-hint">trend · ${esc(runtime.quality_trend_direction)}</div>`
+                : "",
+            ].join("");
             return `
             <tr>
-              <td><a href="/jobs/${esc(job.job_id)}">${esc(String(job.job_id).slice(0, 8))}</a></td>
-              <td><code>${esc(appCode)}</code> / <code>${esc(track)}</code></td>
-              <td><span class="badge status-${esc(job.status)}">${esc(job.status)}</span></td>
+              <td><a class="job-id-pill" href="/jobs/${esc(job.job_id)}">${esc(String(job.job_id).slice(0, 8))}</a></td>
+              <td>
+                <div class="job-template-cell">
+                  <span class="job-template-app">${esc(appCode)}</span>
+                  <span class="job-template-sep">/</span>
+                  <span class="job-template-track">${esc(track)}</span>
+                </div>
+              </td>
+              <td>
+                <span class="badge status-${esc(job.status)}">${esc(job.status)}</span>
+                ${hints}
+              </td>
               <td>${esc(job.stage)}</td>
-              <td><a href="${esc(job.issue_url)}" target="_blank" rel="noreferrer">#${esc(job.issue_number)}</a></td>
+              <td><a class="job-issue-link" href="${esc(job.issue_url)}" target="_blank" rel="noreferrer">#${esc(job.issue_number)}</a></td>
               <td>${prCell}</td>
-              <td>${job.status === "failed" ? `<button type="button" class="action-button job-requeue" data-job-id="${esc(job.job_id)}">재큐잉</button>` : "-"}</td>
-              <td>${esc(formatKstDateTime(job.updated_at))}</td>
+              <td>${job.status === "failed" ? `<button type="button" class="action-button table-action-button job-requeue" data-job-id="${esc(job.job_id)}">재실행</button>` : "-"}</td>
+              <td>${esc(formatKstDateTime(job.created_at || job.updated_at))}</td>
             </tr>`;
           })
           .join("");
@@ -569,9 +1050,22 @@
       let assistantMessages = [
         {
           role: "assistant",
-          content: "안녕하세요. AgentHub 시스템 도우미 Codex입니다. 필요한 작업/오류를 질문해주세요.",
+          provider: "system",
+          content: "안녕하세요. 로그 분석 도우미입니다. Claude/Copilot/Gemini/Codex 중 하나를 선택해 문제점을 분석할 수 있습니다.",
         },
       ];
+      let assistantJobOptions = [];
+      let assistantJobOptionsTimer = null;
+
+      function assistantProviderLabel(provider) {
+        const normalized = String(provider || "").toLowerCase();
+        if (normalized === "codex") return "Codex";
+        if (normalized === "gemini") return "Gemini";
+        if (normalized === "claude") return "Claude";
+        if (normalized === "copilot") return "Copilot";
+        if (normalized === "system") return "System";
+        return "Assistant";
+      }
 
       function setAssistantStatus(message, isError = false) {
         const node = document.getElementById("assistant-status");
@@ -586,7 +1080,7 @@
         box.innerHTML = assistantMessages
           .map((item) => {
             const role = item.role === "user" ? "user" : "assistant";
-            const label = role === "user" ? "사용자" : "Codex";
+            const label = role === "user" ? "사용자" : assistantProviderLabel(item.provider);
             return `<article class="assistant-message role-${role}">
               <header>${esc(label)}</header>
               <pre>${esc(item.content || "")}</pre>
@@ -596,16 +1090,679 @@
         box.scrollTop = box.scrollHeight;
       }
 
-      function renderAppOptions(apps) {
-        const appSelect = document.getElementById("issue-app-code");
-        if (!appSelect) return;
-        const previous = appSelect.value;
-        appSelect.innerHTML = (apps || [])
-          .map((app) => `<option value="${esc(app.code)}">${esc(app.name)} (${esc(app.code)})</option>`)
-          .join("");
-        if ((apps || []).some((item) => item.code === previous)) {
-          appSelect.value = previous;
+      function findAssistantJobOption(jobId) {
+        const normalized = String(jobId || "").trim();
+        if (!normalized) return null;
+        return assistantJobOptions.find((item) => item.job_id === normalized) || null;
+      }
+
+      function renderAssistantJobPreview() {
+        const input = document.getElementById("assistant-job-id");
+        const preview = document.getElementById("assistant-job-preview");
+        if (!input || !preview) return;
+        const jobId = String(input.value || "").trim();
+        if (!jobId) {
+          preview.textContent = "미선택 시 최근 전체 작업 로그 기준으로 분석합니다.";
+          return;
         }
+        const selected = findAssistantJobOption(jobId);
+        if (!selected) {
+          preview.textContent = `직접 지정된 Job ID: ${jobId}`;
+          return;
+        }
+        preview.textContent = `${selected.label} | ${selected.stage} | ${selected.app_code}/${selected.track}`;
+      }
+
+      function renderAssistantJobOptions(items) {
+        const datalist = document.getElementById("assistant-job-options");
+        if (!datalist) return;
+        assistantJobOptions = Array.isArray(items) ? items : [];
+        datalist.innerHTML = assistantJobOptions
+          .map(
+            (item) =>
+              `<option value="${esc(item.job_id)}" label="${esc(item.label)}">${esc(item.label)}</option>`,
+          )
+          .join("");
+        renderAssistantJobPreview();
+      }
+
+      async function loadAssistantJobOptions(query = "") {
+        try {
+          const params = new URLSearchParams();
+          if (query) params.set("q", query);
+          params.set("limit", "20");
+          const response = await fetch(`/api/jobs/options?${params.toString()}`, { cache: "no-store" });
+          if (!response.ok) return;
+          const payload = await response.json();
+          renderAssistantJobOptions(payload.items || []);
+        } catch {
+        }
+      }
+
+      function renderAppOptions(apps) {
+        appCatalogState.apps = Array.isArray(apps) ? apps : [];
+        const appSelect = document.getElementById("issue-app-code");
+        const jobsAppSelect = document.getElementById("jobs-filter-app-code");
+        if (appSelect) {
+          const previous = appSelect.value;
+          appSelect.innerHTML = (appCatalogState.apps || [])
+            .map((app) => `<option value="${esc(app.code)}">${esc(app.name)} (${esc(app.code)})</option>`)
+            .join("");
+          if ((appCatalogState.apps || []).some((item) => item.code === previous)) {
+            appSelect.value = previous;
+          }
+        }
+        if (jobsAppSelect) {
+          const previousJobApp = jobsAppSelect.value;
+          jobsAppSelect.innerHTML = `<option value="">전체 앱</option>${(appCatalogState.apps || [])
+            .map((app) => `<option value="${esc(app.code)}">${esc(app.name)} (${esc(app.code)})</option>`)
+            .join("")}`;
+          if ((appCatalogState.apps || []).some((item) => item.code === previousJobApp)) {
+            jobsAppSelect.value = previousJobApp;
+          } else {
+            jobsAppSelect.value = jobsFilterState.app_code || "";
+          }
+        }
+        renderWorkflowAppMappings(appCatalogState.apps, workflowCatalogState.workflows, workflowCatalogState.defaultWorkflowId);
+      }
+
+      function setWorkflowConfigResult(message, isError = false) {
+        const node = document.getElementById("workflow-config-result");
+        if (!node) return;
+        node.textContent = message;
+        node.classList.toggle("text-error", isError);
+      }
+
+      function workflowLabel(item) {
+        const workflowId = String(item?.workflow_id || "").trim();
+        const name = String(item?.name || "").trim();
+        const version = item?.version ? `v${item.version}` : "";
+        if (name && version) return `${name} (${workflowId}, ${version})`;
+        if (name) return `${name} (${workflowId})`;
+        return workflowId;
+      }
+
+      function renderIssueWorkflowOptions(workflows, defaultWorkflowId) {
+        const select = document.getElementById("issue-workflow-id");
+        if (!select) return;
+        const previous = select.value;
+        const options = (workflows || [])
+          .map((item) => `<option value="${esc(item.workflow_id)}">${esc(workflowLabel(item))}</option>`)
+          .join("");
+        select.innerHTML = `<option value="">앱 기본값 사용 (현재 default: ${esc(defaultWorkflowId || "-")})</option>${options}`;
+        if ((workflows || []).some((item) => item.workflow_id === previous)) {
+          select.value = previous;
+        }
+      }
+
+      function renderWorkflowDefault(workflows, defaultWorkflowId) {
+        const box = document.getElementById("workflow-default-box");
+        if (!box) return;
+        if (!workflows || workflows.length === 0) {
+          box.textContent = "등록된 workflow 없음";
+          return;
+        }
+        const options = workflows
+          .map((item) => `<option value="${esc(item.workflow_id)}"${item.workflow_id === defaultWorkflowId ? " selected" : ""}>${esc(workflowLabel(item))}</option>`)
+          .join("");
+        box.innerHTML = `
+          <div class="workflow-default-row">
+            <label class="workflow-inline-control" for="workflow-default-select">
+              <span>현재 기본값</span>
+              <select id="workflow-default-select">${options}</select>
+            </label>
+            <button type="button" id="workflow-default-save" class="action-button">기본으로 지정</button>
+          </div>
+        `;
+      }
+
+      function renderWorkflowList(workflows, defaultWorkflowId) {
+        const box = document.getElementById("workflow-list-box");
+        if (!box) return;
+        if (!workflows || workflows.length === 0) {
+          box.textContent = "저장된 workflow 없음";
+          return;
+        }
+        const rows = workflows
+          .map((item) => {
+            const isDefault = item.workflow_id === defaultWorkflowId;
+            const nodeCount = Array.isArray(item.nodes) ? item.nodes.length : 0;
+            const edgeCount = Array.isArray(item.edges) ? item.edges.length : 0;
+            return `<tr>
+              <td><code>${esc(item.workflow_id)}</code></td>
+              <td>${esc(item.name || "-")}</td>
+              <td>${esc(String(item.version || "-"))}</td>
+              <td>${nodeCount} / ${edgeCount}</td>
+              <td>${isDefault ? `<span class="workflow-badge workflow-badge-default">default</span>` : `<button type="button" class="action-button workflow-default-trigger" data-workflow-id="${esc(item.workflow_id)}">기본 지정</button>`}</td>
+            </tr>`;
+          })
+          .join("");
+        box.innerHTML = `<div class="app-table-wrap"><table class="app-table workflow-table">
+          <thead><tr><th>ID</th><th>이름</th><th>버전</th><th>Nodes / Edges</th><th>상태</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table></div>`;
+      }
+
+      function renderWorkflowAppMappings(apps, workflows, defaultWorkflowId) {
+        const box = document.getElementById("workflow-app-map-box");
+        if (!box) return;
+        if (!apps || apps.length === 0) {
+          box.textContent = "등록된 앱 없음";
+          return;
+        }
+        const rows = apps
+          .map((app) => {
+            const resolved = app.workflow_id || defaultWorkflowId || "";
+            const rowOptions = (workflows || [])
+              .map((item) => `<option value="${esc(item.workflow_id)}"${item.workflow_id === resolved ? " selected" : ""}>${esc(workflowLabel(item))}</option>`)
+              .join("");
+            return `<tr>
+              <td>${esc(app.name)}</td>
+              <td><code>${esc(app.code)}</code></td>
+              <td>
+                <select class="workflow-map-select" data-app-code="${esc(app.code)}">
+                  ${rowOptions}
+                </select>
+              </td>
+              <td>
+                <button type="button" class="action-button workflow-map-save" data-app-code="${esc(app.code)}">저장</button>
+              </td>
+            </tr>`;
+          })
+          .join("");
+        box.innerHTML = `<div class="app-table-wrap"><table class="app-table workflow-table">
+          <thead><tr><th>앱명</th><th>코드</th><th>Workflow</th><th>저장</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table></div>`;
+      }
+
+      function setWorkflowEditorResult(message, isError = false) {
+        workflowEditorState.resultMessage = message;
+        workflowEditorState.resultIsError = isError;
+        const node = document.getElementById("workflow-editor-result");
+        if (!node) {
+          setWorkflowConfigResult(message, isError);
+          return;
+        }
+        node.textContent = message;
+        node.classList.toggle("text-error", isError);
+      }
+
+      function renderWorkflowEditor(workflowInput) {
+        const box = document.getElementById("workflow-editor-box");
+        if (!box) return;
+        const workflow = normalizeWorkflowDefinition(workflowInput);
+        workflowEditorState.currentWorkflow = cloneWorkflowDefinition(workflow);
+        workflowEditorState.selectedWorkflowId = workflow.workflow_id || "";
+        const schema = workflowEditorState.schema || { node_types: {}, supported_edge_events: ["success", "failure", "always"] };
+        const nodeTypes = schema.node_types || {};
+        const supportedEdgeEvents = Array.isArray(schema.supported_edge_events)
+          ? schema.supported_edge_events
+          : ["success", "failure", "always"];
+        const catalogOptions = (workflowCatalogState.workflows || [])
+          .map((item) => `<option value="${esc(item.workflow_id)}"${item.workflow_id === workflow.workflow_id ? " selected" : ""}>${esc(workflowLabel(item))}</option>`)
+          .join("");
+        const nodeIdOptions = workflow.nodes
+          .map((node) => `<option value="${esc(node.id)}">${esc(node.id)} · ${esc(node.title || node.type)}</option>`)
+          .join("");
+        const nodeTypeOptions = Object.entries(nodeTypes)
+          .map(([nodeType, meta]) => `<option value="${esc(nodeType)}">${esc(meta?.label || nodeType)}</option>`)
+          .join("");
+        const edgeEventOptions = supportedEdgeEvents
+          .map((eventName) => `<option value="${esc(eventName)}">${esc(eventName)}</option>`)
+          .join("");
+        const nodeRows = workflow.nodes
+          .map((node, index) => `
+            <tr class="workflow-editor-node-row" data-node-index="${index}">
+              <td><input class="workflow-editor-node-id" type="text" value="${esc(node.id)}" maxlength="40" /></td>
+              <td>
+                <select class="workflow-editor-node-type">
+                  ${Object.entries(nodeTypes).map(([nodeType, meta]) => `<option value="${esc(nodeType)}"${nodeType === node.type ? " selected" : ""}>${esc(meta?.label || nodeType)}</option>`).join("")}
+                </select>
+              </td>
+              <td><input class="workflow-editor-node-title" type="text" value="${esc(node.title || "")}" maxlength="120" /></td>
+              <td><button type="button" class="action-button workflow-editor-delete" data-target="node" data-index="${index}">삭제</button></td>
+            </tr>
+          `)
+          .join("");
+        const edgeRows = workflow.edges
+          .map((edge, index) => `
+            <tr class="workflow-editor-edge-row" data-edge-index="${index}">
+              <td>
+                <select class="workflow-editor-edge-from">
+                  ${workflow.nodes.map((node) => `<option value="${esc(node.id)}"${node.id === edge.from ? " selected" : ""}>${esc(node.id)}</option>`).join("")}
+                </select>
+              </td>
+              <td>
+                <select class="workflow-editor-edge-to">
+                  ${workflow.nodes.map((node) => `<option value="${esc(node.id)}"${node.id === edge.to ? " selected" : ""}>${esc(node.id)}</option>`).join("")}
+                </select>
+              </td>
+              <td>
+                <select class="workflow-editor-edge-on">
+                  ${supportedEdgeEvents.map((eventName) => `<option value="${esc(eventName)}"${eventName === edge.on ? " selected" : ""}>${esc(eventName)}</option>`).join("")}
+                </select>
+              </td>
+              <td><button type="button" class="action-button workflow-editor-delete" data-target="edge" data-index="${index}">삭제</button></td>
+            </tr>
+          `)
+          .join("");
+        const nodeTypeChips = Object.entries(nodeTypes)
+          .map(([nodeType, meta]) => `<span class="workflow-editor-chip">${esc(nodeType)} · ${esc(meta?.label || "")}</span>`)
+          .join("");
+
+        box.innerHTML = `
+          <div class="workflow-editor-toolbar">
+            <label class="workflow-inline-control" for="workflow-editor-catalog-select">
+              <span>저장된 Workflow 불러오기</span>
+              <select id="workflow-editor-catalog-select">
+                <option value="">선택하세요</option>
+                ${catalogOptions}
+              </select>
+            </label>
+            <div class="workflow-editor-toolbar-actions">
+              <button type="button" id="workflow-editor-load" class="action-button">불러오기</button>
+              <button type="button" id="workflow-editor-copy-default" class="action-button">기본 템플릿 복사</button>
+              <button type="button" id="workflow-editor-new" class="action-button">새 Workflow</button>
+            </div>
+          </div>
+          <div class="workflow-editor-form">
+            <div class="workflow-editor-grid">
+              <label class="workflow-inline-control">
+                <span>Workflow ID</span>
+                <input id="workflow-editor-id" type="text" maxlength="120" value="${esc(workflow.workflow_id)}" placeholder="예: wf-product-loop" />
+              </label>
+              <label class="workflow-inline-control">
+                <span>이름</span>
+                <input id="workflow-editor-name" type="text" maxlength="160" value="${esc(workflow.name)}" placeholder="예: Product Dev Loop" />
+              </label>
+              <label class="workflow-inline-control">
+                <span>버전</span>
+                <input id="workflow-editor-version" type="number" min="1" step="1" value="${esc(String(workflow.version || 1))}" />
+              </label>
+              <label class="workflow-inline-control">
+                <span>Entry Node</span>
+                <select id="workflow-editor-entry-node">${nodeIdOptions}</select>
+              </label>
+              <label class="workflow-inline-control workflow-inline-control-wide">
+                <span>설명</span>
+                <textarea id="workflow-editor-description" rows="2" maxlength="500" placeholder="이 워크플로우가 어떤 제품 개발 흐름을 표현하는지 적어주세요.">${esc(workflow.description)}</textarea>
+              </label>
+            </div>
+            <div class="workflow-editor-section">
+              <div class="workflow-settings-head">
+                <div>
+                  <h3>Nodes</h3>
+                  <p class="hint">ID, 타입, 표시명을 편집합니다. write_spec 이후 노드만 수동 resume 후보가 됩니다.</p>
+                </div>
+                <button type="button" id="workflow-editor-add-node" class="action-button">노드 추가</button>
+              </div>
+              <div class="app-table-wrap">
+                <table class="app-table workflow-editor-table">
+                  <thead><tr><th>ID</th><th>Type</th><th>Title</th><th>삭제</th></tr></thead>
+                  <tbody>${nodeRows || `<tr><td colspan="4" class="jobs-empty">노드 없음</td></tr>`}</tbody>
+                </table>
+              </div>
+            </div>
+            <div class="workflow-editor-section">
+              <div class="workflow-settings-head">
+                <div>
+                  <h3>Edges</h3>
+                  <p class="hint">phase-2는 선형/준선형 실행 중심이라 success/always 위주로 사용하세요.</p>
+                </div>
+                <button type="button" id="workflow-editor-add-edge" class="action-button">엣지 추가</button>
+              </div>
+              <div class="app-table-wrap">
+                <table class="app-table workflow-editor-table">
+                  <thead><tr><th>From</th><th>To</th><th>On</th><th>삭제</th></tr></thead>
+                  <tbody>${edgeRows || `<tr><td colspan="4" class="jobs-empty">엣지 없음</td></tr>`}</tbody>
+                </table>
+              </div>
+            </div>
+            <div class="workflow-editor-foot">
+              <label class="toggle-row" for="workflow-editor-set-default">
+                <input id="workflow-editor-set-default" type="checkbox"${workflow.workflow_id && workflow.workflow_id === workflowCatalogState.defaultWorkflowId ? " checked" : ""} />
+                <span>저장 후 기본 workflow로 지정</span>
+              </label>
+              <div class="workflow-editor-toolbar-actions">
+                <button type="button" id="workflow-editor-validate" class="action-button">검증</button>
+                <button type="button" id="workflow-editor-save" class="action-button">저장</button>
+              </div>
+            </div>
+            <div id="workflow-editor-result" class="hint workflow-config-result${workflowEditorState.resultIsError ? " text-error" : ""}">${esc(workflowEditorState.resultMessage || "")}</div>
+            <div class="workflow-editor-schema">${nodeTypeChips}</div>
+          </div>
+        `;
+
+        const entrySelect = box.querySelector("#workflow-editor-entry-node");
+        if (entrySelect instanceof HTMLSelectElement) {
+          entrySelect.value = workflow.entry_node_id && workflow.nodes.some((node) => node.id === workflow.entry_node_id)
+            ? workflow.entry_node_id
+            : String(workflow.nodes[0]?.id || "");
+        }
+      }
+
+      async function loadWorkflowSchema() {
+        try {
+          const response = await fetch("/api/workflows/schema", { cache: "no-store" });
+          if (!response.ok) {
+            setWorkflowConfigResult("workflow schema를 불러오지 못했습니다.", true);
+            return;
+          }
+          workflowEditorState.schema = await response.json();
+          const hasEditorForm = Boolean(document.getElementById("workflow-editor-id"));
+          const currentWorkflow = hasEditorForm ? readWorkflowEditorDom() : null;
+          renderWorkflowEditor(
+            currentWorkflow
+              || workflowCatalogState.workflows.find((item) => item.workflow_id === workflowEditorState.selectedWorkflowId)
+                || workflowCatalogState.workflows.find((item) => item.workflow_id === workflowCatalogState.defaultWorkflowId)
+                || workflowCatalogState.workflows[0]
+                || workflowEditorBaseTemplate()
+          );
+        } catch {
+          setWorkflowConfigResult("workflow schema를 불러오지 못했습니다.", true);
+        }
+      }
+
+      async function loadWorkflows(preferredWorkflowId = "") {
+        try {
+          const response = await fetch("/api/workflows", { cache: "no-store" });
+          if (!response.ok) {
+            setWorkflowConfigResult("workflow 목록을 불러오지 못했습니다.", true);
+            return;
+          }
+          const payload = await response.json();
+          workflowCatalogState.workflows = Array.isArray(payload.workflows) ? payload.workflows : [];
+          workflowCatalogState.defaultWorkflowId = payload.default_workflow_id || "";
+          renderIssueWorkflowOptions(workflowCatalogState.workflows, workflowCatalogState.defaultWorkflowId);
+          renderWorkflowDefault(workflowCatalogState.workflows, workflowCatalogState.defaultWorkflowId);
+          renderWorkflowList(workflowCatalogState.workflows, workflowCatalogState.defaultWorkflowId);
+          renderWorkflowAppMappings(appCatalogState.apps, workflowCatalogState.workflows, workflowCatalogState.defaultWorkflowId);
+          const targetWorkflowId = String(preferredWorkflowId || workflowEditorState.selectedWorkflowId || "").trim();
+          renderWorkflowEditor(
+            workflowCatalogState.workflows.find((item) => item.workflow_id === targetWorkflowId)
+            || workflowCatalogState.workflows.find((item) => item.workflow_id === workflowCatalogState.defaultWorkflowId)
+            || workflowCatalogState.workflows[0]
+            || workflowEditorBaseTemplate()
+          );
+          setWorkflowConfigResult(`기본 workflow: ${workflowCatalogState.defaultWorkflowId || "-"}`);
+        } catch {
+          setWorkflowConfigResult("workflow 목록을 불러오지 못했습니다.", true);
+        }
+      }
+
+      function bindWorkflowSettings() {
+        const defaultBox = document.getElementById("workflow-default-box");
+        const listBox = document.getElementById("workflow-list-box");
+        const mapBox = document.getElementById("workflow-app-map-box");
+        const editorBox = document.getElementById("workflow-editor-box");
+
+        defaultBox?.addEventListener("click", async (event) => {
+          const target = event.target;
+          if (!(target instanceof Element)) return;
+          const button = target.closest("#workflow-default-save");
+          if (!(button instanceof HTMLButtonElement)) return;
+          const select = document.getElementById("workflow-default-select");
+          if (!(select instanceof HTMLSelectElement)) return;
+          const workflowId = select.value;
+          if (!workflowId) return;
+          button.disabled = true;
+          setWorkflowConfigResult("기본 workflow 저장 중...");
+          try {
+            const response = await fetch("/api/workflows/default", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ workflow_id: workflowId }),
+            });
+            const payload = await response.json();
+            if (!response.ok || !payload.saved) {
+              setWorkflowConfigResult(payload.detail || "기본 workflow 저장 실패", true);
+              return;
+            }
+            setWorkflowConfigResult(`기본 workflow 변경 완료: ${workflowId}`);
+            await loadApps();
+            await loadWorkflows();
+          } catch {
+            setWorkflowConfigResult("네트워크 오류로 기본 workflow 저장 실패", true);
+          } finally {
+            button.disabled = false;
+          }
+        });
+
+        listBox?.addEventListener("click", async (event) => {
+          const target = event.target;
+          if (!(target instanceof Element)) return;
+          const button = target.closest(".workflow-default-trigger");
+          if (!(button instanceof HTMLButtonElement)) return;
+          const workflowId = button.getAttribute("data-workflow-id") || "";
+          if (!workflowId) return;
+          button.disabled = true;
+          setWorkflowConfigResult("기본 workflow 저장 중...");
+          try {
+            const response = await fetch("/api/workflows/default", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ workflow_id: workflowId }),
+            });
+            const payload = await response.json();
+            if (!response.ok || !payload.saved) {
+              setWorkflowConfigResult(payload.detail || "기본 workflow 저장 실패", true);
+              return;
+            }
+            setWorkflowConfigResult(`기본 workflow 변경 완료: ${workflowId}`);
+            await loadApps();
+            await loadWorkflows();
+          } catch {
+            setWorkflowConfigResult("네트워크 오류로 기본 workflow 저장 실패", true);
+          } finally {
+            button.disabled = false;
+          }
+        });
+
+        mapBox?.addEventListener("click", async (event) => {
+          const target = event.target;
+          if (!(target instanceof Element)) return;
+          const button = target.closest(".workflow-map-save");
+          if (!(button instanceof HTMLButtonElement)) return;
+          const appCode = button.getAttribute("data-app-code") || "";
+          if (!appCode) return;
+          const select = Array.from(mapBox.querySelectorAll(".workflow-map-select"))
+            .find((node) => node.getAttribute("data-app-code") === appCode);
+          if (!(select instanceof HTMLSelectElement)) return;
+          const workflowId = select.value;
+          if (!workflowId) return;
+          button.disabled = true;
+          setWorkflowConfigResult(`${appCode} workflow 저장 중...`);
+          try {
+            const response = await fetch(`/api/apps/${encodeURIComponent(appCode)}/workflow`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ workflow_id: workflowId }),
+            });
+            const payload = await response.json();
+            if (!response.ok || !payload.saved) {
+              setWorkflowConfigResult(payload.detail || "앱 workflow 저장 실패", true);
+              return;
+            }
+            setWorkflowConfigResult(`앱 workflow 저장 완료: ${appCode} -> ${workflowId}`);
+            renderAppOptions(payload.apps || []);
+            renderAppList(payload.apps || []);
+          } catch {
+            setWorkflowConfigResult("네트워크 오류로 앱 workflow 저장 실패", true);
+          } finally {
+            button.disabled = false;
+          }
+        });
+
+        editorBox?.addEventListener("click", async (event) => {
+          const target = event.target;
+          if (!(target instanceof Element)) return;
+
+          const loadButton = target.closest("#workflow-editor-load");
+          if (loadButton instanceof HTMLButtonElement) {
+            const select = document.getElementById("workflow-editor-catalog-select");
+            if (!(select instanceof HTMLSelectElement) || !select.value) {
+              setWorkflowEditorResult("불러올 workflow를 먼저 선택하세요.", true);
+              return;
+            }
+            const selected = workflowCatalogState.workflows.find((item) => item.workflow_id === select.value);
+            if (!selected) {
+              setWorkflowEditorResult("선택한 workflow를 찾지 못했습니다.", true);
+              return;
+            }
+            renderWorkflowEditor(selected);
+            setWorkflowEditorResult(`workflow 불러오기 완료: ${selected.workflow_id}`);
+            return;
+          }
+
+          const copyButton = target.closest("#workflow-editor-copy-default");
+          if (copyButton instanceof HTMLButtonElement) {
+            const base = workflowCatalogState.workflows.find((item) => item.workflow_id === workflowCatalogState.defaultWorkflowId)
+              || workflowCatalogState.workflows[0]
+              || workflowEditorBaseTemplate();
+            const copied = cloneWorkflowDefinition(base);
+            copied.workflow_id = "";
+            copied.name = copied.name ? `${copied.name} Copy` : "";
+            renderWorkflowEditor(copied);
+            setWorkflowEditorResult("기본 workflow를 편집용 초안으로 복사했습니다.");
+            return;
+          }
+
+          const newButton = target.closest("#workflow-editor-new");
+          if (newButton instanceof HTMLButtonElement) {
+            renderWorkflowEditor(workflowEditorBaseTemplate());
+            setWorkflowEditorResult("새 workflow 초안을 만들었습니다.");
+            return;
+          }
+
+          const addNodeButton = target.closest("#workflow-editor-add-node");
+          if (addNodeButton instanceof HTMLButtonElement) {
+            const workflow = readWorkflowEditorDom();
+            workflow.nodes.push({
+              id: nextWorkflowNodeId(workflow.nodes),
+              type: "gh_read_issue",
+              title: "",
+            });
+            if (!workflow.entry_node_id) {
+              workflow.entry_node_id = workflow.nodes[0]?.id || "";
+            }
+            renderWorkflowEditor(workflow);
+            setWorkflowEditorResult("노드를 추가했습니다.");
+            return;
+          }
+
+          const addEdgeButton = target.closest("#workflow-editor-add-edge");
+          if (addEdgeButton instanceof HTMLButtonElement) {
+            const workflow = readWorkflowEditorDom();
+            if ((workflow.nodes || []).length < 2) {
+              setWorkflowEditorResult("엣지는 노드 2개 이상일 때 추가할 수 있습니다.", true);
+              return;
+            }
+            workflow.edges.push({
+              from: workflow.nodes[0].id,
+              to: workflow.nodes[Math.min(1, workflow.nodes.length - 1)].id,
+              on: "success",
+            });
+            renderWorkflowEditor(workflow);
+            setWorkflowEditorResult("엣지를 추가했습니다.");
+            return;
+          }
+
+          const deleteButton = target.closest(".workflow-editor-delete");
+          if (deleteButton instanceof HTMLButtonElement) {
+            const workflow = readWorkflowEditorDom();
+            const deleteTarget = deleteButton.getAttribute("data-target");
+            const index = Number(deleteButton.getAttribute("data-index") || "-1");
+            if (deleteTarget === "node") {
+              const removed = workflow.nodes[index];
+              workflow.nodes = workflow.nodes.filter((_, nodeIndex) => nodeIndex !== index);
+              if (removed?.id) {
+                workflow.edges = workflow.edges.filter((edge) => edge.from !== removed.id && edge.to !== removed.id);
+                if (workflow.entry_node_id === removed.id) {
+                  workflow.entry_node_id = workflow.nodes[0]?.id || "";
+                }
+              }
+              renderWorkflowEditor(workflow);
+              setWorkflowEditorResult("노드를 삭제했습니다.");
+              return;
+            }
+            if (deleteTarget === "edge") {
+              workflow.edges = workflow.edges.filter((_, edgeIndex) => edgeIndex !== index);
+              renderWorkflowEditor(workflow);
+              setWorkflowEditorResult("엣지를 삭제했습니다.");
+            }
+            return;
+          }
+
+          const validateButton = target.closest("#workflow-editor-validate");
+          if (validateButton instanceof HTMLButtonElement) {
+            const workflow = readWorkflowEditorDom();
+            validateButton.disabled = true;
+            setWorkflowEditorResult("workflow 검증 중...");
+            try {
+              const response = await fetch("/api/workflows/validate", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ workflow }),
+              });
+              const payload = await response.json();
+              if (!response.ok || !payload.ok) {
+                const errors = Array.isArray(payload?.errors) ? payload.errors.join(" / ") : payload?.detail || "workflow 검증 실패";
+                setWorkflowEditorResult(errors, true);
+                return;
+              }
+              renderWorkflowEditor(workflow);
+              setWorkflowEditorResult("workflow 검증 통과");
+            } catch {
+              setWorkflowEditorResult("네트워크 오류로 workflow 검증 실패", true);
+            } finally {
+              validateButton.disabled = false;
+            }
+            return;
+          }
+
+          const saveButton = target.closest("#workflow-editor-save");
+          if (saveButton instanceof HTMLButtonElement) {
+            const workflow = readWorkflowEditorDom();
+            const setDefaultNode = document.getElementById("workflow-editor-set-default");
+            const setDefault = setDefaultNode instanceof HTMLInputElement ? Boolean(setDefaultNode.checked) : false;
+            saveButton.disabled = true;
+            setWorkflowEditorResult("workflow 저장 중...");
+            try {
+              const response = await fetch("/api/workflows", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ workflow, set_default: setDefault }),
+              });
+              const payload = await response.json();
+              if (!response.ok || !payload.saved) {
+                const detail = typeof payload.detail === "object"
+                  ? [payload.detail?.message, ...(payload.detail?.errors || [])].filter(Boolean).join(" / ")
+                  : payload.detail || "workflow 저장 실패";
+                setWorkflowEditorResult(detail, true);
+                return;
+              }
+              setWorkflowEditorResult(`workflow 저장 완료: ${payload.workflow_id}`);
+              await loadApps();
+              await loadWorkflows(payload.workflow_id);
+            } catch {
+              setWorkflowEditorResult("네트워크 오류로 workflow 저장 실패", true);
+            } finally {
+              saveButton.disabled = false;
+            }
+            return;
+          }
+        });
+
+        editorBox?.addEventListener("change", (event) => {
+          const target = event.target;
+          if (!(target instanceof Element)) return;
+          if (target.closest(".workflow-editor-node-id")) {
+            const workflow = readWorkflowEditorDom();
+            renderWorkflowEditor(workflow);
+            setWorkflowEditorResult("노드 ID 변경을 반영했습니다.");
+          }
+        });
       }
 
       function renderAppList(apps) {
@@ -775,7 +1932,7 @@
           plannerAgent: "gemini",
           coderAgent: "codex",
           reviewerAgent: "gemini",
-          escalationAgent: "gemini",
+          escalationAgent: "claude",
           nodePath: "/root/.nvm/versions/node/v24.14.0/bin/node",
           geminiPath: "/root/.nvm/versions/node/v24.14.0/bin/gemini",
           codexPath: "/root/.nvm/versions/node/v24.14.0/bin/codex",
@@ -906,6 +2063,7 @@
           const appCode = document.getElementById("issue-app-code").value;
           const track = document.getElementById("issue-track").value;
           const rolePresetId = document.getElementById("issue-role-preset").value;
+          const workflowId = document.getElementById("issue-workflow-id").value;
           const title = document.getElementById("issue-title").value.trim();
           const body = document.getElementById("issue-body").value.trim();
           if (!title) {
@@ -920,7 +2078,7 @@
             const response = await fetch("/api/issues/register", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ title, body, app_code: appCode, track, role_preset_id: rolePresetId }),
+              body: JSON.stringify({ title, body, app_code: appCode, track, role_preset_id: rolePresetId, workflow_id: workflowId }),
             });
             const payload = await response.json();
             if (!response.ok) {
@@ -1207,45 +2365,73 @@
       function bindAssistantForm() {
         const form = document.getElementById("assistant-form");
         const input = document.getElementById("assistant-input");
+        const providerSelect = document.getElementById("assistant-provider");
+        const jobIdInput = document.getElementById("assistant-job-id");
         const submit = document.getElementById("assistant-submit");
-        if (!form || !input || !submit) return;
+        if (!form || !input || !providerSelect || !jobIdInput || !submit) return;
+
+        jobIdInput.addEventListener("focus", () => {
+          void loadAssistantJobOptions(jobIdInput.value.trim());
+        });
+        jobIdInput.addEventListener("input", () => {
+          renderAssistantJobPreview();
+          if (assistantJobOptionsTimer) window.clearTimeout(assistantJobOptionsTimer);
+          assistantJobOptionsTimer = window.setTimeout(() => {
+            void loadAssistantJobOptions(jobIdInput.value.trim());
+          }, 150);
+        });
+        jobIdInput.addEventListener("change", renderAssistantJobPreview);
 
         form.addEventListener("submit", async (event) => {
           event.preventDefault();
           const text = input.value.trim();
+          const provider = String(providerSelect.value || "codex").trim().toLowerCase();
+          const jobId = String(jobIdInput.value || "").trim();
           if (!text) {
             setAssistantStatus("메시지를 입력해주세요.", true);
             return;
           }
 
-          assistantMessages.push({ role: "user", content: text });
+          const userMessage = jobId
+            ? `${text}\n(job_id=${jobId})`
+            : text;
+          assistantMessages.push({ role: "user", content: userMessage });
           renderAssistantMessages();
           input.value = "";
           submit.disabled = true;
-          setAssistantStatus("Codex 응답 생성 중...");
+          setAssistantStatus(`${assistantProviderLabel(provider)} 로그 분석 중...`);
 
           try {
-            const response = await fetch("/api/assistant/codex-chat", {
+            const response = await fetch("/api/assistant/log-analysis", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
-                message: text,
-                history: assistantMessages.slice(0, -1),
+                assistant: provider,
+                question: text,
+                job_id: jobId,
               }),
             });
             const payload = await response.json();
             if (!response.ok) {
               const errorText = payload.detail || "응답 생성 실패";
-              assistantMessages.push({ role: "assistant", content: `오류: ${errorText}` });
+              assistantMessages.push({ role: "assistant", provider, content: `오류: ${errorText}` });
               setAssistantStatus("실패", true);
               renderAssistantMessages();
               return;
             }
-            assistantMessages.push({ role: "assistant", content: payload.assistant || "" });
+            assistantMessages.push({
+              role: "assistant",
+              provider: payload.provider || provider,
+              content: payload.assistant || "",
+            });
             setAssistantStatus("완료");
             renderAssistantMessages();
           } catch {
-            assistantMessages.push({ role: "assistant", content: "네트워크 오류로 응답을 가져오지 못했습니다." });
+            assistantMessages.push({
+              role: "assistant",
+              provider,
+              content: "네트워크 오류로 응답을 가져오지 못했습니다.",
+            });
             setAssistantStatus("네트워크 오류", true);
             renderAssistantMessages();
           } finally {
@@ -1409,14 +2595,62 @@
 
       async function refreshJobs() {
         try {
-          const response = await fetch("/api/jobs", { cache: "no-store" });
+          const response = await fetch(`/api/jobs?${jobsQueryString()}`, { cache: "no-store" });
           if (!response.ok) return;
           const payload = await response.json();
           renderStats(payload.summary || {});
+          renderJobFilterOptions(payload.filter_options || {});
+          renderJobFilterSummary(payload.filtered_summary || {}, payload.pagination || {}, payload.filters || {});
+          renderJobsPagination(payload.pagination || {});
           renderJobs(payload.jobs || []);
-          document.getElementById("last-updated").textContent = `마지막 갱신: ${formatKstDateTime(new Date().toISOString())}`;
+          document.getElementById("last-updated").textContent = `마지막 행동: ${formatKstDateTime(new Date().toISOString())}`;
         } catch {
         }
+      }
+
+      function bindJobsFilterControls() {
+        const form = document.getElementById("jobs-filter-form");
+        const resetButton = document.getElementById("jobs-filter-reset");
+        const prevButton = document.getElementById("jobs-page-prev");
+        const nextButton = document.getElementById("jobs-page-next");
+        const pageSizeSelect = document.getElementById("jobs-page-size");
+        if (!form) return;
+
+        applyJobsFilterStateToForm();
+
+        form.addEventListener("submit", async (event) => {
+          event.preventDefault();
+          syncJobsFilterStateFromForm({ resetPage: true });
+          await refreshJobs();
+        });
+
+        resetButton?.addEventListener("click", async () => {
+          jobsFilterState.page = 1;
+          jobsFilterState.page_size = 20;
+          jobsFilterState.status = "";
+          jobsFilterState.track = "";
+          jobsFilterState.app_code = "";
+          jobsFilterState.stage = "";
+          jobsFilterState.q = "";
+          applyJobsFilterStateToForm();
+          await refreshJobs();
+        });
+
+        pageSizeSelect?.addEventListener("change", async () => {
+          syncJobsFilterStateFromForm({ resetPage: true });
+          await refreshJobs();
+        });
+
+        prevButton?.addEventListener("click", async () => {
+          if (jobsFilterState.page <= 1) return;
+          jobsFilterState.page -= 1;
+          await refreshJobs();
+        });
+
+        nextButton?.addEventListener("click", async () => {
+          jobsFilterState.page += 1;
+          await refreshJobs();
+        });
       }
 
       function bindRequeueActions() {
@@ -1471,16 +2705,22 @@
       bindSettingsTabs();
       bindIssueForm();
       bindAppConfigForm();
+      bindWorkflowSettings();
       bindRoleConfigForm();
       bindRolePresetForm();
       bindAgentModeTabs();
       bindAgentConfigForm();
       bindAssistantForm();
+      bindJobsFilterControls();
       bindRequeueActions();
       hydrateRenderedTimes();
       applySafeTemplateToEasyFields();
       renderAssistantMessages();
+      renderAssistantJobPreview();
+      loadAssistantJobOptions();
       loadApps();
+      loadWorkflowSchema();
+      loadWorkflows();
       loadRoles();
       loadAgentConfig();
       refreshJobs();

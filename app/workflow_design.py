@@ -23,6 +23,7 @@ SUPPORTED_NODE_TYPES: Dict[str, Dict[str, Any]] = {
     "generate_user_flows": {"label": "사용자 흐름 정의", "kind": "product"},
     "define_mvp_scope": {"label": "MVP 범위 결정", "kind": "product"},
     "architecture_planning": {"label": "아키텍처 계획", "kind": "product"},
+    "project_scaffolding": {"label": "프로젝트 스캐폴딩", "kind": "product"},
     "gemini_plan": {"label": "Gemini 계획", "kind": "ai"},
     "publisher_task": {"label": "퍼블리셔 작업", "kind": "ai"},
     "copywriter_task": {"label": "카피라이터 작업", "kind": "ai"},
@@ -52,10 +53,10 @@ def default_workflow_template() -> Dict[str, Any]:
     """Return a default workflow template equivalent to fixed orchestration."""
 
     return {
-        "workflow_id": "default_product_dev_loop_v5",
-        "name": "Default Product Dev Loop V5",
-        "description": "제품정의 -> MVP -> 아키텍처 -> 구현 -> 제품리뷰 -> 개선루프 기반 기본 플로우",
-        "version": 5,
+        "workflow_id": "default_product_dev_loop_v6",
+        "name": "Default Product Dev Loop V6",
+        "description": "제품정의 -> MVP -> 아키텍처 -> 스캐폴딩 -> 구현 -> 제품리뷰 -> 개선루프 기반 기본 플로우",
+        "version": 6,
         "entry_node_id": "n1",
         "nodes": [
             {"id": "n1", "type": "gh_read_issue", "title": "이슈 읽기"},
@@ -64,6 +65,7 @@ def default_workflow_template() -> Dict[str, Any]:
             {"id": "n4", "type": "generate_user_flows", "title": "사용자 흐름 정의"},
             {"id": "n5", "type": "define_mvp_scope", "title": "MVP 범위 결정"},
             {"id": "n6", "type": "architecture_planning", "title": "아키텍처 계획"},
+            {"id": "n6b", "type": "project_scaffolding", "title": "프로젝트 스캐폴딩"},
             {"id": "n7", "type": "gemini_plan", "title": "큰틀 플랜"},
             {"id": "n8", "type": "designer_task", "title": "디자인 시스템 기획"},
             {"id": "n9", "type": "publisher_task", "title": "퍼블리싱(디자인 시스템 반영)"},
@@ -96,7 +98,8 @@ def default_workflow_template() -> Dict[str, Any]:
             {"from": "n3", "to": "n4", "on": "success"},
             {"from": "n4", "to": "n5", "on": "success"},
             {"from": "n5", "to": "n6", "on": "success"},
-            {"from": "n6", "to": "n7", "on": "success"},
+            {"from": "n6", "to": "n6b", "on": "success"},
+            {"from": "n6b", "to": "n7", "on": "success"},
             {"from": "n7", "to": "n8", "on": "success"},
             {"from": "n8", "to": "n9", "on": "success"},
             {"from": "n9", "to": "n10", "on": "success"},
@@ -144,7 +147,7 @@ def load_workflows(path: Path) -> Dict[str, Any]:
     """Load workflow config from JSON with safe fallback."""
 
     if not path.exists():
-        defaults = {"default_workflow_id": "default_product_dev_loop_v5", "workflows": [default_workflow_template()]}
+        defaults = {"default_workflow_id": "default_product_dev_loop_v6", "workflows": [default_workflow_template()]}
         save_workflows(path, defaults)
         return defaults
 
@@ -159,7 +162,7 @@ def load_workflows(path: Path) -> Dict[str, Any]:
     if not isinstance(workflows, list) or not workflows:
         loaded["workflows"] = [default_workflow_template()]
     if not isinstance(loaded.get("default_workflow_id"), str):
-        loaded["default_workflow_id"] = "default_product_dev_loop_v5"
+        loaded["default_workflow_id"] = "default_product_dev_loop_v6"
     return loaded
 
 

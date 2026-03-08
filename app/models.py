@@ -28,6 +28,7 @@ class JobStage(str, Enum):
     GENERATE_USER_FLOWS = "generate_user_flows"
     DEFINE_MVP_SCOPE = "define_mvp_scope"
     ARCHITECTURE_PLANNING = "architecture_planning"
+    PROJECT_SCAFFOLDING = "project_scaffolding"
     PLAN_WITH_GEMINI = "plan_with_gemini"
     DESIGN_WITH_CODEX = "design_with_codex"
     COPYWRITER_TASK = "copywriter_task"
@@ -73,6 +74,16 @@ class JobRecord:
     finished_at: Optional[str]
     app_code: str = "default"
     track: str = "enhance"
+    workflow_id: str = ""
+    heartbeat_at: Optional[str] = None
+    recovery_status: str = ""
+    recovery_reason: str = ""
+    recovery_count: int = 0
+    last_recovered_at: Optional[str] = None
+    manual_resume_mode: str = ""
+    manual_resume_node_id: str = ""
+    manual_resume_requested_at: Optional[str] = None
+    manual_resume_note: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize to a plain dictionary for JSON storage."""
@@ -82,6 +93,35 @@ class JobRecord:
     @classmethod
     def from_dict(cls, payload: Dict[str, Any]) -> "JobRecord":
         """Create a JobRecord from stored JSON data."""
+
+        return cls(**payload)
+
+
+@dataclass
+class NodeRunRecord:
+    """Stored workflow node execution record for one job attempt."""
+
+    node_run_id: str
+    job_id: str
+    workflow_id: str
+    node_id: str
+    node_type: str
+    node_title: str
+    status: str
+    attempt: int
+    started_at: str
+    finished_at: Optional[str] = None
+    error_message: Optional[str] = None
+    agent_profile: str = "primary"
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize to a plain dictionary for JSON storage."""
+
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: Dict[str, Any]) -> "NodeRunRecord":
+        """Create a NodeRunRecord from stored JSON data."""
 
         return cls(**payload)
 

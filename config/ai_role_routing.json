@@ -1,0 +1,80 @@
+{
+  "version": 1,
+  "strategy": {
+    "primary_planning_provider": "gemini",
+    "primary_review_provider": "gemini",
+    "primary_coding_provider": "codex",
+    "auxiliary_providers": ["claude", "copilot"]
+  },
+  "routes": {
+    "planner": {
+      "role_code": "architect",
+      "template_keys": ["planner"],
+      "description": "제품 정의, 설계, 구현 계획"
+    },
+    "reviewer": {
+      "role_code": "reviewer",
+      "template_keys": ["reviewer"],
+      "description": "품질 리뷰와 개선 우선순위 판단"
+    },
+    "coder": {
+      "role_code": "coder",
+      "template_keys": ["coder"],
+      "description": "기능 구현과 수정"
+    },
+    "designer": {
+      "role_code": "designer",
+      "template_keys": ["coder"],
+      "description": "디자인 시스템/UX 산출물 구현"
+    },
+    "publisher": {
+      "role_code": "publisher",
+      "template_keys": ["coder"],
+      "description": "퍼블리싱과 handoff 반영"
+    },
+    "copywriter": {
+      "role_code": "copywriter",
+      "template_keys": ["coder"],
+      "description": "고객-facing 카피 산출물 작성"
+    },
+    "documentation": {
+      "role_code": "tech-writer",
+      "template_keys": [
+        "documentation_writer",
+        "pr_summary",
+        "commit_summary",
+        "escalation"
+      ],
+      "fallback_route": "coder",
+      "description": "기술 문서 번들 작성"
+    },
+    "commit_summary": {
+      "role_code": "tech-writer",
+      "template_keys": ["commit_summary", "pr_summary", "escalation"],
+      "fallback_route": "copilot_helper",
+      "description": "커밋 제목/요약 생성"
+    },
+    "pr_summary": {
+      "role_code": "tech-writer",
+      "template_keys": ["pr_summary", "escalation"],
+      "fallback_route": "copilot_helper",
+      "description": "PR 본문 요약 생성"
+    },
+    "escalation": {
+      "role_code": "escalation-helper",
+      "template_keys": ["escalation", "copilot"],
+      "fallback_route": "copilot_helper",
+      "description": "실패 분석과 보조 전략"
+    },
+    "copilot_helper": {
+      "role_code": "orchestration-helper",
+      "template_keys": ["copilot"],
+      "description": "보조 오케스트레이션 분석"
+    },
+    "research_search": {
+      "role_code": "research-agent",
+      "template_keys": ["research_search"],
+      "description": "검색 기반 리서치 컨텍스트 생성"
+    }
+  }
+}

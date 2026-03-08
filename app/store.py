@@ -16,7 +16,7 @@ from typing import Dict, Iterator, List, Optional
 import fcntl
 
 from app.config import AppSettings
-from app.models import JobRecord, utc_now_iso
+from app.models import JobRecord, NodeRunRecord, utc_now_iso
 
 
 class JobStore(ABC):
@@ -50,6 +50,14 @@ class JobStore(ABC):
     def queue_size(self) -> int:
         """Return the number of queued jobs."""
 
+    @abstractmethod
+    def upsert_node_run(self, node_run: NodeRunRecord) -> None:
+        """Insert or update one workflow node execution record."""
+
+    @abstractmethod
+    def list_node_runs(self, job_id: str) -> List[NodeRunRecord]:
+        """Return workflow node execution records for one job."""
+
 
 class JsonJobStore(JobStore):
     """JSON-backed JobStore implementation with file locking.
@@ -58,17 +66,26 @@ class JsonJobStore(JobStore):
     may update the same files at the same time.
     """
 
-    def __init__(self, jobs_file: Path, queue_file: Path) -> None:
+    def __init__(
+        self,
+        jobs_file: Path,
+        queue_file: Path,
+        node_runs_file: Path | None = None,
+    ) -> None:
         self.jobs_file = jobs_file
         self.queue_file = queue_file
+        self.node_runs_file = node_runs_file or jobs_file.parent / "node_runs.json"
 
         self.jobs_file.parent.mkdir(parents=True, exist_ok=True)
         self.queue_file.parent.mkdir(parents=True, exist_ok=True)
+        self.node_runs_file.parent.mkdir(parents=True, exist_ok=True)
 
         if not self.jobs_file.exists():
             self._write_json_atomic(self.jobs_file, {})
         if not self.queue_file.exists():
             self._write_json_atomic(self.queue_file, [])
+        if not self.node_runs_file.exists():
+            self._write_json_atomic(self.node_runs_file, {})
 
     def create_job(self, job: JobRecord) -> None:
         """Insert a new job record.
@@ -148,6 +165,33 @@ class JsonJobStore(JobStore):
             queue = self._ensure_queue_list(queue_data)
             return len(queue)
 
+    def upsert_node_run(self, node_run: NodeRunRecord) -> None:
+        """Insert or update one node run record."""
+
+        with self._locked_json(self.node_runs_file, default={}) as node_runs_data:
+            node_runs = self._ensure_node_run_map(node_runs_data)
+            node_runs[node_run.node_run_id] = node_run.to_dict()
+
+    def list_node_runs(self, job_id: str) -> List[NodeRunRecord]:
+        """Return node runs sorted by attempt/start time."""
+
+        with self._locked_json(self.node_runs_file, default={}) as node_runs_data:
+            node_runs = self._ensure_node_run_map(node_runs_data)
+            records = [
+                NodeRunRecord.from_dict(item)
+                for item in node_runs.values()
+                if str(item.get("job_id", "")) == job_id
+            ]
+
+        records.sort(
+            key=lambda record: (
+                record.attempt,
+                record.started_at,
+                record.node_run_id,
+            )
+        )
+        return records
+
     @contextmanager
     def _locked_json(self, file_path: Path, default: object) -> Iterator[object]:
         """Lock a JSON file, load data, then save data on exit.
@@ -222,6 +266,14 @@ class JsonJobStore(JobStore):
                 raw_payload[index] = str(item)
         return raw_payload
 
+    @staticmethod
+    def _ensure_node_run_map(raw_payload: object) -> Dict[str, Dict[str, object]]:
+        """Validate that node-runs file content is a dictionary."""
+
+        if isinstance(raw_payload, dict):
+            return raw_payload
+        return {}
+
 
 class SQLiteJobStore(JobStore):
     """SQLite-backed JobStore implementation."""
@@ -240,15 +292,21 @@ class SQLiteJobStore(JobStore):
                     INSERT INTO jobs (
                         job_id, repository, issue_number, issue_title, issue_url,
                         status, stage, attempt, max_attempts, branch_name, pr_url,
-                        error_message, log_file, created_at, updated_at, started_at,
-                        finished_at, app_code, track
-                    )
-                    VALUES (
-                        :job_id, :repository, :issue_number, :issue_title, :issue_url,
-                        :status, :stage, :attempt, :max_attempts, :branch_name, :pr_url,
-                        :error_message, :log_file, :created_at, :updated_at, :started_at,
-                        :finished_at, :app_code, :track
-                    )
+                    error_message, log_file, created_at, updated_at, started_at,
+                    finished_at, app_code, track, workflow_id, heartbeat_at,
+                    recovery_status, recovery_reason, recovery_count, last_recovered_at,
+                    manual_resume_mode, manual_resume_node_id, manual_resume_requested_at,
+                    manual_resume_note
+                )
+                VALUES (
+                    :job_id, :repository, :issue_number, :issue_title, :issue_url,
+                    :status, :stage, :attempt, :max_attempts, :branch_name, :pr_url,
+                    :error_message, :log_file, :created_at, :updated_at, :started_at,
+                    :finished_at, :app_code, :track, :workflow_id, :heartbeat_at,
+                    :recovery_status, :recovery_reason, :recovery_count, :last_recovered_at,
+                    :manual_resume_mode, :manual_resume_node_id, :manual_resume_requested_at,
+                    :manual_resume_note
+                )
                     """,
                     payload,
                 )
@@ -303,7 +361,17 @@ class SQLiteJobStore(JobStore):
                     started_at=:started_at,
                     finished_at=:finished_at,
                     app_code=:app_code,
-                    track=:track
+                    track=:track,
+                    workflow_id=:workflow_id,
+                    heartbeat_at=:heartbeat_at,
+                    recovery_status=:recovery_status,
+                    recovery_reason=:recovery_reason,
+                    recovery_count=:recovery_count,
+                    last_recovered_at=:last_recovered_at,
+                    manual_resume_mode=:manual_resume_mode,
+                    manual_resume_node_id=:manual_resume_node_id,
+                    manual_resume_requested_at=:manual_resume_requested_at,
+                    manual_resume_note=:manual_resume_note
                 WHERE job_id=:job_id
                 """,
                 payload,
@@ -328,6 +396,49 @@ class SQLiteJobStore(JobStore):
         with self._connect() as conn:
             row = conn.execute("SELECT COUNT(*) AS count FROM queue").fetchone()
             return int(row["count"]) if row is not None else 0
+
+    def upsert_node_run(self, node_run: NodeRunRecord) -> None:
+        payload = node_run.to_dict()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO node_runs (
+                    node_run_id, job_id, workflow_id, node_id, node_type,
+                    node_title, status, attempt, started_at, finished_at,
+                    error_message, agent_profile
+                )
+                VALUES (
+                    :node_run_id, :job_id, :workflow_id, :node_id, :node_type,
+                    :node_title, :status, :attempt, :started_at, :finished_at,
+                    :error_message, :agent_profile
+                )
+                ON CONFLICT(node_run_id) DO UPDATE SET
+                    job_id=excluded.job_id,
+                    workflow_id=excluded.workflow_id,
+                    node_id=excluded.node_id,
+                    node_type=excluded.node_type,
+                    node_title=excluded.node_title,
+                    status=excluded.status,
+                    attempt=excluded.attempt,
+                    started_at=excluded.started_at,
+                    finished_at=excluded.finished_at,
+                    error_message=excluded.error_message,
+                    agent_profile=excluded.agent_profile
+                """,
+                payload,
+            )
+
+    def list_node_runs(self, job_id: str) -> List[NodeRunRecord]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM node_runs
+                WHERE job_id = ?
+                ORDER BY attempt ASC, started_at ASC, node_run_id ASC
+                """,
+                (job_id,),
+            ).fetchall()
+            return [self._row_to_node_run(row) for row in rows]
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_file, timeout=30)
@@ -357,10 +468,58 @@ class SQLiteJobStore(JobStore):
                     started_at TEXT,
                     finished_at TEXT,
                     app_code TEXT NOT NULL DEFAULT 'default',
-                    track TEXT NOT NULL DEFAULT 'enhance'
+                    track TEXT NOT NULL DEFAULT 'enhance',
+                    workflow_id TEXT NOT NULL DEFAULT '',
+                    heartbeat_at TEXT,
+                    recovery_status TEXT NOT NULL DEFAULT '',
+                    recovery_reason TEXT NOT NULL DEFAULT '',
+                    recovery_count INTEGER NOT NULL DEFAULT 0,
+                    last_recovered_at TEXT,
+                    manual_resume_mode TEXT NOT NULL DEFAULT '',
+                    manual_resume_node_id TEXT NOT NULL DEFAULT '',
+                    manual_resume_requested_at TEXT,
+                    manual_resume_note TEXT NOT NULL DEFAULT ''
                 )
                 """
             )
+            columns = {
+                str(row["name"])
+                for row in conn.execute("PRAGMA table_info(jobs)").fetchall()
+            }
+            if "workflow_id" not in columns:
+                conn.execute(
+                    "ALTER TABLE jobs ADD COLUMN workflow_id TEXT NOT NULL DEFAULT ''"
+                )
+            if "heartbeat_at" not in columns:
+                conn.execute("ALTER TABLE jobs ADD COLUMN heartbeat_at TEXT")
+            if "recovery_status" not in columns:
+                conn.execute(
+                    "ALTER TABLE jobs ADD COLUMN recovery_status TEXT NOT NULL DEFAULT ''"
+                )
+            if "recovery_reason" not in columns:
+                conn.execute(
+                    "ALTER TABLE jobs ADD COLUMN recovery_reason TEXT NOT NULL DEFAULT ''"
+                )
+            if "recovery_count" not in columns:
+                conn.execute(
+                    "ALTER TABLE jobs ADD COLUMN recovery_count INTEGER NOT NULL DEFAULT 0"
+                )
+            if "last_recovered_at" not in columns:
+                conn.execute("ALTER TABLE jobs ADD COLUMN last_recovered_at TEXT")
+            if "manual_resume_mode" not in columns:
+                conn.execute(
+                    "ALTER TABLE jobs ADD COLUMN manual_resume_mode TEXT NOT NULL DEFAULT ''"
+                )
+            if "manual_resume_node_id" not in columns:
+                conn.execute(
+                    "ALTER TABLE jobs ADD COLUMN manual_resume_node_id TEXT NOT NULL DEFAULT ''"
+                )
+            if "manual_resume_requested_at" not in columns:
+                conn.execute("ALTER TABLE jobs ADD COLUMN manual_resume_requested_at TEXT")
+            if "manual_resume_note" not in columns:
+                conn.execute(
+                    "ALTER TABLE jobs ADD COLUMN manual_resume_note TEXT NOT NULL DEFAULT ''"
+                )
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS queue (
@@ -370,7 +529,28 @@ class SQLiteJobStore(JobStore):
                 """
             )
             conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS node_runs (
+                    node_run_id TEXT PRIMARY KEY,
+                    job_id TEXT NOT NULL,
+                    workflow_id TEXT NOT NULL DEFAULT '',
+                    node_id TEXT NOT NULL,
+                    node_type TEXT NOT NULL,
+                    node_title TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL,
+                    attempt INTEGER NOT NULL DEFAULT 0,
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT,
+                    error_message TEXT,
+                    agent_profile TEXT NOT NULL DEFAULT 'primary'
+                )
+                """
+            )
+            conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs(created_at DESC)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_node_runs_job_started ON node_runs(job_id, started_at ASC)"
             )
 
     @staticmethod
@@ -395,6 +575,33 @@ class SQLiteJobStore(JobStore):
             finished_at=row["finished_at"],
             app_code=str(row["app_code"]),
             track=str(row["track"]),
+            workflow_id=str(row["workflow_id"] or ""),
+            heartbeat_at=row["heartbeat_at"],
+            recovery_status=str(row["recovery_status"] or ""),
+            recovery_reason=str(row["recovery_reason"] or ""),
+            recovery_count=int(row["recovery_count"] or 0),
+            last_recovered_at=row["last_recovered_at"],
+            manual_resume_mode=str(row["manual_resume_mode"] or ""),
+            manual_resume_node_id=str(row["manual_resume_node_id"] or ""),
+            manual_resume_requested_at=row["manual_resume_requested_at"],
+            manual_resume_note=str(row["manual_resume_note"] or ""),
+        )
+
+    @staticmethod
+    def _row_to_node_run(row: sqlite3.Row) -> NodeRunRecord:
+        return NodeRunRecord(
+            node_run_id=str(row["node_run_id"]),
+            job_id=str(row["job_id"]),
+            workflow_id=str(row["workflow_id"] or ""),
+            node_id=str(row["node_id"]),
+            node_type=str(row["node_type"]),
+            node_title=str(row["node_title"] or ""),
+            status=str(row["status"]),
+            attempt=int(row["attempt"]),
+            started_at=str(row["started_at"]),
+            finished_at=row["finished_at"],
+            error_message=row["error_message"],
+            agent_profile=str(row["agent_profile"] or "primary"),
         )
 
 
@@ -414,6 +621,8 @@ def create_job_store(settings: AppSettings) -> JobStore:
                     sqlite_store.create_job(job)
                 except ValueError:
                     continue
+                for node_run in json_store.list_node_runs(job.job_id):
+                    sqlite_store.upsert_node_run(node_run)
             queue_payload = JsonJobStore._read_json(settings.queue_file, default=[])
             for queued in JsonJobStore._ensure_queue_list(queue_payload):
                 sqlite_store.enqueue_job(queued)

@@ -28,6 +28,21 @@ from app.workflow_design import (
     schema_payload,
     validate_workflow,
 )
+from app.workflow_resume import (
+    build_workflow_artifact_paths,
+    compute_workflow_resume_state,
+    linearize_workflow_nodes,
+    list_manual_resume_candidates,
+    read_improvement_runtime_context,
+    validate_manual_resume_target,
+)
+from app.workflow_resolution import (
+    list_known_workflow_ids,
+    read_default_workflow_id as _shared_read_default_workflow_id,
+    read_registered_apps as _shared_read_registered_apps,
+    resolve_workflow_selection,
+    write_registered_apps as _shared_write_registered_apps,
+)
 
 
 router = APIRouter(tags=["dashboard"])
@@ -41,6 +56,8 @@ _TRACK_CHOICES = {"new", "enhance", "bug", "long", "ultra", "ultra10"}
 _APPS_CONFIG_PATH = Path.cwd() / "config" / "apps.json"
 _WORKFLOWS_CONFIG_PATH = Path.cwd() / "config" / "workflows.json"
 _ROLES_CONFIG_PATH = Path.cwd() / "config" / "roles.json"
+_DEFAULT_DASHBOARD_PAGE_SIZE = 20
+_MAX_DASHBOARD_PAGE_SIZE = 100
 
 
 class IssueRegistrationRequest(BaseModel):
@@ -53,6 +70,7 @@ class IssueRegistrationRequest(BaseModel):
     keep_branch: bool = Field(default=True)
     branch_name: str = Field(default="", max_length=200)
     role_preset_id: str = Field(default="", max_length=64)
+    workflow_id: str = Field(default="", max_length=120)
 
 
 class AppConfigRequest(BaseModel):
@@ -115,11 +133,251 @@ class WorkflowSaveRequest(BaseModel):
     set_default: bool = Field(default=False)
 
 
+class WorkflowDefaultRequest(BaseModel):
+    """Payload for setting default workflow id."""
+
+    workflow_id: str = Field(min_length=1, max_length=120)
+
+
 class AssistantChatRequest(BaseModel):
     """Payload for dashboard assistant chat."""
 
     message: str = Field(min_length=1, max_length=8000)
     history: List[Dict[str, str]] = Field(default_factory=list)
+
+
+class AssistantLogAnalysisRequest(BaseModel):
+    """Payload for one-shot log analysis by selected assistant."""
+
+    assistant: str = Field(default="codex", min_length=1, max_length=20)
+    question: str = Field(default="최근 로그의 핵심 문제점을 분석해줘", min_length=1, max_length=8000)
+    job_id: str = Field(default="", max_length=128)
+
+
+class WorkflowManualRetryRequest(BaseModel):
+    """Payload for manual workflow rerun/resume from dashboard."""
+
+    mode: str = Field(min_length=1, max_length=40)
+    node_id: str = Field(default="", max_length=120)
+    note: str = Field(default="", max_length=300)
+
+
+def _read_dashboard_json(path: Path) -> Dict[str, Any]:
+    """Read one dashboard-side JSON artifact safely."""
+
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _build_job_runtime_signals(
+    job: JobRecord,
+    *,
+    store: JobStore,
+    settings: AppSettings,
+) -> Dict[str, Any]:
+    """Collect runtime review/resume/recovery signals for dashboard rendering."""
+
+    workspace_path = settings.repository_workspace_path(job.repository, job.app_code)
+    docs_dir = workspace_path / "_docs"
+    review_payload = _read_dashboard_json(docs_dir / "PRODUCT_REVIEW.json")
+    maturity_payload = _read_dashboard_json(docs_dir / "REPO_MATURITY.json")
+    trend_payload = _read_dashboard_json(docs_dir / "QUALITY_TREND.json")
+    loop_payload = _read_dashboard_json(docs_dir / "IMPROVEMENT_LOOP_STATE.json")
+    next_tasks_payload = _read_dashboard_json(docs_dir / "NEXT_IMPROVEMENT_TASKS.json")
+    node_runs = store.list_node_runs(job.job_id)
+    resume_state = _compute_job_resume_state(job, node_runs, settings)
+
+    scores = review_payload.get("scores", {}) if isinstance(review_payload.get("scores"), dict) else {}
+    quality_gate = review_payload.get("quality_gate", {}) if isinstance(review_payload.get("quality_gate"), dict) else {}
+    tasks = next_tasks_payload.get("tasks", []) if isinstance(next_tasks_payload.get("tasks"), list) else []
+    first_task = tasks[0] if tasks and isinstance(tasks[0], dict) else {}
+    return {
+        "review_overall": scores.get("overall"),
+        "quality_gate_passed": quality_gate.get("passed"),
+        "quality_gate_categories": quality_gate.get("categories_below_threshold", []),
+        "strategy": str(loop_payload.get("strategy", "")).strip(),
+        "strategy_change_required": bool(loop_payload.get("strategy_change_required")),
+        "scope_restriction": str(
+            loop_payload.get("next_scope_restriction") or loop_payload.get("scope_restriction") or ""
+        ).strip(),
+        "resume_mode": str(resume_state.get("mode", "none") or "none"),
+        "resume_enabled": bool(resume_state.get("enabled")),
+        "resume_reason": str(resume_state.get("reason", "")).strip(),
+        "resume_from_node_type": str(resume_state.get("resume_from_node_type", "")).strip(),
+        "next_task_title": str(first_task.get("title", "")).strip(),
+        "recommended_node_type": str(first_task.get("recommended_node_type", "")).strip(),
+        "maturity_level": str(maturity_payload.get("level", "")).strip(),
+        "maturity_score": maturity_payload.get("score"),
+        "maturity_progression": str(maturity_payload.get("progression", "")).strip(),
+        "quality_trend_direction": str(trend_payload.get("trend_direction", "")).strip(),
+        "quality_delta_from_previous": trend_payload.get("delta_from_previous"),
+        "quality_review_rounds": trend_payload.get("review_round_count"),
+    }
+
+
+def _list_dashboard_jobs(store: JobStore, settings: AppSettings) -> List[Dict[str, Any]]:
+    """Return dashboard jobs sorted by latest activity first."""
+
+    jobs: List[Dict[str, Any]] = []
+    for job in store.list_jobs():
+        payload = job.to_dict()
+        runtime_signals = _build_job_runtime_signals(job, store=store, settings=settings)
+        payload["runtime_signals"] = runtime_signals
+        payload["strategy"] = runtime_signals.get("strategy", "")
+        payload["resume_mode"] = runtime_signals.get("resume_mode", "none")
+        payload["review_overall"] = runtime_signals.get("review_overall")
+        jobs.append(payload)
+    jobs.sort(key=lambda item: item.get("updated_at") or item.get("created_at") or "", reverse=True)
+    return jobs
+
+
+def _build_job_summary(jobs: List[Dict[str, Any]]) -> Dict[str, int]:
+    """Compute status counters for one job collection."""
+
+    return {
+        "total": len(jobs),
+        "queued": sum(1 for item in jobs if item.get("status") == JobStatus.QUEUED.value),
+        "running": sum(1 for item in jobs if item.get("status") == JobStatus.RUNNING.value),
+        "done": sum(1 for item in jobs if item.get("status") == JobStatus.DONE.value),
+        "failed": sum(1 for item in jobs if item.get("status") == JobStatus.FAILED.value),
+    }
+
+
+def _filter_dashboard_jobs(
+    jobs: List[Dict[str, Any]],
+    *,
+    status: str,
+    track: str,
+    app_code: str,
+    stage: str,
+    recovery_status: str,
+    strategy: str,
+    query: str,
+) -> List[Dict[str, Any]]:
+    """Filter jobs for dashboard search/paging."""
+
+    normalized_status = status.strip().lower()
+    normalized_track = track.strip().lower()
+    normalized_app_code = app_code.strip().lower()
+    normalized_stage = stage.strip().lower()
+    normalized_recovery_status = recovery_status.strip().lower()
+    normalized_strategy = strategy.strip().lower()
+    normalized_query = query.strip().lower()
+
+    filtered: List[Dict[str, Any]] = []
+    for job in jobs:
+        job_status = str(job.get("status", "")).strip().lower()
+        job_track = str(job.get("track", "")).strip().lower()
+        job_app_code = str(job.get("app_code", "")).strip().lower()
+        job_stage = str(job.get("stage", "")).strip().lower()
+        job_recovery_status = str(job.get("recovery_status", "")).strip().lower()
+        job_strategy = str(job.get("strategy", "")).strip().lower()
+
+        if normalized_status and job_status != normalized_status:
+            continue
+        if normalized_track and job_track != normalized_track:
+            continue
+        if normalized_app_code and job_app_code != normalized_app_code:
+            continue
+        if normalized_stage and job_stage != normalized_stage:
+            continue
+        if normalized_recovery_status and job_recovery_status != normalized_recovery_status:
+            continue
+        if normalized_strategy and job_strategy != normalized_strategy:
+            continue
+        if normalized_query:
+            haystack = " ".join(
+                [
+                    str(job.get("job_id", "")),
+                    str(job.get("issue_title", "")),
+                    str(job.get("issue_number", "")),
+                    str(job.get("issue_url", "")),
+                    str(job.get("app_code", "")),
+                    str(job.get("track", "")),
+                    str(job.get("status", "")),
+                    str(job.get("stage", "")),
+                    str(job.get("branch_name", "")),
+                    str(job.get("pr_url", "")),
+                    str(job.get("error_message", "")),
+                    str(job.get("recovery_status", "")),
+                    str(job.get("strategy", "")),
+                    str(job.get("resume_mode", "")),
+                    str(job.get("review_overall", "")),
+                ]
+            ).lower()
+            if normalized_query not in haystack:
+                continue
+        filtered.append(job)
+    return filtered
+
+
+def _paginate_dashboard_jobs(
+    jobs: List[Dict[str, Any]],
+    *,
+    page: int,
+    page_size: int,
+) -> Dict[str, Any]:
+    """Slice job list for current page and return pagination metadata."""
+
+    total_items = len(jobs)
+    total_pages = max(1, (total_items + page_size - 1) // page_size)
+    safe_page = min(max(page, 1), total_pages)
+    start_index = (safe_page - 1) * page_size
+    end_index = start_index + page_size
+    page_items = jobs[start_index:end_index]
+    visible_start = start_index + 1 if total_items else 0
+    visible_end = min(end_index, total_items)
+    return {
+        "items": page_items,
+        "pagination": {
+            "page": safe_page,
+            "page_size": page_size,
+            "total_items": total_items,
+            "total_pages": total_pages,
+            "has_prev": safe_page > 1,
+            "has_next": safe_page < total_pages,
+            "start_index": visible_start,
+            "end_index": visible_end,
+        },
+    }
+
+
+def _dashboard_filter_options(jobs: List[Dict[str, Any]]) -> Dict[str, List[str]]:
+    """Return available filter values derived from current jobs."""
+
+    stages = sorted(
+        {
+            str(item.get("stage", "")).strip()
+            for item in jobs
+            if str(item.get("stage", "")).strip()
+        }
+    )
+    recovery_statuses = sorted(
+        {
+            str(item.get("recovery_status", "")).strip()
+            for item in jobs
+            if str(item.get("recovery_status", "")).strip()
+        }
+    )
+    strategies = sorted(
+        {
+            str(item.get("strategy", "")).strip()
+            for item in jobs
+            if str(item.get("strategy", "")).strip()
+        }
+    )
+    return {
+        "statuses": [status.value for status in JobStatus],
+        "tracks": sorted(_TRACK_CHOICES),
+        "stages": stages,
+        "recovery_statuses": recovery_statuses,
+        "strategies": strategies,
+    }
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -130,7 +388,7 @@ def job_list_page(
 ) -> HTMLResponse:
     """Render a simple dashboard table with all jobs."""
 
-    jobs = store.list_jobs()
+    jobs = _list_dashboard_jobs(store, settings)[:_DEFAULT_DASHBOARD_PAGE_SIZE]
     return _templates.TemplateResponse(
         "index.html",
         {
@@ -144,19 +402,103 @@ def job_list_page(
 
 @router.get("/api/jobs", response_class=JSONResponse)
 def jobs_api(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=_DEFAULT_DASHBOARD_PAGE_SIZE, ge=1, le=_MAX_DASHBOARD_PAGE_SIZE),
+    status: str = Query(default="", max_length=32),
+    track: str = Query(default="", max_length=32),
+    app_code: str = Query(default="", max_length=32),
+    stage: str = Query(default="", max_length=64),
+    recovery_status: str = Query(default="", max_length=64),
+    strategy: str = Query(default="", max_length=64),
+    q: str = Query(default="", max_length=200),
     store: JobStore = Depends(get_store),
+    settings: AppSettings = Depends(get_settings),
 ) -> JSONResponse:
-    """Return all jobs as JSON for real-time polling on dashboard list."""
+    """Return filtered/paginated jobs as JSON for dashboard polling."""
 
-    jobs = [job.to_dict() for job in store.list_jobs()]
-    summary = {
-        "total": len(jobs),
-        "queued": sum(1 for item in jobs if item.get("status") == "queued"),
-        "running": sum(1 for item in jobs if item.get("status") == "running"),
-        "done": sum(1 for item in jobs if item.get("status") == "done"),
-        "failed": sum(1 for item in jobs if item.get("status") == "failed"),
-    }
-    return JSONResponse({"jobs": jobs, "summary": summary})
+    jobs = _list_dashboard_jobs(store, settings)
+    filtered_jobs = _filter_dashboard_jobs(
+        jobs,
+        status=status,
+        track=track,
+        app_code=app_code,
+        stage=stage,
+        recovery_status=recovery_status,
+        strategy=strategy,
+        query=q,
+    )
+    paged = _paginate_dashboard_jobs(filtered_jobs, page=page, page_size=page_size)
+    return JSONResponse(
+        {
+            "jobs": paged["items"],
+            "summary": _build_job_summary(jobs),
+            "filtered_summary": _build_job_summary(filtered_jobs),
+            "pagination": paged["pagination"],
+            "filters": {
+                "status": status.strip().lower(),
+                "track": track.strip().lower(),
+                "app_code": app_code.strip().lower(),
+                "stage": stage.strip().lower(),
+                "recovery_status": recovery_status.strip().lower(),
+                "strategy": strategy.strip().lower(),
+                "q": q.strip(),
+                "applied": any(
+                    [
+                        status.strip(),
+                        track.strip(),
+                        app_code.strip(),
+                        stage.strip(),
+                        recovery_status.strip(),
+                        strategy.strip(),
+                        q.strip(),
+                    ]
+                ),
+            },
+            "filter_options": _dashboard_filter_options(jobs),
+        }
+    )
+
+
+@router.get("/api/jobs/options", response_class=JSONResponse)
+def job_options_api(
+    q: str = Query(default="", max_length=200),
+    limit: int = Query(default=20, ge=1, le=50),
+    store: JobStore = Depends(get_store),
+    settings: AppSettings = Depends(get_settings),
+) -> JSONResponse:
+    """Return compact job options for combobox-style selectors."""
+
+    jobs = _list_dashboard_jobs(store, settings)
+    filtered_jobs = _filter_dashboard_jobs(
+        jobs,
+        status="",
+        track="",
+        app_code="",
+        stage="",
+        recovery_status="",
+        strategy="",
+        query=q,
+    )
+    items: List[Dict[str, str]] = []
+    for job in filtered_jobs[:limit]:
+        issue_title = str(job.get("issue_title", "")).strip()
+        truncated_title = issue_title[:72] + ("..." if len(issue_title) > 72 else "")
+        items.append(
+            {
+                "job_id": str(job.get("job_id", "")),
+                "label": (
+                    f"{str(job.get('job_id', ''))[:8]} | "
+                    f"{str(job.get('status', '-'))} | "
+                    f"#{str(job.get('issue_number', '-'))} {truncated_title}"
+                ),
+                "status": str(job.get("status", "")),
+                "stage": str(job.get("stage", "")),
+                "app_code": str(job.get("app_code", "")),
+                "track": str(job.get("track", "")),
+                "issue_title": issue_title,
+            }
+        )
+    return JSONResponse({"items": items, "query": q.strip(), "limit": limit})
 
 
 @router.get("/api/apps", response_class=JSONResponse)
@@ -556,6 +898,28 @@ def save_workflow_api(
     return JSONResponse({"saved": True, "workflow_id": workflow_id, "default_workflow_id": saved.get("default_workflow_id")})
 
 
+@router.post("/api/workflows/default", response_class=JSONResponse)
+def set_default_workflow_api(
+    payload: WorkflowDefaultRequest,
+) -> JSONResponse:
+    """Set one registered workflow as default."""
+
+    saved = load_workflows(_WORKFLOWS_CONFIG_PATH)
+    workflows = saved.get("workflows", [])
+    workflow_id = payload.workflow_id.strip()
+    known_workflow_ids = {
+        str(item.get("workflow_id", "")).strip()
+        for item in workflows
+        if isinstance(item, dict)
+    }
+    if workflow_id not in known_workflow_ids:
+        raise HTTPException(status_code=400, detail=f"등록되지 않은 workflow_id 입니다: {workflow_id}")
+
+    saved["default_workflow_id"] = workflow_id
+    save_workflows(_WORKFLOWS_CONFIG_PATH, saved)
+    return JSONResponse({"saved": True, "default_workflow_id": workflow_id})
+
+
 @router.get("/api/agents/config", response_class=JSONResponse)
 def get_agents_config(
     settings: AppSettings = Depends(get_settings),
@@ -597,13 +961,14 @@ def update_agents_config(
 def check_agent_clis(
     settings: AppSettings = Depends(get_settings),
 ) -> JSONResponse:
-    """Check whether Gemini/Codex/Claude CLIs are executable."""
+    """Check whether Gemini/Codex/Claude/Copilot CLIs are executable."""
 
     templates = _read_command_templates(settings.command_config)
     result = {
         "gemini": _check_one_cli("gemini", templates),
         "codex": _check_one_cli("codex", templates),
         "claude": _check_one_cli("claude", templates),
+        "copilot": _check_one_cli("copilot", templates),
     }
     return JSONResponse(result)
 
@@ -779,6 +1144,62 @@ def codex_assistant_chat(
     )
 
 
+@router.post("/api/assistant/log-analysis", response_class=JSONResponse)
+def assistant_log_analysis(
+    payload: AssistantLogAnalysisRequest,
+    settings: AppSettings = Depends(get_settings),
+    store: JobStore = Depends(get_store),
+) -> JSONResponse:
+    """Analyze AgentHub logs with one selected assistant CLI."""
+
+    assistant = str(payload.assistant or "").strip().lower()
+    allowed = {"codex", "gemini", "claude", "copilot"}
+    if assistant not in allowed:
+        raise HTTPException(
+            status_code=400,
+            detail=f"지원하지 않는 assistant 입니다: {assistant}. 허용: {', '.join(sorted(allowed))}",
+        )
+
+    question = payload.question.strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="question은 비어 있을 수 없습니다.")
+
+    focus_job_id = payload.job_id.strip()
+    focus_context = ""
+    if focus_job_id:
+        job = store.get_job(focus_job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail=f"job_id를 찾을 수 없습니다: {focus_job_id}")
+        focus_context = _build_focus_job_log_context(job, settings)
+
+    runtime_context = _build_agent_observability_context(store, settings)
+    prompt = _build_log_analysis_prompt(
+        assistant=assistant,
+        question=question,
+        runtime_context=runtime_context,
+        focus_context=focus_context,
+    )
+
+    try:
+        templates = _read_command_templates(settings.command_config)
+    except HTTPException:
+        templates = {}
+
+    analysis = _run_log_analyzer(
+        assistant=assistant,
+        prompt=prompt,
+        templates=templates,
+    )
+    return JSONResponse(
+        {
+            "ok": True,
+            "assistant": analysis,
+            "provider": assistant,
+            "focus_job_id": focus_job_id,
+        }
+    )
+
+
 @router.post("/api/issues/register", response_class=JSONResponse)
 def register_issue_and_trigger(
     payload: IssueRegistrationRequest,
@@ -797,6 +1218,7 @@ def register_issue_and_trigger(
     keep_branch = bool(payload.keep_branch)
     requested_branch_name = (payload.branch_name or "").strip()
     role_preset_id = _normalize_role_code(payload.role_preset_id)
+    requested_workflow_id = (payload.workflow_id or "").strip()
     title_track = _detect_title_track(title)
     if title_track:
         track = title_track
@@ -809,6 +1231,13 @@ def register_issue_and_trigger(
             status_code=400,
             detail=f"등록되지 않은 앱 코드입니다: {app_code}. 설정 메뉴에서 먼저 등록해주세요.",
         )
+    if requested_workflow_id:
+        known_workflow_ids = list_known_workflow_ids(_WORKFLOWS_CONFIG_PATH)
+        if requested_workflow_id not in known_workflow_ids:
+            raise HTTPException(
+                status_code=400,
+                detail=f"등록되지 않은 workflow_id 입니다: {requested_workflow_id}",
+            )
 
     if role_preset_id:
         roles_payload = _read_roles_payload(_ROLES_CONFIG_PATH)
@@ -883,6 +1312,13 @@ def register_issue_and_trigger(
 
     now = utc_now_iso()
     job_id = str(uuid.uuid4())
+    workflow_selection = resolve_workflow_selection(
+        requested_workflow_id=requested_workflow_id,
+        app_code=app_code,
+        repository=repository,
+        apps_path=_APPS_CONFIG_PATH,
+        workflows_path=_WORKFLOWS_CONFIG_PATH,
+    )
     job = JobRecord(
         job_id=job_id,
         repository=repository,
@@ -910,6 +1346,7 @@ def register_issue_and_trigger(
         finished_at=None,
         app_code=app_code,
         track=track,
+        workflow_id=workflow_selection.workflow_id,
     )
 
     store.create_job(job)
@@ -925,6 +1362,8 @@ def register_issue_and_trigger(
             "issue_url": issue_url,
             "app_code": app_code,
             "track": track,
+            "workflow_id": workflow_selection.workflow_id,
+            "workflow_source": workflow_selection.source,
             "keep_branch": keep_branch,
             "role_preset_id": role_preset_id,
         }
@@ -971,6 +1410,10 @@ def job_detail_api(
     workspace_path = settings.repository_workspace_path(job.repository, job.app_code)
     md_files = _read_agent_md_files(workspace_path)
     stage_md_snapshots = _read_stage_md_snapshots(settings.data_dir, job_id)
+    node_runs = store.list_node_runs(job_id)
+    resume_state = _compute_job_resume_state(job, node_runs, settings)
+    runtime_signals = _build_job_runtime_signals(job, store=store, settings=settings)
+    manual_retry_options = _build_manual_retry_options(job, settings=settings, node_runs=node_runs)
 
     return JSONResponse(
         {
@@ -978,9 +1421,165 @@ def job_detail_api(
             "events": events,
             "md_files": md_files,
             "stage_md_snapshots": stage_md_snapshots,
+            "node_runs": [item.to_dict() for item in node_runs],
+            "resume_state": resume_state,
+            "manual_retry_options": manual_retry_options,
+            "runtime_signals": runtime_signals,
             "stop_requested": _stop_signal_path(settings.data_dir, job_id).exists(),
         }
     )
+
+
+@router.get("/api/jobs/{job_id}/node-runs", response_class=JSONResponse)
+def job_node_runs_api(
+    job_id: str,
+    store: JobStore = Depends(get_store),
+    settings: AppSettings = Depends(get_settings),
+) -> JSONResponse:
+    """Return persisted workflow node execution records for one job."""
+
+    job = store.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+
+    node_runs = store.list_node_runs(job_id)
+    resume_state = _compute_job_resume_state(job, node_runs, settings)
+    manual_retry_options = _build_manual_retry_options(job, settings=settings, node_runs=node_runs)
+    return JSONResponse(
+        {
+            "job_id": job_id,
+            "workflow_id": job.workflow_id,
+            "node_runs": [item.to_dict() for item in node_runs],
+            "resume_state": resume_state,
+            "manual_retry_options": manual_retry_options,
+        }
+    )
+
+
+def _resolve_job_workflow_definition(job: JobRecord) -> tuple[str, Dict[str, Any], List[Dict[str, Any]]]:
+    """Resolve one job to the active workflow definition and ordered nodes."""
+
+    default_id, workflows_by_id = _load_workflows_catalog()
+    selection = resolve_workflow_selection(
+        requested_workflow_id=job.workflow_id,
+        app_code=job.app_code,
+        repository=job.repository,
+        apps_path=_APPS_CONFIG_PATH,
+        workflows_path=_WORKFLOWS_CONFIG_PATH,
+    )
+    workflow = workflows_by_id.get(selection.workflow_id) or workflows_by_id.get(default_id)
+    if not isinstance(workflow, dict):
+        return "", {}, []
+    ordered_nodes = linearize_workflow_nodes(workflow)
+    return str(workflow.get("workflow_id", "")).strip(), workflow, ordered_nodes
+
+
+def _compute_job_resume_state(
+    job: JobRecord,
+    node_runs: List[Any],
+    settings: AppSettings,
+) -> Dict[str, Any]:
+    """Predict resume mode for the current or next execution attempt."""
+
+    if job.status == JobStatus.DONE.value:
+        return {
+            "enabled": False,
+            "mode": "none",
+            "reason_code": "job_completed",
+            "reason": "작업이 완료되어 재개 대상이 아닙니다.",
+            "current_attempt": int(job.attempt or 0),
+            "source_attempt": int(job.attempt or 0),
+            "failed_node_id": "",
+            "failed_node_type": "",
+            "failed_node_title": "",
+            "resume_from_node_id": "",
+            "resume_from_node_type": "",
+            "resume_from_node_title": "",
+            "resume_from_index": 0,
+            "skipped_nodes": [],
+        }
+
+    workflow_id, workflow, ordered_nodes = _resolve_job_workflow_definition(job)
+    if not workflow:
+        return {
+            "enabled": False,
+            "mode": "none",
+            "reason_code": "workflow_unavailable",
+            "reason": "워크플로우를 찾지 못해 재개 전략을 계산할 수 없습니다.",
+            "current_attempt": int(job.attempt or 0),
+            "source_attempt": 0,
+            "failed_node_id": "",
+            "failed_node_type": "",
+            "failed_node_title": "",
+            "resume_from_node_id": "",
+            "resume_from_node_type": "",
+            "resume_from_node_title": "",
+            "resume_from_index": 0,
+            "skipped_nodes": [],
+        }
+
+    workspace_path = settings.repository_workspace_path(job.repository, job.app_code)
+    improvement_runtime = read_improvement_runtime_context(
+        build_workflow_artifact_paths(workspace_path)
+    )
+    prospective_attempt = max(1, int(job.attempt or 0))
+    if job.status in {JobStatus.FAILED.value, JobStatus.QUEUED.value}:
+        prospective_attempt = max(1, prospective_attempt + 1)
+
+    return compute_workflow_resume_state(
+        workflow_id=workflow_id,
+        ordered_nodes=ordered_nodes,
+        node_runs=node_runs,
+        current_attempt=prospective_attempt,
+        strategy=str(improvement_runtime.get("strategy", "")).strip(),
+        scope_restriction=str(improvement_runtime.get("scope_restriction", "")).strip(),
+        manual_mode=str(job.manual_resume_mode or "").strip(),
+        manual_node_id=str(job.manual_resume_node_id or "").strip(),
+        manual_note=str(job.manual_resume_note or "").strip(),
+    )
+
+
+def _build_manual_retry_options(
+    job: JobRecord,
+    *,
+    settings: AppSettings,
+    node_runs: List[Any],
+) -> Dict[str, Any]:
+    """Return dashboard-safe manual resume/rerun options for one job."""
+
+    workflow_id, _, ordered_nodes = _resolve_job_workflow_definition(job)
+    resume_state = _compute_job_resume_state(job, node_runs, settings)
+    safe_nodes = list_manual_resume_candidates(ordered_nodes)
+    failed_node_id = str(resume_state.get("failed_node_id", "")).strip()
+    can_resume_failed = any(str(item.get("id", "")).strip() == failed_node_id for item in safe_nodes)
+    return {
+        "workflow_id": workflow_id,
+        "safe_nodes": safe_nodes,
+        "can_manual_retry": job.status not in {JobStatus.QUEUED.value, JobStatus.RUNNING.value},
+        "can_resume_failed_node": can_resume_failed,
+        "failed_node_id": failed_node_id,
+        "default_mode": "resume_failed_node" if can_resume_failed else "full_rerun",
+    }
+
+
+def _load_workflows_catalog() -> tuple[str, Dict[str, Dict[str, Any]]]:
+    """Read workflow catalog with a dashboard-safe fallback."""
+
+    payload = load_workflows(_WORKFLOWS_CONFIG_PATH)
+    default_workflow_id = str(payload.get("default_workflow_id", "")).strip()
+    if not default_workflow_id:
+        default_workflow_id = default_workflow_template()["workflow_id"]
+
+    workflows_by_id: Dict[str, Dict[str, Any]] = {}
+    raw_workflows = payload.get("workflows", [])
+    if isinstance(raw_workflows, list):
+        for item in raw_workflows:
+            if not isinstance(item, dict):
+                continue
+            workflow_id = str(item.get("workflow_id", "")).strip()
+            if workflow_id:
+                workflows_by_id[workflow_id] = item
+    return default_workflow_id, workflows_by_id
 
 
 def _read_agent_md_files(workspace_path: Path) -> List[Dict[str, str]]:
@@ -1096,9 +1695,111 @@ def requeue_job(
         error_message=None,
         started_at=None,
         finished_at=None,
+        heartbeat_at=None,
+        manual_resume_mode="",
+        manual_resume_node_id="",
+        manual_resume_requested_at=None,
+        manual_resume_note="",
     )
     store.enqueue_job(job_id)
     return JSONResponse({"requeued": True, "job_id": job_id})
+
+
+@router.post("/api/jobs/{job_id}/workflow/manual-retry", response_class=JSONResponse)
+def manual_retry_workflow_job(
+    job_id: str,
+    payload: WorkflowManualRetryRequest,
+    store: JobStore = Depends(get_store),
+    settings: AppSettings = Depends(get_settings),
+) -> JSONResponse:
+    """Queue one failed/completed job with an explicit manual rerun/resume policy."""
+
+    job = store.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+    if job.status in {JobStatus.QUEUED.value, JobStatus.RUNNING.value}:
+        raise HTTPException(status_code=400, detail="대기 또는 실행 중 작업에는 수동 재개를 설정할 수 없습니다.")
+
+    requested_mode = str(payload.mode or "").strip().lower()
+    if requested_mode not in {"full_rerun", "resume_failed_node", "resume_from_node"}:
+        raise HTTPException(status_code=400, detail="지원하지 않는 수동 재개 모드입니다.")
+
+    workflow_id, _, ordered_nodes = _resolve_job_workflow_definition(job)
+    if not workflow_id or not ordered_nodes:
+        raise HTTPException(status_code=400, detail="워크플로우를 찾지 못해 수동 재개를 설정할 수 없습니다.")
+
+    selected_node_id = ""
+    selected_reason = ""
+    if requested_mode == "resume_failed_node":
+        current_resume_state = _compute_job_resume_state(job, store.list_node_runs(job_id), settings)
+        selected_node_id = str(current_resume_state.get("failed_node_id", "")).strip()
+        validation = validate_manual_resume_target(
+            ordered_nodes=ordered_nodes,
+            node_id=selected_node_id,
+        )
+        if not validation.get("valid"):
+            raise HTTPException(
+                status_code=400,
+                detail=str(validation.get("reason", "실패 노드에서 수동 재개할 수 없습니다.")),
+            )
+        selected_reason = str(current_resume_state.get("reason", "")).strip()
+    elif requested_mode == "resume_from_node":
+        selected_node_id = str(payload.node_id or "").strip()
+        validation = validate_manual_resume_target(
+            ordered_nodes=ordered_nodes,
+            node_id=selected_node_id,
+        )
+        if not validation.get("valid"):
+            raise HTTPException(
+                status_code=400,
+                detail=str(validation.get("reason", "선택한 노드에서 수동 재개할 수 없습니다.")),
+            )
+        selected_reason = str(validation.get("reason", "")).strip()
+    else:
+        selected_reason = "운영자가 전체 재실행을 지정했습니다."
+
+    next_attempt = max(1, int(job.attempt or 0) + 1)
+    next_max_attempts = max(int(job.max_attempts or 1), next_attempt)
+    note = str(payload.note or "").strip()
+    recovery_status = "manual_rerun_queued" if requested_mode == "full_rerun" else "manual_resume_queued"
+    recovery_reason = note or selected_reason or (
+        "운영자가 전체 재실행을 지정했습니다."
+        if requested_mode == "full_rerun"
+        else "운영자가 수동 재개를 지정했습니다."
+    )
+    store.update_job(
+        job_id,
+        status=JobStatus.QUEUED.value,
+        stage=JobStage.QUEUED.value,
+        max_attempts=next_max_attempts,
+        error_message=None,
+        started_at=None,
+        finished_at=None,
+        heartbeat_at=None,
+        recovery_status=recovery_status,
+        recovery_reason=recovery_reason,
+        manual_resume_mode=requested_mode,
+        manual_resume_node_id=selected_node_id,
+        manual_resume_requested_at=utc_now_iso(),
+        manual_resume_note=note,
+    )
+    store.enqueue_job(job_id)
+
+    updated = store.get_job(job_id)
+    assert updated is not None
+    node_runs = store.list_node_runs(job_id)
+    resume_state = _compute_job_resume_state(updated, node_runs, settings)
+    return JSONResponse(
+        {
+            "queued": True,
+            "job_id": job_id,
+            "workflow_id": workflow_id,
+            "mode": requested_mode,
+            "target_node_id": selected_node_id,
+            "next_attempt": next_attempt,
+            "resume_state": resume_state,
+        }
+    )
 
 
 @router.post("/api/jobs/requeue-failed", response_class=JSONResponse)
@@ -1118,6 +1819,11 @@ def requeue_failed_jobs(
             error_message=None,
             started_at=None,
             finished_at=None,
+            heartbeat_at=None,
+            manual_resume_mode="",
+            manual_resume_node_id="",
+            manual_resume_requested_at=None,
+            manual_resume_note="",
         )
         store.enqueue_job(job_id)
     return JSONResponse({"requeued": len(failed_job_ids)})
@@ -1438,6 +2144,9 @@ def _build_cli_probe_candidates(cli_name: str, templates: Dict[str, str]) -> Lis
     """Build probe command candidates from known paths and templates."""
 
     known: List[List[str]] = []
+    if cli_name == "copilot":
+        return [["gh", "copilot", "--help"], ["copilot", "--version"]]
+
     template_text = " ".join(templates.values())
     absolute_paths = re.findall(r"(/[^ \t\"']+)", template_text)
     node_paths = [path for path in absolute_paths if path.endswith("/node")]
@@ -1529,6 +2238,65 @@ def _resolve_codex_command_prefix(templates: Dict[str, str]) -> List[str]:
     )
 
 
+def _resolve_cli_command_prefix(
+    cli_name: str,
+    templates: Dict[str, str],
+    *,
+    env_var: str = "",
+) -> List[str]:
+    """Resolve executable prefix for generic CLI commands."""
+
+    candidates: List[List[str]] = []
+    if env_var:
+        env_path = os.getenv(env_var, "").strip()
+        if env_path:
+            candidates.append([env_path])
+
+    template_text = " ".join(templates.values())
+    absolute_paths = re.findall(r"(/[^ \t\"']+)", template_text)
+    node_paths = [path for path in absolute_paths if path.endswith("/node")]
+    cli_paths = [
+        path for path in absolute_paths if path.endswith(f"/{cli_name}") or path.endswith(f"/{cli_name}.js")
+    ]
+    for path in cli_paths:
+        if path.endswith(".js") and node_paths:
+            candidates.append([node_paths[0], path])
+        candidates.append([path])
+
+    which_cli = shutil.which(cli_name)
+    if which_cli:
+        candidates.append([which_cli])
+    candidates.append([cli_name])
+
+    deduped: List[List[str]] = []
+    seen: set[str] = set()
+    for item in candidates:
+        key = " ".join(item)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+
+    for prefix in deduped:
+        try:
+            probe = subprocess.run(
+                [*prefix, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=8,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if probe.returncode == 0:
+            return prefix
+
+    tried = ", ".join(" ".join(item) for item in deduped) or "(none)"
+    raise HTTPException(
+        status_code=500,
+        detail=f"{cli_name} 실행 파일을 찾지 못했습니다. 탐색 경로: {tried}",
+    )
+
+
 def _run_probe(args: List[str]) -> Dict[str, Any]:
     """Run one probe command and capture compact output."""
 
@@ -1541,6 +2309,8 @@ def _run_probe(args: List[str]) -> Dict[str, Any]:
         )
     except subprocess.TimeoutExpired:
         return {"ok": False, "output": "timeout"}
+    except OSError as error:
+        return {"ok": False, "output": str(error)}
 
     output = (process.stdout or process.stderr or "").strip().splitlines()
     first_line = output[0] if output else ""
@@ -1597,6 +2367,257 @@ def _build_agent_observability_context(store: JobStore, settings: AppSettings) -
     if len(text) > 14000:
         return text[:14000] + "\n...(truncated)"
     return text
+
+
+def _build_focus_job_log_context(job: JobRecord, settings: AppSettings) -> str:
+    """Build detailed context for one specific job log analysis."""
+
+    lines: List[str] = [
+        "Focused job:",
+        (
+            f"- job_id={job.job_id} status={job.status} stage={job.stage} "
+            f"app={job.app_code} track={job.track} attempt={job.attempt}/{job.max_attempts}"
+        ),
+        f"- issue=#{job.issue_number} title={job.issue_title}",
+        f"- error={job.error_message or '-'}",
+    ]
+
+    for channel in ("debug", "user"):
+        log_path = _resolve_channel_log_path(settings, job.log_file, channel=channel)
+        if not log_path.exists():
+            continue
+        lines.append(f"{channel} log tail ({log_path.name}):")
+        for row in _tail_text_lines(log_path, max_lines=120):
+            lines.append(f"  {row}")
+    text = "\n".join(lines).strip()
+    if len(text) > 20000:
+        return text[:20000] + "\n...(truncated)"
+    return text
+
+
+def _build_log_analysis_prompt(
+    *,
+    assistant: str,
+    question: str,
+    runtime_context: str,
+    focus_context: str,
+) -> str:
+    """Create one-shot prompt for assistant-driven log diagnosis."""
+
+    return (
+        f"당신은 AgentHub 로그 분석 도우미({assistant})입니다.\n"
+        "목표: 로그를 근거로 문제점을 식별하고, 즉시 실행 가능한 조치안을 제시하세요.\n\n"
+        "출력 규칙:\n"
+        "1) 핵심 문제점 (최대 5개)\n"
+        "2) 근거 로그 (각 문제점별 1~2줄)\n"
+        "3) 원인 가설 (확신도 high/med/low)\n"
+        "4) 즉시 조치 (명령/파일 단위)\n"
+        "5) 재발 방지 제안\n"
+        "- 한국어로 간결하게 작성\n"
+        "- 근거 없는 단정 금지\n\n"
+        f"[사용자 질문]\n{question}\n\n"
+        f"[런타임 컨텍스트]\n{runtime_context}\n\n"
+        + (f"[집중 분석 대상]\n{focus_context}\n\n" if focus_context else "")
+    )
+
+
+def _run_log_analyzer(
+    *,
+    assistant: str,
+    prompt: str,
+    templates: Dict[str, str],
+) -> str:
+    """Dispatch one log-analysis request to selected provider CLI."""
+
+    if assistant == "codex":
+        return _run_codex_log_analysis(prompt, templates)
+    if assistant == "gemini":
+        return _run_gemini_log_analysis(prompt, templates)
+    if assistant == "claude":
+        return _run_claude_log_analysis(prompt, templates)
+    if assistant == "copilot":
+        return _run_copilot_log_analysis(prompt, templates)
+    raise HTTPException(status_code=400, detail=f"지원하지 않는 assistant: {assistant}")
+
+
+def _run_codex_log_analysis(prompt: str, templates: Dict[str, str]) -> str:
+    """Run codex CLI for log analysis and return text output."""
+
+    codex_prefix = _resolve_codex_command_prefix(templates)
+    output_file = tempfile.NamedTemporaryFile(
+        prefix="agenthub-log-analysis-codex-",
+        suffix=".txt",
+        delete=False,
+    )
+    output_path = Path(output_file.name)
+    output_file.close()
+    try:
+        process = subprocess.run(
+            [
+                *codex_prefix,
+                "exec",
+                "-C",
+                str(Path.cwd()),
+                "--skip-git-repo-check",
+                "--color",
+                "never",
+                "--output-last-message",
+                str(output_path),
+                prompt,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+    except subprocess.TimeoutExpired as error:
+        output_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=504, detail="Codex 로그 분석이 시간 제한(180초)을 초과했습니다.") from error
+    except OSError as error:
+        output_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail=f"Codex 실행 실패: {error}") from error
+
+    output_text = ""
+    if output_path.exists():
+        try:
+            output_text = output_path.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            output_text = ""
+    output_path.unlink(missing_ok=True)
+    if process.returncode != 0:
+        raw_error = (process.stderr or process.stdout or "").strip()[:1000]
+        raise HTTPException(
+            status_code=502,
+            detail=f"Codex 로그 분석 실패(exit={process.returncode}): {raw_error or '(no output)'}",
+        )
+    if not output_text:
+        output_text = (process.stdout or "").strip()
+    return output_text or "응답이 비어 있습니다."
+
+
+def _run_gemini_log_analysis(prompt: str, templates: Dict[str, str]) -> str:
+    """Run gemini CLI for log analysis and return text output."""
+
+    prefix = _resolve_cli_command_prefix("gemini", templates, env_var="AGENTHUB_GEMINI_BIN")
+    try:
+        process = subprocess.run(
+            [
+                *prefix,
+                "-p",
+                prompt,
+                "--approval-mode",
+                "yolo",
+                "--model",
+                "gemini-3.1-pro-preview",
+                "--output-format",
+                "text",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise HTTPException(status_code=504, detail="Gemini 로그 분석이 시간 제한(180초)을 초과했습니다.") from error
+    except OSError as error:
+        raise HTTPException(status_code=500, detail=f"Gemini 실행 실패: {error}") from error
+    if process.returncode != 0:
+        raw_error = (process.stderr or process.stdout or "").strip()[:1000]
+        raise HTTPException(
+            status_code=502,
+            detail=f"Gemini 로그 분석 실패(exit={process.returncode}): {raw_error or '(no output)'}",
+        )
+    return (process.stdout or "").strip() or "응답이 비어 있습니다."
+
+
+def _run_claude_log_analysis(prompt: str, templates: Dict[str, str]) -> str:
+    """Run claude CLI for log analysis and return text output."""
+
+    prefix = _resolve_cli_command_prefix("claude", templates, env_var="AGENTHUB_CLAUDE_BIN")
+    try:
+        process = subprocess.run(
+            [*prefix, "--print"],
+            input=prompt,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise HTTPException(status_code=504, detail="Claude 로그 분석이 시간 제한(180초)을 초과했습니다.") from error
+    except OSError as error:
+        raise HTTPException(status_code=500, detail=f"Claude 실행 실패: {error}") from error
+    if process.returncode != 0:
+        raw_error = (process.stderr or process.stdout or "").strip()[:1000]
+        raise HTTPException(
+            status_code=502,
+            detail=f"Claude 로그 분석 실패(exit={process.returncode}): {raw_error or '(no output)'}",
+        )
+    return (process.stdout or "").strip() or "응답이 비어 있습니다."
+
+
+def _run_copilot_log_analysis(prompt: str, templates: Dict[str, str]) -> str:
+    """Run copilot template (or gh copilot) for log analysis."""
+
+    prompt_file = tempfile.NamedTemporaryFile(
+        prefix="agenthub-log-analysis-copilot-",
+        suffix=".md",
+        delete=False,
+    )
+    prompt_path = Path(prompt_file.name)
+    prompt_file.close()
+    prompt_path.write_text(prompt, encoding="utf-8")
+
+    template = str(templates.get("copilot", "")).strip()
+    if template:
+        variables = {
+            "prompt_file": str(prompt_path),
+            "work_dir": str(Path.cwd()),
+            "plan_path": str(Path.cwd() / "_docs" / "COPILOT_PLAN.md"),
+            "review_path": str(Path.cwd() / "_docs" / "COPILOT_REVIEW.md"),
+            "docs_bundle_path": str(Path.cwd() / "_docs" / "COPILOT_BUNDLE.md"),
+        }
+        try:
+            command = template.format(**variables)
+        except KeyError as error:
+            prompt_path.unlink(missing_ok=True)
+            missing = str(error.args[0])
+            raise HTTPException(
+                status_code=500,
+                detail=f"copilot 템플릿 변수 누락: {missing}",
+            ) from error
+        try:
+            process = subprocess.run(
+                ["bash", "-lc", command],
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+        except subprocess.TimeoutExpired as error:
+            prompt_path.unlink(missing_ok=True)
+            raise HTTPException(status_code=504, detail="Copilot 로그 분석이 시간 제한(180초)을 초과했습니다.") from error
+        except OSError as error:
+            prompt_path.unlink(missing_ok=True)
+            raise HTTPException(status_code=500, detail=f"Copilot 실행 실패: {error}") from error
+    else:
+        try:
+            process = subprocess.run(
+                ["gh", "copilot", "-p", prompt],
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+        except subprocess.TimeoutExpired as error:
+            prompt_path.unlink(missing_ok=True)
+            raise HTTPException(status_code=504, detail="Copilot 로그 분석이 시간 제한(180초)을 초과했습니다.") from error
+        except OSError as error:
+            prompt_path.unlink(missing_ok=True)
+            raise HTTPException(status_code=500, detail=f"Copilot 실행 실패: {error}") from error
+    prompt_path.unlink(missing_ok=True)
+    if process.returncode != 0:
+        raw_error = (process.stderr or process.stdout or "").strip()[:1000]
+        raise HTTPException(
+            status_code=502,
+            detail=f"Copilot 로그 분석 실패(exit={process.returncode}): {raw_error or '(no output)'}",
+        )
+    return (process.stdout or "").strip() or "응답이 비어 있습니다."
 
 
 def _tail_text_lines(path: Path, max_lines: int = 16) -> List[str]:
@@ -1907,78 +2928,13 @@ def _read_registered_apps(
 ) -> List[Dict[str, str]]:
     """Read app registration list from JSON file with a default fallback."""
 
-    resolved_default_workflow_id = default_workflow_id.strip() or default_workflow_template()["workflow_id"]
-    defaults = [
-        {
-            "code": "default",
-            "name": "Default",
-            "repository": repository,
-            "workflow_id": resolved_default_workflow_id,
-        }
-    ]
-    if not path.exists():
-        return defaults
-
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return defaults
-
-    if not isinstance(payload, list):
-        return defaults
-
-    collected: List[Dict[str, str]] = []
-    has_default = False
-    for item in payload:
-        if not isinstance(item, dict):
-            continue
-        code = _normalize_app_code(str(item.get("code", "")))
-        if not code:
-            continue
-        name = str(item.get("name", code)).strip() or code
-        app_repository = str(item.get("repository", repository)).strip() or repository
-        workflow_id = str(item.get("workflow_id", resolved_default_workflow_id)).strip() or resolved_default_workflow_id
-        collected.append(
-            {
-                "code": code,
-                "name": name,
-                "repository": app_repository,
-                "workflow_id": workflow_id,
-            }
-        )
-        if code == "default":
-            has_default = True
-
-    collected.sort(key=lambda one: one["code"])
-    if not has_default:
-        collected.insert(0, defaults[0])
-    return collected
+    return _shared_read_registered_apps(path, repository, default_workflow_id=default_workflow_id)
 
 
 def _write_registered_apps(path: Path, apps: List[Dict[str, str]]) -> None:
     """Persist app list as pretty JSON."""
 
-    dedup: Dict[str, Dict[str, str]] = {}
-    for app in apps:
-        code = _normalize_app_code(app.get("code", ""))
-        if not code:
-            continue
-        name = str(app.get("name", code)).strip() or code
-        repository = str(app.get("repository", "")).strip()
-        workflow_id = str(app.get("workflow_id", "")).strip() or default_workflow_template()["workflow_id"]
-        dedup[code] = {"code": code, "name": name, "repository": repository, "workflow_id": workflow_id}
-
-    if "default" not in dedup:
-        dedup["default"] = {
-            "code": "default",
-            "name": "Default",
-            "repository": "",
-            "workflow_id": default_workflow_template()["workflow_id"],
-        }
-
-    ordered = [dedup[key] for key in sorted(dedup)]
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(ordered, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    _shared_write_registered_apps(path, apps)
 
 
 def _normalize_role_code(value: str) -> str:
@@ -1994,15 +2950,20 @@ def _default_roles_payload() -> Dict[str, Any]:
 
     role_rows = [
         ("ai-helper", "AI 도우미", "codex", "", "요청/문제 정리", "분석/조치안"),
+        ("log-analyzer-codex", "로그 분석 도우미(Codex)", "codex", "coder", "워크플로우 로그", "문제점/조치안"),
+        ("log-analyzer-gemini", "로그 분석 도우미(Gemini)", "gemini", "reviewer", "워크플로우 로그", "문제점/조치안"),
+        ("log-analyzer-claude", "로그 분석 도우미(Claude)", "claude", "escalation", "워크플로우 로그", "문제점/조치안"),
+        ("log-analyzer-copilot", "로그 분석 도우미(Copilot)", "copilot", "copilot", "워크플로우 로그", "문제점/조치안"),
         ("coder", "코더", "codex", "coder", "SPEC/PLAN", "코드 변경"),
         ("designer", "디자이너", "codex", "coder", "요구사항", "UI/디자인 산출물"),
         ("tester", "테스터", "bash", "", "코드 상태", "테스트 결과"),
         ("reviewer", "리뷰어", "gemini", "reviewer", "코드 diff", "리뷰 리포트"),
-        ("copywriter", "카피라이터", "claude", "escalation", "요구사항", "문구"),
+        ("copywriter", "카피라이터", "codex", "coder", "기획의도/디자인/퍼블리싱 결과", "COPYWRITING_PLAN.md, COPY_DECK.md"),
         ("consultant", "컨설턴트", "gemini", "planner", "현황", "전략 제안"),
         ("qa", "QA", "bash", "", "테스트 계획", "품질 점검"),
         ("architect", "플래너", "gemini", "planner", "요구사항", "실행 계획"),
         ("devops-sre", "인프라·운영 엔지니어", "bash", "", "서비스 상태", "운영 조치"),
+        ("escalation-helper", "에스컬레이션 도우미", "claude", "escalation", "실패 로그/상태", "보조 분석/다음 액션"),
         ("security", "보안 엔지니어", "bash", "", "코드/설정", "보안 점검"),
         ("db-engineer", "데이터베이스 엔지니어", "bash", "", "스키마", "DB 변경안"),
         ("performance", "성능 최적화 엔지니어", "bash", "", "프로파일링", "개선안"),
@@ -2012,8 +2973,9 @@ def _default_roles_payload() -> Dict[str, Any]:
         ("incident-analyst", "장애 원인 분석가", "codex", "", "로그/지표", "RCA"),
         ("orchestration-helper", "오케스트레이션 도우미", "copilot", "copilot", "워크플로우 상태/로그", "다음 단계/재시도 전략"),
         ("system-owner", "시스템 오너", "gemini", "planner", "이슈 본문/SPEC.md", "확정 스펙/우선순위"),
-        ("tech-writer", "기술 문서 작성가", "claude", "pr_summary", "변경사항", "문서"),
+        ("tech-writer", "기술 문서 작성가", "claude", "documentation_writer", "SPEC/PLAN/REVIEW", "README.md, COPYRIGHT.md, DEVELOPMENT_GUIDE.md"),
         ("product-analyst", "제품 분석가", "gemini", "planner", "지표/요구", "개선 우선순위"),
+        ("publisher", "퍼블리셔", "codex", "coder", "디자인 시스템/화면 구조", "퍼블리싱 결과물"),
         ("research-agent", "정보검색 도우미", "python3", "research_search", "질문/키워드", "SEARCH_CONTEXT.md"),
         ("refactor-specialist", "리팩토링 전문가", "codex", "coder", "코드베이스", "구조 개선"),
         ("requirements-manager", "요구사항 관리자", "gemini", "planner", "이해관계자 요청", "명세"),
@@ -2133,11 +3095,7 @@ def _write_roles_payload(path: Path, payload: Dict[str, Any]) -> None:
 def _read_default_workflow_id(path: Path) -> str:
     """Read default workflow id from workflow config with safe fallback."""
 
-    payload = load_workflows(path)
-    default_workflow_id = str(payload.get("default_workflow_id", "")).strip()
-    if default_workflow_id:
-        return default_workflow_id
-    return default_workflow_template()["workflow_id"]
+    return _shared_read_default_workflow_id(path)
 
 
 def _find_active_job(

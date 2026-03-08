@@ -54,6 +54,8 @@ def app_components(tmp_path: Path):
         tester_secondary_name="gemini",
         command_config=command_config,
         worker_poll_seconds=1,
+        worker_stale_running_seconds=600,
+        worker_max_auto_recoveries=2,
         default_branch="main",
         enable_escalation=False,
         enable_stage_md_commits=True,

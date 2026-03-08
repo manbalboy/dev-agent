@@ -14,6 +14,8 @@
     "priority_summary",
     "recommended_next_tasks",
     "quality_signals",
+    "principle_alignment",
+    "operating_policy",
     "validation",
     "quality_gate"
   ],
@@ -164,6 +166,66 @@
         "has_ux_review": { "type": "boolean" }
       },
       "additionalProperties": false
+    },
+    "artifact_health": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "category_evidence": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "evidence_summary": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "principle_alignment": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "required": ["title", "status", "summary", "evidence", "enforced_by"],
+        "properties": {
+          "title": { "type": "string" },
+          "status": { "type": "string", "enum": ["aligned", "warning", "blocked", "runtime"] },
+          "summary": { "type": "string" },
+          "evidence": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "enforced_by": { "type": "string" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "operating_policy": {
+      "type": "object",
+      "required": [
+        "blocked_principles",
+        "warning_principles",
+        "runtime_principles",
+        "requires_design_reset",
+        "requires_scope_reset",
+        "requires_quality_focus"
+      ],
+      "properties": {
+        "blocked_principles": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "warning_principles": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "runtime_principles": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "requires_design_reset": { "type": "boolean" },
+        "requires_scope_reset": { "type": "boolean" },
+        "requires_quality_focus": { "type": "boolean" }
+      },
+      "additionalProperties": true
     },
     "validation": {
       "type": "object",

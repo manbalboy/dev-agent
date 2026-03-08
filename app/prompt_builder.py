@@ -27,6 +27,65 @@ SEARCH_TOOL_GUIDE = dedent(
 ).strip()
 
 
+OPERATING_PRINCIPLES_BRIEF = dedent(
+    """
+    핵심 운영 원칙:
+    - 완성형을 한 번에 만들지 말고 항상 MVP부터 시작한다.
+    - 코드 생성보다 제품 정의, 사용자 흐름, MVP 범위, 아키텍처 설계를 우선한다.
+    - 이번 라운드는 작은 단위 변경에 집중한다. 한 번에 큰 범위를 구현하지 않는다.
+    - 결과는 반드시 품질 기준으로 평가 가능해야 하며 판단 근거를 문서에 남긴다.
+    - 같은 문제를 반복 수정하지 말고, 품질이 오르지 않으면 전략을 바꾼다.
+    - 실행 성공만이 아니라 사용성, UX 명확성, 테스트, 에러/빈/로딩 상태까지 제품 품질로 판단한다.
+    """
+).strip()
+
+
+OPERATING_ENFORCEMENT_BRIEF = dedent(
+    """
+    강제 규칙:
+    - 제품 정의 문서와 범위가 불충분하면 추정 구현을 시작하지 않는다.
+    - MVP 범위 밖 신규 기능 확장이나 과도한 구조 재작성은 금지한다.
+    - 왜 이 설계/범위/개선을 선택했는지 문서에 설명 가능해야 한다.
+    """
+).strip()
+
+
+PROMPT_CONTEXT_CHAR_LIMIT = 12000
+
+
+def _read_prompt_context(path_str: str, *, label: str) -> str:
+    """Embed source file content into prompts so external CLIs can use it directly."""
+
+    raw_path = str(path_str or "").strip()
+    if not raw_path:
+        return f"### {label}\n(경로 없음)\n"
+    path = Path(raw_path)
+    if not path.exists():
+        return f"### {label}\nPath: {raw_path}\n(파일이 아직 생성되지 않음)\n"
+
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError as error:
+        return f"### {label}\nPath: {raw_path}\n(파일 읽기 실패: {error})\n"
+
+    if not text:
+        text = "(빈 파일)"
+    if len(text) > PROMPT_CONTEXT_CHAR_LIMIT:
+        text = text[:PROMPT_CONTEXT_CHAR_LIMIT].rstrip() + "\n...[truncated]"
+
+    suffix = path.suffix.lower()
+    code_fence = "json" if suffix == ".json" else "md"
+    return dedent(
+        f"""
+        ### {label}
+        Path: {raw_path}
+        ```{code_fence}
+        {text}
+        ```
+        """
+    ).strip()
+
+
 def build_spec_markdown(
     repository: str,
     issue_number: int,
@@ -194,20 +253,33 @@ def build_spec_json(
     }
 
 
-def build_product_brief_prompt(spec_path: str, product_brief_path: str) -> str:
+def build_product_brief_prompt(
+    spec_path: str,
+    product_brief_path: str,
+    *,
+    job_id: str = "",
+    issue_title: str = "",
+    retry_feedback: str = "",
+) -> str:
     """Prompt for AI to generate PRODUCT_BRIEF.md from spec context."""
 
-    return dedent(
+    prompt = dedent(
         f"""
         당신은 제품 정의 전문가입니다. PRODUCT_BRIEF.md 전체를 한국어로 작성하세요.
 
         입력 참고 자료:
         - {spec_path}  (SPEC.md — 이슈 원문, 목표, 범위)
+        
+        아래에 입력 파일 내용이 인라인으로 포함되어 있습니다. 경로만 보지 말고 실제 내용 기준으로 작성하세요.
+        {_read_prompt_context(spec_path, label="SPEC.md Content")}
 
         출력 대상 경로(참고용):
         - {product_brief_path}
 
         필수 섹션:
+        0. Context Anchor — 아래 두 줄을 정확히 포함
+           - Job ID: {job_id}
+           - Issue Title: {issue_title}
         1. Product Goal — 이 제품이 해결하는 핵심 문제 한 문장
         2. Problem Statement — 현재 사용자가 겪는 고통 포인트
         3. Target Users — 1차 사용자와 2차 사용자 구분
@@ -220,25 +292,50 @@ def build_product_brief_prompt(spec_path: str, product_brief_path: str) -> str:
         - 반드시 한국어로 작성 (섹션 제목 영문 유지).
         - 추상적 표현 금지. 각 항목은 검증 가능한 구체 문장으로 작성.
         - 저장소의 기존 코드/README를 검색해 현재 제품 상태를 파악한 뒤 작성.
+        - 아래 운영 원칙을 따른다.
+        {OPERATING_PRINCIPLES_BRIEF}
         - markdown 본문만 출력. 작업 과정 설명, 메타 코멘트 금지.
         """
-    ).strip() + "\n"
+    ).strip()
+    if retry_feedback.strip():
+        prompt += "\n\n" + dedent(
+            f"""
+            이전 출력 보정 지시:
+            {retry_feedback.strip()}
+            - 누락된 섹션과 Context Anchor를 모두 보완해 전체 문서를 다시 작성하세요.
+            - 기존 generic 문장을 반복하지 말고 SPEC.md의 실제 표현을 반영하세요.
+            """
+        ).strip()
+    return prompt + "\n"
 
 
-def build_user_flows_prompt(product_brief_path: str, user_flows_path: str) -> str:
+def build_user_flows_prompt(
+    product_brief_path: str,
+    user_flows_path: str,
+    *,
+    job_id: str = "",
+    issue_title: str = "",
+    retry_feedback: str = "",
+) -> str:
     """Prompt for AI to generate USER_FLOWS.md from product brief."""
 
-    return dedent(
+    prompt = dedent(
         f"""
         당신은 UX 설계 전문가입니다. USER_FLOWS.md 전체를 한국어로 작성하세요.
 
         입력 참고 자료:
         - {product_brief_path}  (PRODUCT_BRIEF.md — 제품 목표, 사용자, 가치)
+        
+        아래에 입력 파일 내용이 인라인으로 포함되어 있습니다. 실제 내용을 기준으로 사용자 흐름을 정의하세요.
+        {_read_prompt_context(product_brief_path, label="PRODUCT_BRIEF.md Content")}
 
         출력 대상 경로(참고용):
         - {user_flows_path}
 
         필수 섹션:
+        0. Context Anchor — 아래 두 줄을 정확히 포함
+           - Job ID: {job_id}
+           - Issue Title: {issue_title}
         1. Primary Flow — 핵심 사용자 여정 (단계별 번호 목록, 최소 5단계)
         2. Secondary Flows — 부수적 흐름 (설정, 오류 복구, 엣지케이스 등)
         3. UX State Checklist — 각 화면/기능에 대해 아래 3가지 상태를 명시:
@@ -251,9 +348,21 @@ def build_user_flows_prompt(product_brief_path: str, user_flows_path: str) -> st
         - 반드시 한국어로 작성 (섹션 제목 영문 유지).
         - 각 단계는 사용자 행동(User Action)과 시스템 반응(System Response)을 구분.
         - 저장소의 기존 UI 코드/컴포넌트를 검색해 현실에 맞게 작성.
+        - 아래 운영 원칙을 따른다.
+        {OPERATING_PRINCIPLES_BRIEF}
         - markdown 본문만 출력. 작업 과정 설명 금지.
         """
-    ).strip() + "\n"
+    ).strip()
+    if retry_feedback.strip():
+        prompt += "\n\n" + dedent(
+            f"""
+            이전 출력 보정 지시:
+            {retry_feedback.strip()}
+            - 제품 목표/사용자/핵심 가치와 직접 연결되는 사용자 흐름으로 다시 작성하세요.
+            - Loading / Empty / Error 상태를 빠뜨리지 마세요.
+            """
+        ).strip()
+    return prompt + "\n"
 
 
 def build_mvp_scope_prompt(
@@ -261,10 +370,14 @@ def build_mvp_scope_prompt(
     user_flows_path: str,
     spec_json_path: str,
     mvp_scope_path: str,
+    *,
+    job_id: str = "",
+    issue_title: str = "",
+    retry_feedback: str = "",
 ) -> str:
     """Prompt for AI to generate MVP_SCOPE.md."""
 
-    return dedent(
+    prompt = dedent(
         f"""
         당신은 제품 범위 결정 전문가입니다. MVP_SCOPE.md 전체를 한국어로 작성하세요.
 
@@ -272,11 +385,19 @@ def build_mvp_scope_prompt(
         - {product_brief_path}  (PRODUCT_BRIEF.md)
         - {user_flows_path}     (USER_FLOWS.md)
         - {spec_json_path}      (SPEC.json — scope_in / scope_out)
+        
+        아래에 입력 파일 내용이 인라인으로 포함되어 있습니다. 실제 범위와 흐름을 기준으로 결정하세요.
+        {_read_prompt_context(product_brief_path, label="PRODUCT_BRIEF.md Content")}
+        {_read_prompt_context(user_flows_path, label="USER_FLOWS.md Content")}
+        {_read_prompt_context(spec_json_path, label="SPEC.json Content")}
 
         출력 대상 경로(참고용):
         - {mvp_scope_path}
 
         필수 섹션:
+        0. Context Anchor — 아래 두 줄을 정확히 포함
+           - Job ID: {job_id}
+           - Issue Title: {issue_title}
         1. In Scope — 이번 MVP에 반드시 포함되는 기능 목록 (우선순위 표기)
         2. Out of Scope — 의도적으로 제외한 기능과 제외 이유
         3. MVP Acceptance Gates — MVP가 완료되었다고 판단하는 최소 조건 (최소 3개)
@@ -288,30 +409,53 @@ def build_mvp_scope_prompt(
         - "In Scope" 각 항목에는 우선순위(P1/P2)와 완료 조건을 함께 작성.
         - MVP Acceptance Gates는 재현 가능하고 검증 가능한 조건이어야 함.
         - 저장소 현황을 검색해 이미 구현된 기능은 In Scope에서 제외하거나 개선 범위로 표기.
+        - 아래 운영 원칙을 따른다.
+        {OPERATING_PRINCIPLES_BRIEF}
         - markdown 본문만 출력. 작업 과정 설명 금지.
         """
-    ).strip() + "\n"
+    ).strip()
+    if retry_feedback.strip():
+        prompt += "\n\n" + dedent(
+            f"""
+            이전 출력 보정 지시:
+            {retry_feedback.strip()}
+            - PRODUCT_BRIEF / USER_FLOWS / SPEC.json 사이의 공통 범위만 남기고 generic 범위는 제거하세요.
+            - Acceptance Gates는 검증 가능 문장으로 다시 작성하세요.
+            """
+        ).strip()
+    return prompt + "\n"
 
 
 def build_architecture_plan_prompt(
     mvp_scope_path: str,
     user_flows_path: str,
     architecture_plan_path: str,
+    *,
+    job_id: str = "",
+    issue_title: str = "",
+    retry_feedback: str = "",
 ) -> str:
     """Prompt for AI to generate ARCHITECTURE_PLAN.md."""
 
-    return dedent(
+    prompt = dedent(
         f"""
         당신은 소프트웨어 아키텍트입니다. ARCHITECTURE_PLAN.md 전체를 한국어로 작성하세요.
 
         입력 참고 자료:
         - {mvp_scope_path}   (MVP_SCOPE.md — 구현 범위)
         - {user_flows_path}  (USER_FLOWS.md — 사용자 흐름)
+        
+        아래에 입력 파일 내용이 인라인으로 포함되어 있습니다. 실제 MVP 범위와 사용자 흐름을 기준으로 설계하세요.
+        {_read_prompt_context(mvp_scope_path, label="MVP_SCOPE.md Content")}
+        {_read_prompt_context(user_flows_path, label="USER_FLOWS.md Content")}
 
         출력 대상 경로(참고용):
         - {architecture_plan_path}
 
         필수 섹션:
+        0. Context Anchor — 아래 두 줄을 정확히 포함
+           - Job ID: {job_id}
+           - Issue Title: {issue_title}
         1. Layer Structure — 제품 레이어 구성 (Presentation / Application / Data / Infrastructure)
         2. Component Boundaries — 각 컴포넌트의 책임과 경계 (무엇을 하고, 무엇을 하지 않는가)
         3. Data Contracts — 단계 간 데이터 전달 방식 (파일/JSON/API 스키마 요약)
@@ -329,6 +473,62 @@ def build_architecture_plan_prompt(
         - 반드시 한국어로 작성 (섹션 제목 영문 유지).
         - 저장소의 기존 코드 구조를 검색해 현실 아키텍처에 맞게 작성.
         - 품질 게이트는 정량적 기준(점수 임계값, 반복 횟수 등)으로 명시.
+        - 아래 운영 원칙을 따른다.
+        {OPERATING_PRINCIPLES_BRIEF}
+        - 특히 같은 문제 3회 이상 반복 시 전략 변경 조건을 반드시 명시한다.
+        - markdown 본문만 출력. 작업 과정 설명 금지.
+        """
+    ).strip()
+    if retry_feedback.strip():
+        prompt += "\n\n" + dedent(
+            f"""
+            이전 출력 보정 지시:
+            {retry_feedback.strip()}
+            - MVP 범위 밖 확장 제안은 제거하고, 품질 게이트와 루프 안전 규칙을 더 구체화하세요.
+            - generic architecture 설명이 아니라 현재 제품 정의 단계 산출물과 직접 연결하세요.
+            """
+        ).strip()
+    return prompt + "\n"
+
+
+def build_project_scaffolding_prompt(
+    architecture_plan_path: str,
+    mvp_scope_path: str,
+    spec_json_path: str,
+    bootstrap_report_path: str,
+    scaffold_plan_path: str,
+) -> str:
+    """Prompt for AI to generate SCAFFOLD_PLAN.md."""
+
+    return dedent(
+        f"""
+        당신은 프로젝트 부트스트랩 설계 담당입니다. SCAFFOLD_PLAN.md 전체를 한국어로 작성하세요.
+
+        입력 참고 자료:
+        - {architecture_plan_path}  (ARCHITECTURE_PLAN.md — 레이어/품질게이트)
+        - {mvp_scope_path}          (MVP_SCOPE.md — 이번 라운드 구현 범위)
+        - {spec_json_path}          (SPEC.json — 앱 유형, 제약 조건)
+        - {bootstrap_report_path}   (BOOTSTRAP_REPORT.json — 현재 레포 상태/탐지 결과)
+
+        출력 대상 경로(참고용):
+        - {scaffold_plan_path}
+
+        필수 섹션:
+        1. Repository State — 현재 레포가 greenfield / partial / existing 중 어디에 해당하는가
+        2. Bootstrap Mode — 이번 단계가 create / extend / stabilize 중 무엇을 해야 하는가
+        3. Target Structure — 생성/정리해야 할 주요 디렉토리와 파일
+        4. Required Setup Commands — 실제 부트스트랩에 필요한 초기 명령
+        5. App Skeleton Contracts — entrypoint, config, test, docs 기본 계약
+        6. Verification Checklist — scaffold 완료를 확인하는 최소 체크리스트
+        7. Risks And Deferrals — 지금 미루는 항목과 이유
+
+        작성 규칙:
+        - 반드시 한국어로 작성 (섹션 제목 영문 유지).
+        - 현재 저장소 구조를 검색해 이미 존재하는 파일/디렉토리는 재생성 대상으로 쓰지 말 것.
+        - 과도한 대규모 재구성 금지. MVP를 빠르게 시작하기 위한 최소 scaffold만 제안.
+        - Required Setup Commands는 실행 가능한 짧은 명령 형태로 작성.
+        - 아래 운영 원칙을 따른다.
+        {OPERATING_PRINCIPLES_BRIEF}
         - markdown 본문만 출력. 작업 과정 설명 금지.
         """
     ).strip() + "\n"
@@ -411,6 +611,9 @@ def build_planner_prompt(
     spec_path: str,
     plan_path: str,
     review_path: str = "",
+    improvement_plan_path: str = "",
+    improvement_loop_state_path: str = "",
+    next_improvement_tasks_path: str = "",
     is_long_term: bool = False,
     is_refinement_round: bool = False,
     planning_mode: str = "general",
@@ -424,6 +627,9 @@ def build_planner_prompt(
         입력 참고 자료:
         - {spec_path}
         - {review_path} (파일이 존재하고 비어있지 않으면 반드시 반영)
+        - {improvement_plan_path} (파일이 존재하고 비어있지 않으면 다음 라운드 전략으로 반영)
+        - {improvement_loop_state_path} (strategy / scope_restriction / rollback 신호 참고)
+        - {next_improvement_tasks_path} (다음 우선 작업 목록이 있으면 반드시 반영)
 
         출력 대상 경로(참고용):
         - {plan_path}
@@ -459,10 +665,16 @@ def build_planner_prompt(
         - 반드시 한국어로 작성.
         - 문서명과 고유 명칭(예: PLAN, MVP, TODO)은 영문 유지.
         - 본문 설명은 한국어로 작성.
+        - 아래 운영 원칙을 따른다.
+        {OPERATING_PRINCIPLES_BRIEF}
+        {OPERATING_ENFORCEMENT_BRIEF}
         - 각 섹션은 실행 가능한 체크리스트와 산출물 파일을 포함.
         - 계획 작성 전에 저장소의 관련 코드/문서/테스트를 직접 검색해 현재 상태를 파악.
         - 변경 파일 후보와 영향 범위를 근거 기반으로 명시.
         - REVIEW.md가 있으면 TODO를 고도화 플랜에 반영.
+        - IMPROVEMENT_PLAN.md / NEXT_IMPROVEMENT_TASKS.json 이 있으면 strategy와 우선순위를 계획에 직접 반영.
+        - improvement strategy가 `design_rebaseline` 또는 scope_restriction이 `MVP_redefinition`이면,
+          구현 확대가 아니라 제품 정의/범위/설계 문서 재정렬 계획을 우선 작성.
         - 실행 가이드에 포트가 필요하면 3000번대 포트만 사용.
         - markdown 본문만 출력하고, 작업 과정 설명은 금지.
         - 도구/터미널/파일 조작 과정 언급 금지.
@@ -563,6 +775,9 @@ def build_coder_prompt(
     design_tokens_path: str = "",
     token_handoff_path: str = "",
     publish_handoff_path: str = "",
+    improvement_plan_path: str = "",
+    improvement_loop_state_path: str = "",
+    next_improvement_tasks_path: str = "",
 ) -> str:
     """Prompt text for coder model (Codex)."""
 
@@ -579,8 +794,14 @@ def build_coder_prompt(
         {token_handoff_path}가 존재하면 인계 체크리스트를 우선 반영하세요.
         {publish_handoff_path}가 존재하면 퍼블리셔 인계사항을 우선 반영하세요.
         {review_path}가 존재하고 비어있지 않으면 TODO 항목을 반영하세요.
+        {improvement_plan_path}가 존재하고 비어있지 않으면 개선 전략과 scope restriction을 우선 반영하세요.
+        {improvement_loop_state_path}가 존재하면 strategy / rollback / principle enforcement 신호를 참고하세요.
+        {next_improvement_tasks_path}가 존재하고 비어있지 않으면 listed task를 우선순위대로 처리하세요.
 
         Requirements:
+        - 아래 운영 원칙을 따른다.
+        {OPERATING_PRINCIPLES_BRIEF}
+        {OPERATING_ENFORCEMENT_BRIEF}
         - 코드 변경은 이 저장소에 직접 적용.
         - 커밋 메시지와 로그 설명은 간결하게 유지.
         - PR 자동 머지는 금지.
@@ -593,16 +814,20 @@ def build_coder_prompt(
         - web 분류 작업은 React 또는 Nuxt 기반으로 구현.
         - api 구현이 필요하면 FastAPI를 사용.
         - DESIGN_SYSTEM.md에 명시된 WOW Point 1개를 반드시 구현.
+        - NEXT_IMPROVEMENT_TASKS.json의 `scope_restriction`이 `P1_only`이면 P0/P1 작업만 수행.
+        - improvement strategy가 `quality_hardening`이면 안정성/테스트/에러/빈/로딩 상태 보강을 우선.
+        - improvement strategy가 `narrow_scope_stabilization`이면 신규 기능 추가보다 기존 품질 안정화 우선.
         - 회귀(regression) 유발 금지.
         - 보안 민감정보 하드코딩 금지.
         - 실패 시 우회가 아닌 원인 기반 수정 우선.
 
         개발 체크리스트:
-        1. 요구사항 충족: SPEC/PLAN 범위를 벗어나지 않았는가?
+        1. 요구사항 충족: SPEC/PLAN/MVP_SCOPE 범위를 벗어나지 않았는가?
         2. UI 일관성: 라이트/다크, 반응형, 접근성이 유지되는가?
-        3. 안정성: 예외/에러/빈 상태 처리가 포함되는가?
+        3. 안정성: 예외/에러/빈 상태/로딩 상태 처리가 포함되는가?
         4. 검증성: 변경 사항을 확인할 테스트/실행 방법이 있는가?
         5. 유지보수성: 최소 변경으로 명확한 구조를 유지했는가?
+        6. 반복 방지: 같은 문제를 기계적으로 다시 수정하는 패턴이 아닌가?
         """
     ).strip() + "\n\n" + SEARCH_TOOL_GUIDE + "\n"
 
@@ -914,7 +1139,12 @@ def build_reviewer_prompt(spec_path: str, plan_path: str, review_path: str) -> s
         - 반드시 한국어로 작성.
         - 문서명과 카테고리 명칭(예: REVIEW, TODO, Functional bugs)은 영문 유지.
         - 상세 설명은 한국어로 작성.
+        - 아래 운영 원칙을 따른다.
+        {OPERATING_PRINCIPLES_BRIEF}
+        {OPERATING_ENFORCEMENT_BRIEF}
         - 실행/재현 예시에서 포트가 나오면 3100번대만 사용.
+        - 같은 문제의 반복 여부와 품질 개선 정체 여부를 반드시 지적한다.
+        - "코드가 돌아간다"는 이유만으로 합격 처리하지 말고 제품 품질 기준으로 판단한다.
         - markdown 본문만 출력하고 작업 과정/내부 추론/메타 코멘트 금지.
         - 출력 내 후속 질문 금지.
         """

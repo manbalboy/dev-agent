@@ -35,6 +35,8 @@ class AppSettings:
     tester_secondary_name: str
     command_config: Path
     worker_poll_seconds: int
+    worker_stale_running_seconds: int
+    worker_max_auto_recoveries: int
     default_branch: str
     enable_escalation: bool
     enable_stage_md_commits: bool
@@ -84,6 +86,14 @@ class AppSettings:
 
         max_retries = _read_int_env("AGENTHUB_MAX_RETRIES", default=3)
         worker_poll_seconds = _read_int_env("AGENTHUB_WORKER_POLL_SECONDS", default=5)
+        worker_stale_running_seconds = _read_int_env(
+            "AGENTHUB_WORKER_STALE_RUNNING_SECONDS",
+            default=1800,
+        )
+        worker_max_auto_recoveries = _read_int_env(
+            "AGENTHUB_WORKER_MAX_AUTO_RECOVERIES",
+            default=2,
+        )
         test_command = os.getenv("AGENTHUB_TEST_COMMAND", "pytest -q")
         test_command_secondary = os.getenv("AGENTHUB_TEST_COMMAND_SECONDARY", test_command)
         test_command_implement = os.getenv("AGENTHUB_TEST_COMMAND_IMPLEMENT", test_command)
@@ -173,6 +183,8 @@ class AppSettings:
             tester_secondary_name=tester_secondary_name,
             command_config=Path(raw_command_config).resolve(),
             worker_poll_seconds=worker_poll_seconds,
+            worker_stale_running_seconds=worker_stale_running_seconds,
+            worker_max_auto_recoveries=worker_max_auto_recoveries,
             default_branch=default_branch,
             enable_escalation=enable_escalation,
             enable_stage_md_commits=enable_stage_md_commits,
