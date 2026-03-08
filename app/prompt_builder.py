@@ -552,6 +552,110 @@ def build_publisher_prompt(
     ).strip() + "\n\n" + SEARCH_TOOL_GUIDE + "\n"
 
 
+def build_copywriter_prompt(
+    *,
+    spec_path: str,
+    plan_path: str,
+    design_path: str,
+    publish_handoff_path: str,
+    copy_plan_path: str,
+    copy_deck_path: str,
+) -> str:
+    """Prompt text for copywriter step (Korean-first UX copy artifacts)."""
+
+    return dedent(
+        f"""
+        Goal: 카피라이터 단계 수행(고객 친화 한글 카피 설계 + 실제 문구 작성)
+
+        참고 자료:
+        - Spec: {spec_path}
+        - Plan: {plan_path}
+        - Design system: {design_path}
+        - Publish handoff: {publish_handoff_path}
+
+        필수 산출물:
+        1. {copy_plan_path}
+           - 기획 의도 요약(사용자/상황/행동 목표)
+           - 톤앤매너(쉽고 친근한 한국어 중심)
+           - 화면/기능별 카피 전략(헤드라인/보조문구/버튼/에러/빈상태)
+           - 금지 표현/주의 표현
+        2. {copy_deck_path}
+           - 실제 적용 가능한 한국어 카피 문구 모음
+           - 섹션별로 `원문(기존) -> 제안(개선)` 형식 포함
+           - CTA 버튼 문구는 짧고 명확하게(2~8자 권장)
+           - 에러/안내 문구는 해결 행동을 함께 제시
+
+        품질 기준:
+        - 초등학생도 이해 가능한 쉬운 단어 우선
+        - 과장/모호/중복 표현 최소화
+        - 기능 의도와 문구가 불일치하면 문구를 기능 의도에 맞춰 조정
+
+        출력 규칙:
+        - 반드시 한국어 중심(고유명사/파일명은 영문 가능)
+        - 작업 과정 설명 금지
+        - 산출물 본문만 작성
+        """
+    ).strip() + "\n\n" + SEARCH_TOOL_GUIDE + "\n"
+
+
+def build_documentation_prompt(
+    *,
+    spec_path: str,
+    plan_path: str,
+    review_path: str,
+    readme_path: str,
+    copyright_path: str,
+    development_guide_path: str,
+    documentation_plan_path: str,
+) -> str:
+    """Prompt text for documentation stage (Claude-first, Codex fallback)."""
+
+    return dedent(
+        f"""
+        Goal: PR 전에 프로젝트 필수 개발 문서를 최신 상태로 작성/갱신한다.
+
+        참고 자료:
+        - Spec: {spec_path}
+        - Plan: {plan_path}
+        - Review: {review_path}
+
+        필수 산출물:
+        - {readme_path}
+        - {copyright_path}
+        - {development_guide_path}
+        - {documentation_plan_path}
+
+        내용 기준:
+        1) README.md
+           - 프로젝트 목적/핵심 기능
+           - 빠른 시작(설치, 실행, 테스트)
+           - 환경변수/디렉토리 구조 요약
+        2) COPYRIGHT.md
+           - 저작권 고지 템플릿
+           - 제3자 라이선스 확인 가이드(placeholder 허용)
+        3) DEVELOPMENT_GUIDE.md
+           - 개발 워크플로우(브랜치, 테스트, PR)
+           - 에이전트/오케스트레이션 사용 가이드
+           - 장애 대응 기본 체크리스트
+        4) DOCUMENTATION_PLAN.md
+           - 이번 라운드 문서 변경 요약
+           - 유지보수 시 갱신해야 할 섹션 목록
+
+        출력 형식(엄수):
+        - 아래 마커 포맷으로만 출력하고, 다른 설명 문장은 쓰지 않는다.
+        - 각 FILE 블록은 반드시 1개 이상 본문 줄을 포함한다.
+        <<<FILE:README.md>>>
+        ...본문...
+        <<<FILE:COPYRIGHT.md>>>
+        ...본문...
+        <<<FILE:DEVELOPMENT_GUIDE.md>>>
+        ...본문...
+        <<<FILE:_docs/DOCUMENTATION_PLAN.md>>>
+        ...본문...
+        """
+    ).strip() + "\n\n" + SEARCH_TOOL_GUIDE + "\n"
+
+
 def build_pr_summary_prompt(
     spec_path: str,
     plan_path: str,

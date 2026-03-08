@@ -67,6 +67,7 @@
         <div class="sub-tabs detail-tabs">
           <button type="button" class="sub-tab active" data-detail-tab="user">사용자 로그</button>
           <button type="button" class="sub-tab" data-detail-tab="debug">시스템 디버그</button>
+          <button type="button" class="sub-tab" data-detail-tab="workflow">워크플로우</button>
         </div>
         <section id="detail-tab-user" class="detail-tab-panel active">
           <div id="user-log-board" class="task-log-board">사용자 로그를 준비 중...</div>
@@ -82,6 +83,9 @@
             </div>
             <div id="terminal-log" class="terminal-log">로그를 불러오는 중...</div>
           </div>
+        </section>
+        <section id="detail-tab-workflow" class="detail-tab-panel">
+          <div id="workflow-lane-board" class="task-log-board">워크플로우를 준비 중...</div>
         </section>
       </section>
 
@@ -104,8 +108,12 @@
       let firstDebugLogLoaded = false;
       let firstUserLogLoaded = false;
       let stageSnapshotMap = new Map();
+      let stageLatestAttemptMap = new Map();
       let debugEntriesCache = [];
       let workspaceMdFilesCache = [];
+      let workspaceMdSignature = "";
+      let currentJobAttempt = 1;
+      let currentStageCode = "queued";
 
       function esc(value) {
         return String(value ?? "")
@@ -179,6 +187,7 @@
       function updateMeta(job) {
         document.getElementById("job-status").textContent = job.status;
         document.getElementById("job-stage").textContent = job.stage;
+        currentStageCode = String(job.stage || "queued");
         document.getElementById("job-app").textContent = job.app_code || "default";
         document.getElementById("job-track").textContent = job.track || "enhance";
         document.getElementById("job-attempt").textContent = `${job.attempt} / ${job.max_attempts}`;
@@ -349,6 +358,8 @@
           write_spec: "스펙 작성",
           plan_with_gemini: "플랜 작성",
           design_with_codex: "디자인 설계",
+          copywriter_task: "카피라이팅",
+          documentation_task: "기술 문서 작성",
           implement_with_codex: "구현",
           summarize_code_changes: "코드 변경 요약",
           test_after_implement: "구현 후 테스트",
@@ -375,6 +386,8 @@
           plan_with_gemini: "PLANNER",
           review_with_gemini: "REVIEWER",
           design_with_codex: "DESIGNER",
+          copywriter_task: "COPYWRITER",
+          documentation_task: "TECH_WRITER",
           implement_with_codex: "CODER",
           fix_with_codex: "CODER",
           summarize_code_changes: "COPILOT",
@@ -400,6 +413,8 @@
           PLANNER: "플래너",
           REVIEWER: "리뷰어",
           DESIGNER: "디자이너",
+          COPYWRITER: "카피라이터",
+          TECH_WRITER: "기술 문서 작성가",
           TESTER_GPT: "테스터(gpt)",
           TESTER_GEMINI: "테스터(gemini)",
           TESTER: "테스터",
@@ -719,14 +734,166 @@
         `;
       }
 
+      function workflowNodeLabel(nodeType) {
+        const map = {
+          gh_read_issue: "이슈 읽기",
+          write_spec: "SPEC 작성",
+          gemini_plan: "플랜 작성",
+          designer_task: "디자인 시스템 기획",
+          publisher_task: "퍼블리싱",
+          copywriter_task: "카피라이팅",
+          documentation_task: "기술 문서 작성",
+          codex_implement: "개발 구현",
+          code_change_summary: "코드 변경 요약",
+          test_after_implement: "1차 기능 테스트",
+          tester_run_e2e: "E2E/타입별 테스트",
+          ux_e2e_review: "UX E2E 검수",
+          coder_fix_from_test_report: "리포트 기반 수정",
+          gemini_review: "리뷰",
+          tester_retest_e2e: "E2E 재테스트",
+          commit_fix: "최종 커밋",
+          push_branch: "브랜치 푸시",
+          create_pr: "PR 생성",
+        };
+        return map[String(nodeType || "").trim()] || String(nodeType || "unknown");
+      }
+
+      function defaultWorkflowNodeOrder() {
+        return [
+          "gh_read_issue",
+          "write_spec",
+          "gemini_plan",
+          "designer_task",
+          "publisher_task",
+          "copywriter_task",
+          "gemini_plan",
+          "codex_implement",
+          "code_change_summary",
+          "test_after_implement",
+          "tester_run_e2e",
+          "ux_e2e_review",
+          "coder_fix_from_test_report",
+          "tester_run_e2e",
+          "gemini_review",
+          "gemini_plan",
+          "coder_fix_from_test_report",
+          "tester_retest_e2e",
+          "gemini_review",
+          "commit_fix",
+          "documentation_task",
+          "push_branch",
+          "create_pr",
+        ];
+      }
+
+      function stageToWorkflowNode(stageCode) {
+        const code = String(stageCode || "").trim().toLowerCase();
+        const map = {
+          queued: "gh_read_issue",
+          prepare_repo: "gh_read_issue",
+          read_issue: "gh_read_issue",
+          write_spec: "write_spec",
+          plan_with_gemini: "gemini_plan",
+          design_with_codex: "designer_task",
+          publisher_task: "publisher_task",
+          copywriter_task: "copywriter_task",
+          documentation_task: "documentation_task",
+          implement_with_codex: "codex_implement",
+          summarize_code_changes: "code_change_summary",
+          test_after_implement: "test_after_implement",
+          ux_e2e_review: "ux_e2e_review",
+          review_with_gemini: "gemini_review",
+          fix_with_codex: "coder_fix_from_test_report",
+          test_after_fix: "tester_retest_e2e",
+          commit_fix: "commit_fix",
+          push_branch: "push_branch",
+          create_pr: "create_pr",
+          done: "create_pr",
+          failed: "gemini_review",
+        };
+        return map[code] || "gh_read_issue";
+      }
+
+      function currentWorkflowNodeFromLogs(entriesNewestFirst) {
+        for (const entry of entriesNewestFirst || []) {
+          const m = String(entry.message || "").match(/^Workflow node start:\s+\S+\s+\(([^)]+)\)/);
+          if (m) return m[1];
+        }
+        return "";
+      }
+
+      function visitedWorkflowNodes(entriesNewestFirst) {
+        const nodes = [];
+        const seen = new Set();
+        const chronological = [...(entriesNewestFirst || [])].reverse();
+        for (const entry of chronological) {
+          const m = String(entry.message || "").match(/^Workflow node start:\s+\S+\s+\(([^)]+)\)/);
+          if (!m) continue;
+          const node = m[1];
+          const key = `${node}:${nodes.length}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            nodes.push(node);
+          }
+        }
+        return nodes;
+      }
+
+      function renderWorkflowLane(entriesNewestFirst, stageCode) {
+        const board = document.getElementById("workflow-lane-board");
+        if (!board) return;
+        const order = defaultWorkflowNodeOrder();
+        const visited = visitedWorkflowNodes(entriesNewestFirst);
+        const current = currentWorkflowNodeFromLogs(entriesNewestFirst) || stageToWorkflowNode(stageCode);
+        const currentIndex = Math.max(0, order.findIndex((node) => node === current));
+        const doneCount = Math.max(0, currentIndex);
+        const progressPct = Math.max(0, Math.min(100, Math.round((doneCount / Math.max(1, order.length)) * 100)));
+
+        const rows = order.map((node, idx) => {
+          const label = workflowNodeLabel(node);
+          const matchedVisited = visited.includes(node);
+          const isCurrent = idx === currentIndex;
+          const isDone = !isCurrent && (matchedVisited || idx < currentIndex);
+          const status = isCurrent ? "현재" : isDone ? "완료" : "대기";
+          const statusClass = isCurrent ? "running" : isDone ? "done" : "queued";
+          return `<li class="workflow-lane-item ${statusClass}">
+            <span class="workflow-lane-index">${idx + 1}</span>
+            <span class="workflow-lane-label">${esc(label)}</span>
+            <span class="workflow-lane-state badge status-${statusClass}">${esc(status)}</span>
+          </li>`;
+        }).join("");
+
+        board.innerHTML = `<article class="task-log-card user-log-card">
+          <header class="task-log-head">
+            <div class="task-log-title">
+              <strong>워크플로우 진행 상태</strong>
+              <span class="hint">현재 단계: ${esc(workflowNodeLabel(current))}</span>
+            </div>
+          </header>
+          <section class="stage-snapshot">
+            <div class="workflow-lane-summary">
+              <span>진행률 <strong>${progressPct}%</strong></span>
+              <span>완료 <strong>${doneCount}</strong> / 전체 <strong>${order.length}</strong></span>
+            </div>
+            <div class="workflow-lane-progress"><span style="width:${progressPct}%"></span></div>
+            <ul class="workflow-lane-list">${rows}</ul>
+          </section>
+        </article>`;
+      }
+
       function buildStageSnapshotMap(snapshots) {
         const map = new Map();
+        stageLatestAttemptMap = new Map();
         for (const item of snapshots || []) {
           const attempt = Number(item.attempt || 0);
           const stage = String(item.stage || "").trim();
           if (!attempt || !stage) continue;
           const key = `attempt:${attempt}|stage:${stage}`;
           map.set(key, item);
+          const prev = Number(stageLatestAttemptMap.get(stage) || 0);
+          if (attempt > prev) {
+            stageLatestAttemptMap.set(stage, attempt);
+          }
         }
         return map;
       }
@@ -858,7 +1025,6 @@
               actor,
               groups: [],
               workflowStages: new Set(),
-              documents: new Map(),
               tools: new Map(),
               progress: { running: 0, done: 0, failed: 0, pending: 0 },
             });
@@ -873,43 +1039,6 @@
           else if (progress === "진행중") bucket.progress.running += 1;
           else bucket.progress.pending += 1;
 
-          const snapshot = stageSnapshotMap.get(`${group.attempt}|${group.stage}`);
-          if (!snapshot) continue;
-
-          const mdFiles = Array.isArray(snapshot.md_files) ? snapshot.md_files : [];
-          for (const item of mdFiles) {
-            const name = String(item.path || "").trim();
-            const content = String(item.content || "");
-            if (!name) continue;
-            const key = `md:${name}`;
-            if (!bucket.documents.has(key)) {
-              bucket.documents.set(key, {
-                name,
-                content,
-                stage: stageDisplayName(stageCode),
-                attempt: String(group.attempt || "").replace(/^attempt:/, ""),
-                source: "md_snapshot",
-              });
-            }
-          }
-
-          const fileSnapshots = Array.isArray(snapshot.file_snapshots) ? snapshot.file_snapshots : [];
-          for (const item of fileSnapshots) {
-            const name = String(item.path || "").trim();
-            const content = String(item.content || "");
-            const binary = Boolean(item.binary);
-            if (!name || !content || binary) continue;
-            const key = `file:${name}`;
-            if (!bucket.documents.has(key)) {
-              bucket.documents.set(key, {
-                name,
-                content,
-                stage: stageDisplayName(stageCode),
-                attempt: String(group.attempt || "").replace(/^attempt:/, ""),
-                source: "file_snapshot",
-              });
-            }
-          }
         }
 
         for (const entry of debugEntriesCache || []) {
@@ -921,18 +1050,6 @@
           bucket.tools.set(tool, (bucket.tools.get(tool) || 0) + 1);
         }
 
-        const workspaceDocs = Array.isArray(workspaceMdFilesCache) ? workspaceMdFilesCache : [];
-        const workspaceDocsHtml = workspaceDocs.length
-          ? workspaceDocs.map((doc, index) => {
-              const name = String(doc.name || "unknown.md");
-              const content = String(doc.content || "");
-              return `<details class="snapshot-file" ${index === 0 ? "open" : ""}>
-                <summary>${esc(name)}</summary>
-                <pre class="snapshot-content">${esc(content)}</pre>
-              </details>`;
-            }).join("")
-          : `<p class="snapshot-empty">워크스페이스 문서가 없습니다.</p>`;
-
         const roleCards = Array.from(roleMap.values());
         const roleCardsHtml = roleCards.map((role, index) => {
           const workflow = Array.from(role.workflowStages.values());
@@ -940,26 +1057,43 @@
             ? `<ol class="failure-list">${workflow.map((stage) => `<li class="failure-item"><span class="failure-text">${esc(stage)}</span></li>`).join("")}</ol>`
             : `<p class="snapshot-empty">워크플로우 단계 정보가 없습니다.</p>`;
 
-          const groupRows = role.groups
+          const latestGroups = role.groups.slice(0, 1);
+          const groupRows = latestGroups
             .map((group) => {
               const stageCode = String(group.stage || "").replace(/^stage:/, "");
               const stageLabel = stageDisplayName(stageCode);
               const attemptLabel = String(group.attempt || "attempt:0").replace(/^attempt:/, "");
               const progress = summarizeGroupProgress(group);
+              const snapshot = stageSnapshotMap.get(`${group.attempt}|${group.stage}`);
+              const changedRaw = Array.isArray(snapshot && snapshot.changed_files)
+                ? snapshot.changed_files
+                : [];
+              const changedMdPaths = changedRaw
+                .map((line) => String(line || "").replace(/^[A-Z?]{1,2}\s+/, "").trim())
+                .filter((path) => path.toLowerCase().endsWith(".md"));
+              const mdFiles = Array.isArray(snapshot && snapshot.md_files) ? snapshot.md_files : [];
+              const changedSet = new Set(changedMdPaths);
+              const stageDocs = mdFiles.filter((item) => changedSet.has(String(item.path || "").trim()));
+              const docsHtml = stageDocs.length
+                ? stageDocs.map((doc) => {
+                    const name = String(doc.path || "unknown.md");
+                    const content = String(doc.content || "");
+                    return `<details class="snapshot-file" open>
+                      <summary>${esc(name)}</summary>
+                      <pre class="snapshot-content">${esc(content)}</pre>
+                    </details>`;
+                  }).join("")
+                : `<p class="snapshot-empty">이 단계에서 생성/수정된 문서가 없습니다.</p>`;
               return `<li class="failure-item">
                 <span class="failure-type">${esc(progress)}</span>
                 <span class="failure-text">시도 ${esc(attemptLabel)} · ${esc(stageLabel)} · 로그 ${group.entries.length}줄</span>
+                <section class="stage-snapshot">
+                  <h4>해당 시점 생성 문서</h4>
+                  ${docsHtml}
+                </section>
               </li>`;
             })
             .join("");
-
-          const docs = Array.from(role.documents.values());
-          const docsHtml = docs.length
-            ? docs.map((doc) => `<details class="snapshot-file" ${index === 0 ? "open" : ""}>
-                <summary>${esc(doc.name)} <span class="hint">(${esc(doc.stage)} · 시도 ${esc(doc.attempt)})</span></summary>
-                <pre class="snapshot-content">${esc(doc.content)}</pre>
-              </details>`).join("")
-            : `<p class="snapshot-empty">생성된 문서가 없습니다.</p>`;
 
           const tools = Array.from(role.tools.entries()).sort((a, b) => b[1] - a[1]);
           const toolsHtml = tools.length
@@ -973,45 +1107,27 @@
                 <span class="hint">진행중 ${role.progress.running} · 완료 ${role.progress.done} · 실패 ${role.progress.failed}</span>
               </div>
             </header>
-            <details class="stage-snapshot">
+            <details class="stage-snapshot" open>
               <summary>도구 사용 현황</summary>
               ${toolsHtml}
             </details>
-            <details class="stage-snapshot" ${index === 0 ? "open" : ""}>
+            <details class="stage-snapshot" open>
               <summary>역할 워크플로우</summary>
               ${workflowHtml}
             </details>
-            <details class="stage-snapshot">
+            <details class="stage-snapshot" open>
               <summary>역할 단계 수행 로그</summary>
               <ul class="failure-list">${groupRows || `<li class="failure-item"><span class="failure-text">기록 없음</span></li>`}</ul>
             </details>
-            <section class="stage-snapshot">
-              <h4>생성 문서 전체 내용</h4>
-              ${docsHtml}
-            </section>
           </article>`;
         }).join("");
 
-        board.innerHTML = `
-          <article class="task-log-card user-log-card">
-            <header class="task-log-head">
-              <div class="task-log-title">
-                <strong>최신 생성 문서 전체</strong>
-                <span class="hint">워크스페이스 기준 (_docs 포함)</span>
-              </div>
-            </header>
-            <section class="stage-snapshot">
-              <h4>문서 전체 본문</h4>
-              ${workspaceDocsHtml}
-            </section>
-          </article>
-          ${roleCardsHtml}
-        `;
+        board.innerHTML = roleCardsHtml;
       }
 
       function buildGroupedEntries(entriesNewestFirst) {
         const chronological = [...entriesNewestFirst].reverse();
-        let currentAttempt = "attempt:0";
+        let currentAttempt = `attempt:${Math.max(1, Number(currentJobAttempt || 1))}`;
         let currentStage = "stage:queued";
 
         for (const entry of chronological) {
@@ -1030,6 +1146,15 @@
         const grouped = [];
         const map = new Map();
         for (const entry of entriesNewestFirst) {
+          if (entry.attempt === "attempt:0") {
+            const stageCode = String(entry.stage || "").replace(/^stage:/, "");
+            const inferred = Number(stageLatestAttemptMap.get(stageCode) || 0);
+            if (inferred > 0) {
+              entry.attempt = `attempt:${inferred}`;
+            } else {
+              entry.attempt = `attempt:${Math.max(1, Number(currentJobAttempt || 1))}`;
+            }
+          }
           const key = `${entry.attempt}|${entry.stage}`;
           if (!map.has(key)) {
             const group = { key, attempt: entry.attempt, stage: entry.stage, entries: [] };
@@ -1090,9 +1215,10 @@
         }
         renderFailureSummary(entries);
         renderWorkflowInsights(entries);
+        renderWorkflowLane(entries, currentStageCode);
         const groups = buildGroupedEntries(entries);
         terminal.innerHTML = groups
-          .map((group, index) => {
+          .map((group) => {
             const rows = group.entries
               .map((entry) => {
                 const type = classifyLogEntry(entry);
@@ -1107,7 +1233,7 @@
               })
               .join("");
             const snapshotHtml = renderGroupSnapshot(group);
-            return `<details class="log-group" ${index < 2 ? "open" : ""}>
+            return `<details class="log-group" open>
               <summary>${esc(summarizeGroup(group))}</summary>
               <div class="log-group-body">${rows}${snapshotHtml}</div>
             </details>`;
@@ -1129,13 +1255,26 @@
         renderUserLogBoard(groups);
       }
 
+      function buildWorkspaceMdSignature(files) {
+        const list = Array.isArray(files) ? files : [];
+        return list
+          .map((item) => {
+            const name = String(item?.name || "");
+            const content = String(item?.content || "");
+            return `${name}:${content.length}`;
+          })
+          .sort()
+          .join("|");
+      }
+
       function bindDetailTabs() {
         const tabs = Array.from(document.querySelectorAll("[data-detail-tab]"));
         const panels = {
           user: document.getElementById("detail-tab-user"),
           debug: document.getElementById("detail-tab-debug"),
+          workflow: document.getElementById("detail-tab-workflow"),
         };
-        if (!tabs.length || !panels.user || !panels.debug) return;
+        if (!tabs.length || !panels.user || !panels.debug || !panels.workflow) return;
 
         const activate = (tabName) => {
           tabs.forEach((button) => {
@@ -1196,9 +1335,14 @@
           if (!response.ok) return;
           const payload = await response.json();
           updateMeta(payload.job);
+          currentJobAttempt = Math.max(1, Number((payload.job || {}).attempt || 1));
           stageSnapshotMap = buildStageSnapshotMap(payload.stage_md_snapshots || []);
-          workspaceMdFilesCache = Array.isArray(payload.md_files) ? payload.md_files : [];
-          if (firstUserLogLoaded && lastUserLogText) {
+          const nextMdFiles = Array.isArray(payload.md_files) ? payload.md_files : [];
+          const nextMdSignature = buildWorkspaceMdSignature(nextMdFiles);
+          const docsChanged = nextMdSignature !== workspaceMdSignature;
+          workspaceMdFilesCache = nextMdFiles;
+          workspaceMdSignature = nextMdSignature;
+          if (docsChanged && firstUserLogLoaded && lastUserLogText) {
             renderUserLog(lastUserLogText);
           }
           const stopState = document.getElementById("stop-state");

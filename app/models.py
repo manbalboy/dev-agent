@@ -26,6 +26,8 @@ class JobStage(str, Enum):
     WRITE_SPEC = "write_spec"
     PLAN_WITH_GEMINI = "plan_with_gemini"
     DESIGN_WITH_CODEX = "design_with_codex"
+    COPYWRITER_TASK = "copywriter_task"
+    DOCUMENTATION_TASK = "documentation_task"
     IMPLEMENT_WITH_CODEX = "implement_with_codex"
     SUMMARIZE_CODE_CHANGES = "summarize_code_changes"
     TEST_AFTER_IMPLEMENT = "test_after_implement"

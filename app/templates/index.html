@@ -60,6 +60,10 @@
           <article class="stat-card"><h2>완료</h2><p id="stat-done">0</p></article>
           <article class="stat-card"><h2>실패</h2><p id="stat-failed">0</p></article>
         </section>
+        <div class="issue-form-actions">
+          <button id="requeue-failed-button" class="action-button" type="button">실패 전체 재큐잉</button>
+          <p id="requeue-failed-result" class="hint"></p>
+        </div>
 
         <table class="jobs-table">
           <thead>
@@ -70,6 +74,7 @@
               <th>단계</th>
               <th>이슈</th>
               <th>PR</th>
+              <th>작업</th>
               <th>갱신 시각</th>
             </tr>
           </thead>
@@ -84,6 +89,13 @@
               <td>
                 {% if job.pr_url %}
                 <a href="{{ job.pr_url }}" target="_blank" rel="noreferrer">PR</a>
+                {% else %}
+                -
+                {% endif %}
+              </td>
+              <td>
+                {% if job.status == "failed" %}
+                <button type="button" class="action-button job-requeue" data-job-id="{{ job.job_id }}">재큐잉</button>
                 {% else %}
                 -
                 {% endif %}
@@ -507,6 +519,7 @@
               <td>${esc(job.stage)}</td>
               <td><a href="${esc(job.issue_url)}" target="_blank" rel="noreferrer">#${esc(job.issue_number)}</a></td>
               <td>${prCell}</td>
+              <td>${job.status === "failed" ? `<button type="button" class="action-button job-requeue" data-job-id="${esc(job.job_id)}">재큐잉</button>` : "-"}</td>
               <td>${esc(formatKstDateTime(job.updated_at))}</td>
             </tr>`;
           })
@@ -541,6 +554,13 @@
 
       function setRolePresetResult(message, isError = false) {
         const node = document.getElementById("role-preset-result");
+        if (!node) return;
+        node.textContent = message;
+        node.classList.toggle("text-error", isError);
+      }
+
+      function setRequeueFailedResult(message, isError = false) {
+        const node = document.getElementById("requeue-failed-result");
         if (!node) return;
         node.textContent = message;
         node.classList.toggle("text-error", isError);
@@ -1399,6 +1419,53 @@
         }
       }
 
+      function bindRequeueActions() {
+        const bulkButton = document.getElementById("requeue-failed-button");
+        bulkButton?.addEventListener("click", async () => {
+          bulkButton.disabled = true;
+          setRequeueFailedResult("실패 작업 재큐잉 중...");
+          try {
+            const response = await fetch("/api/jobs/requeue-failed", { method: "POST" });
+            const payload = await response.json();
+            if (!response.ok) {
+              setRequeueFailedResult(payload.detail || "실패 전체 재큐잉 실패", true);
+              return;
+            }
+            setRequeueFailedResult(`재큐잉 완료: ${payload.requeued || 0}건`);
+            await refreshJobs();
+          } catch {
+            setRequeueFailedResult("네트워크 오류로 재큐잉 실패", true);
+          } finally {
+            bulkButton.disabled = false;
+          }
+        });
+
+        const tableBody = document.getElementById("jobs-table-body");
+        tableBody?.addEventListener("click", async (event) => {
+          const target = event.target;
+          const button = target instanceof Element ? target.closest(".job-requeue") : null;
+          if (!(button instanceof HTMLButtonElement)) return;
+          const jobId = button.getAttribute("data-job-id");
+          if (!jobId) return;
+          button.disabled = true;
+          setRequeueFailedResult(`재큐잉 요청 중: ${jobId.slice(0, 8)}`);
+          try {
+            const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/requeue`, { method: "POST" });
+            const payload = await response.json();
+            if (!response.ok || !payload.requeued) {
+              setRequeueFailedResult(payload.detail || "재큐잉 실패", true);
+              return;
+            }
+            setRequeueFailedResult(`재큐잉 완료: ${jobId.slice(0, 8)}`);
+            await refreshJobs();
+          } catch {
+            setRequeueFailedResult("네트워크 오류로 재큐잉 실패", true);
+          } finally {
+            button.disabled = false;
+          }
+        });
+      }
+
       initThemeToggle();
       bindMainTabs();
       bindSettingsTabs();
@@ -1409,6 +1476,7 @@
       bindAgentModeTabs();
       bindAgentConfigForm();
       bindAssistantForm();
+      bindRequeueActions();
       hydrateRenderedTimes();
       applySafeTemplateToEasyFields();
       renderAssistantMessages();

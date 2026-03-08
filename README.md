@@ -180,6 +180,7 @@ Worker는 아래 순서를 **항상 같은 방식**으로 실행합니다.
 - `AGENTHUB_PLANNER_GRAPH_MAX_ROUNDS=1..5` (기본 3)
 - `AGENTHUB_HARD_GATE_MAX_ATTEMPTS=1..5` (기본 3)
 - `AGENTHUB_HARD_GATE_TIMEBOX_SECONDS=120..7200` (기본 1200)
+- `AGENTHUB_TEST_COMMAND_TIMEOUT_SECONDS=0..7200` (기본 900, 0이면 비활성화)
 
 테스트 단계는 하드 게이트로 동작합니다.
 - 실패 시 제한된 횟수 안에서만 수정/재테스트를 수행

@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import shlex
 import socket
 import time
@@ -30,7 +31,9 @@ from app.config import AppSettings
 from app.models import JobRecord, JobStage, JobStatus, utc_now_iso
 from app.prompt_builder import (
     build_commit_message_prompt,
+    build_copywriter_prompt,
     build_coder_prompt,
+    build_documentation_prompt,
     build_designer_prompt,
     build_planner_prompt,
     build_publisher_prompt,
@@ -428,6 +431,10 @@ class Orchestrator:
         self._commit_markdown_changes_after_stage(
             job, repository_path, JobStage.COMMIT_FIX.value, log_path
         )
+        self._stage_documentation_with_claude(job, repository_path, paths, log_path)
+        self._commit_markdown_changes_after_stage(
+            job, repository_path, JobStage.DOCUMENTATION_TASK.value, log_path
+        )
 
         self._stage_push_branch(job, repository_path, log_path)
         self._stage_create_pr(job, repository_path, paths, log_path)
@@ -505,29 +512,35 @@ class Orchestrator:
                     self._lock_design_system_decision(repository_path, paths, log_path)
             elif node_type == "publisher_task":
                 self._stage_publish_with_codex(job, repository_path, paths, log_path)
+            elif node_type == "copywriter_task":
+                self._stage_copywriter_with_codex(job, repository_path, paths, log_path)
+            elif node_type == "documentation_task":
+                self._stage_documentation_with_claude(job, repository_path, paths, log_path)
             elif node_type == "codex_implement":
                 self._stage_implement_with_codex(job, repository_path, paths, log_path)
             elif node_type == "code_change_summary":
                 self._stage_summarize_code_changes(job, repository_path, log_path)
             elif node_type == "test_after_implement":
                 app_type = self._resolve_app_type(repository_path, paths)
-                self._run_test_hard_gate(
+                self._run_test_gate_by_policy(
                     job=job,
                     repository_path=repository_path,
                     paths=paths,
                     log_path=log_path,
                     stage=JobStage.TEST_AFTER_IMPLEMENT,
                     gate_label=f"after_implement_{app_type}",
+                    app_type=app_type,
                 )
             elif node_type == "tester_task":
                 app_type = self._resolve_app_type(repository_path, paths)
-                self._run_test_hard_gate(
+                self._run_test_gate_by_policy(
                     job=job,
                     repository_path=repository_path,
                     paths=paths,
                     log_path=log_path,
                     stage=JobStage.TEST_AFTER_IMPLEMENT,
                     gate_label=f"tester_task_{app_type}",
+                    app_type=app_type,
                 )
             elif node_type == "commit_implement":
                 self._stage_commit(job, repository_path, JobStage.COMMIT_IMPLEMENT, log_path, "feat")
@@ -539,13 +552,14 @@ class Orchestrator:
                 self._stage_fix_with_codex(job, repository_path, paths, log_path)
             elif node_type == "test_after_fix":
                 app_type = self._resolve_app_type(repository_path, paths)
-                self._run_test_hard_gate(
+                self._run_test_gate_by_policy(
                     job=job,
                     repository_path=repository_path,
                     paths=paths,
                     log_path=log_path,
                     stage=JobStage.TEST_AFTER_FIX,
                     gate_label=f"after_fix_{app_type}",
+                    app_type=app_type,
                 )
             elif node_type == "tester_run_e2e":
                 app_type = self._resolve_app_type(repository_path, paths)
@@ -562,15 +576,16 @@ class Orchestrator:
                     self._append_actor_log(
                         log_path,
                         "ORCHESTRATOR",
-                        f"tester_run_e2e routed for app_type={app_type}. Running non-web hard gate tests.",
+                        f"tester_run_e2e routed for app_type={app_type}. Running non-web test gate by policy.",
                     )
-                    self._run_test_hard_gate(
+                    self._run_test_gate_by_policy(
                         job=job,
                         repository_path=repository_path,
                         paths=paths,
                         log_path=log_path,
                         stage=JobStage.TEST_AFTER_FIX,
                         gate_label=f"tester_nonweb_{app_type}",
+                        app_type=app_type,
                     )
             elif node_type == "ux_e2e_review":
                 app_type = self._resolve_app_type(repository_path, paths)
@@ -580,13 +595,14 @@ class Orchestrator:
                     self._stage_skip_ux_review_for_non_web(job, repository_path, paths, log_path, app_type=app_type)
             elif node_type == "test_after_fix_final":
                 app_type = self._resolve_app_type(repository_path, paths)
-                self._run_test_hard_gate(
+                self._run_test_gate_by_policy(
                     job=job,
                     repository_path=repository_path,
                     paths=paths,
                     log_path=log_path,
                     stage=JobStage.TEST_AFTER_FIX,
                     gate_label=f"after_fix_final_{app_type}",
+                    app_type=app_type,
                 )
             elif node_type == "tester_retest_e2e":
                 app_type = self._resolve_app_type(repository_path, paths)
@@ -600,13 +616,14 @@ class Orchestrator:
                         gate_label="tester_retest_e2e_web",
                     )
                 else:
-                    self._run_test_hard_gate(
+                    self._run_test_gate_by_policy(
                         job=job,
                         repository_path=repository_path,
                         paths=paths,
                         log_path=log_path,
                         stage=JobStage.TEST_AFTER_FIX,
                         gate_label=f"tester_retest_nonweb_{app_type}",
+                        app_type=app_type,
                     )
             elif node_type == "commit_fix":
                 self._stage_commit(job, repository_path, JobStage.COMMIT_FIX, log_path, "fix")
@@ -795,7 +812,54 @@ class Orchestrator:
                 purpose="fallback branch checkout",
             )
 
+        self._ensure_workspace_git_excludes(repository_path, log_path)
         return repository_path
+
+    def _ensure_workspace_git_excludes(self, repository_path: Path, log_path: Path) -> None:
+        """Apply one shared workspace ignore file to each cloned repository."""
+
+        shared_ignore = self.settings.workspace_dir / ".agenthub-global.gitignore"
+        patterns = [
+            "node_modules/",
+            "**/node_modules/",
+            ".venv/",
+            "**/.venv/",
+            "__pycache__/",
+            "**/__pycache__/",
+            "*.pyc",
+            ".pytest_cache/",
+            "**/.pytest_cache/",
+            ".mypy_cache/",
+            "**/.mypy_cache/",
+            ".next/",
+            "**/.next/",
+            ".turbo/",
+            "**/.turbo/",
+            "dist/",
+            "**/dist/",
+            "build/",
+            "**/build/",
+            ".DS_Store",
+            "*.log",
+        ]
+        desired = "\n".join(patterns).rstrip() + "\n"
+        current = ""
+        if shared_ignore.exists():
+            current = shared_ignore.read_text(encoding="utf-8", errors="replace")
+        if current != desired:
+            shared_ignore.parent.mkdir(parents=True, exist_ok=True)
+            shared_ignore.write_text(desired, encoding="utf-8")
+            self._append_log(log_path, f"Workspace shared ignore updated: {shared_ignore}")
+
+        self._run_shell(
+            command=(
+                f"git -C {shlex.quote(str(repository_path))} "
+                f"config --local core.excludesfile {shlex.quote(str(shared_ignore))}"
+            ),
+            cwd=repository_path,
+            log_path=log_path,
+            purpose="set workspace shared git excludes",
+        )
 
     def _stage_read_issue(
         self,
@@ -847,6 +911,12 @@ class Orchestrator:
         token_handoff_path = self._docs_file(repository_path, "TOKEN_HANDOFF.md")
         publish_checklist_path = self._docs_file(repository_path, "PUBLISH_CHECKLIST.md")
         publish_handoff_path = self._docs_file(repository_path, "PUBLISH_HANDOFF.md")
+        copy_plan_path = self._docs_file(repository_path, "COPYWRITING_PLAN.md")
+        copy_deck_path = self._docs_file(repository_path, "COPY_DECK.md")
+        documentation_plan_path = self._docs_file(repository_path, "DOCUMENTATION_PLAN.md")
+        readme_path = repository_path / "README.md"
+        copyright_path = repository_path / "COPYRIGHT.md"
+        development_guide_path = repository_path / "DEVELOPMENT_GUIDE.md"
         status_path = self._docs_file(repository_path, "STATUS.md")
 
         spec_content = build_spec_markdown(
@@ -964,6 +1034,12 @@ class Orchestrator:
             "token_handoff": token_handoff_path,
             "publish_checklist": publish_checklist_path,
             "publish_handoff": publish_handoff_path,
+            "copy_plan": copy_plan_path,
+            "copy_deck": copy_deck_path,
+            "documentation_plan": documentation_plan_path,
+            "readme": readme_path,
+            "copyright": copyright_path,
+            "development_guide": development_guide_path,
             "status": status_path,
         }
 
@@ -975,7 +1051,7 @@ class Orchestrator:
         log_path: Path,
         planning_mode: str = "general",
     ) -> None:
-        self._set_stage(job.job_id, JobStage.PLAN_WITH_GEMINI, log_path)
+        self._set_stage(job.job_id, JobStage.COPYWRITER_TASK, log_path)
 
         if not self._planner_graph_enabled():
             self._append_actor_log(
@@ -1482,6 +1558,182 @@ class Orchestrator:
         )
         self._ensure_publisher_artifacts(repository_path, paths, log_path)
 
+    def _stage_copywriter_with_codex(
+        self,
+        job: JobRecord,
+        repository_path: Path,
+        paths: Dict[str, Path],
+        log_path: Path,
+    ) -> None:
+        """Run copywriter step and produce customer-facing Korean copy docs."""
+
+        self._set_stage(job.job_id, JobStage.PLAN_WITH_GEMINI, log_path)
+        prompt_path = self._docs_file(repository_path, "CODER_PROMPT_COPYWRITER.md")
+        prompt_path.write_text(
+            build_copywriter_prompt(
+                spec_path=str(paths["spec"]),
+                plan_path=str(paths["plan"]),
+                design_path=str(paths["design"]),
+                publish_handoff_path=str(paths.get("publish_handoff", self._docs_file(repository_path, "PUBLISH_HANDOFF.md"))),
+                copy_plan_path=str(paths.get("copy_plan", self._docs_file(repository_path, "COPYWRITING_PLAN.md"))),
+                copy_deck_path=str(paths.get("copy_deck", self._docs_file(repository_path, "COPY_DECK.md"))),
+            ),
+            encoding="utf-8",
+        )
+        self.command_templates.run_template(
+            template_name=self._template_for_profile("coder"),
+            variables=self._build_template_variables(job, paths, prompt_path),
+            cwd=repository_path,
+            log_writer=self._actor_log_writer(log_path, "COPYWRITER"),
+        )
+        self._ensure_copywriter_artifacts(repository_path, paths, log_path)
+
+    def _stage_documentation_with_claude(
+        self,
+        job: JobRecord,
+        repository_path: Path,
+        paths: Dict[str, Path],
+        log_path: Path,
+    ) -> None:
+        """Run documentation stage with Claude first, then Codex fallback."""
+
+        self._set_stage(job.job_id, JobStage.DOCUMENTATION_TASK, log_path)
+        prompt_path = self._docs_file(repository_path, "DOCUMENTATION_PROMPT.md")
+        bundle_path = self._docs_file(repository_path, "DOCUMENTATION_BUNDLE.md")
+        prompt_path.write_text(
+            build_documentation_prompt(
+                spec_path=str(paths["spec"]),
+                plan_path=str(paths["plan"]),
+                review_path=str(paths["review"]),
+                readme_path=str(paths.get("readme", repository_path / "README.md")),
+                copyright_path=str(paths.get("copyright", repository_path / "COPYRIGHT.md")),
+                development_guide_path=str(
+                    paths.get("development_guide", repository_path / "DEVELOPMENT_GUIDE.md")
+                ),
+                documentation_plan_path=str(
+                    paths.get("documentation_plan", self._docs_file(repository_path, "DOCUMENTATION_PLAN.md"))
+                ),
+            ),
+            encoding="utf-8",
+        )
+
+        claude_templates = ["documentation_writer", "pr_summary", "commit_summary", "escalation"]
+        claude_error: Optional[str] = None
+        bundle_applied = False
+        for template_name in claude_templates:
+            resolved_template = self._template_for_profile(template_name)
+            if not self.command_templates.has_template(resolved_template):
+                continue
+            claude_vars = {
+                **self._build_template_variables(job, paths, prompt_path),
+                "docs_bundle_path": str(bundle_path),
+                "pr_summary_path": str(bundle_path),
+                "commit_message_path": str(bundle_path),
+            }
+            try:
+                result = self.command_templates.run_template(
+                    template_name=resolved_template,
+                    variables=claude_vars,
+                    cwd=repository_path,
+                    log_writer=self._actor_log_writer(log_path, "TECH_WRITER_CLAUDE"),
+                )
+                if not bundle_path.exists() and str(result.stdout).strip():
+                    bundle_path.write_text(str(result.stdout).strip() + "\n", encoding="utf-8")
+                bundle_applied = self._apply_documentation_bundle(repository_path, bundle_path, paths, log_path)
+                if bundle_applied:
+                    self._append_actor_log(
+                        log_path,
+                        "ORCHESTRATOR",
+                        f"Documentation generated by Claude template: {resolved_template}",
+                    )
+                    break
+            except CommandExecutionError as error:
+                claude_error = str(error)
+
+        if not bundle_applied:
+            if claude_error:
+                self._append_actor_log(
+                    log_path,
+                    "ORCHESTRATOR",
+                    f"Claude documentation step failed. Fallback to Codex: {claude_error}",
+                )
+            else:
+                self._append_actor_log(
+                    log_path,
+                    "ORCHESTRATOR",
+                    "Claude documentation template unavailable or output invalid. Fallback to Codex.",
+                )
+            fallback_prompt = self._docs_file(repository_path, "CODER_PROMPT_DOCUMENTATION_FALLBACK.md")
+            fallback_prompt.write_text(
+                (
+                    "Goal: 루트 기술 문서 3종과 문서 계획 파일을 최신화하세요.\n\n"
+                    f"- {paths.get('readme', repository_path / 'README.md')}\n"
+                    f"- {paths.get('copyright', repository_path / 'COPYRIGHT.md')}\n"
+                    f"- {paths.get('development_guide', repository_path / 'DEVELOPMENT_GUIDE.md')}\n"
+                    f"- {paths.get('documentation_plan', self._docs_file(repository_path, 'DOCUMENTATION_PLAN.md'))}\n\n"
+                    "규칙:\n"
+                    "- 한국어로 작성.\n"
+                    "- 프로젝트 구조/실행/테스트/운영 플로우를 반영.\n"
+                    "- 문서만 수정하고 불필요한 코드 변경 금지.\n"
+                ),
+                encoding="utf-8",
+            )
+            self.command_templates.run_template(
+                template_name=self._template_for_profile("coder"),
+                variables=self._build_template_variables(job, paths, fallback_prompt),
+                cwd=repository_path,
+                log_writer=self._actor_log_writer(log_path, "TECH_WRITER_CODEX"),
+            )
+
+        self._ensure_documentation_artifacts(repository_path, paths, log_path)
+
+    def _apply_documentation_bundle(
+        self,
+        repository_path: Path,
+        bundle_path: Path,
+        paths: Dict[str, Path],
+        log_path: Path,
+    ) -> bool:
+        """Parse Claude bundle output and write each target documentation file."""
+
+        if not bundle_path.exists():
+            return False
+        raw = bundle_path.read_text(encoding="utf-8", errors="replace")
+        pattern = re.compile(
+            r"(?ms)^<<<FILE:(?P<path>[^\n>]+)>>>\n(?P<body>.*?)(?=^<<<FILE:|\Z)"
+        )
+        matches = list(pattern.finditer(raw))
+        if not matches:
+            return False
+
+        allowed_targets = {
+            "README.md": paths.get("readme", repository_path / "README.md"),
+            "COPYRIGHT.md": paths.get("copyright", repository_path / "COPYRIGHT.md"),
+            "DEVELOPMENT_GUIDE.md": paths.get("development_guide", repository_path / "DEVELOPMENT_GUIDE.md"),
+            "_docs/DOCUMENTATION_PLAN.md": paths.get(
+                "documentation_plan", self._docs_file(repository_path, "DOCUMENTATION_PLAN.md")
+            ),
+        }
+        written_count = 0
+        for matched in matches:
+            key = str(matched.group("path") or "").strip()
+            target = allowed_targets.get(key)
+            if target is None:
+                continue
+            body = str(matched.group("body") or "").strip()
+            if not body:
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(body + "\n", encoding="utf-8")
+            written_count += 1
+        if written_count > 0:
+            self._append_actor_log(
+                log_path,
+                "ORCHESTRATOR",
+                f"Documentation bundle applied: {written_count} file(s)",
+            )
+        return written_count > 0
+
     def _stage_run_tests(
         self,
         job: JobRecord,
@@ -1492,6 +1744,7 @@ class Orchestrator:
         self._set_stage(job.job_id, stage, log_path)
         test_results: List[Dict[str, Any]] = []
         primary_command = self._resolve_test_command(stage, secondary=False)
+        primary_command = self._wrap_test_command_with_timeout(primary_command, log_path)
 
         primary_name = self.settings.tester_primary_name
         primary_result = self.shell_executor(
@@ -1517,6 +1770,7 @@ class Orchestrator:
 
         if self._is_long_track(job):
             secondary_command = self._resolve_test_command(stage, secondary=True)
+            secondary_command = self._wrap_test_command_with_timeout(secondary_command, log_path)
             secondary_name = self.settings.tester_secondary_name
             secondary_result = self.shell_executor(
                 command=secondary_command,
@@ -1595,11 +1849,49 @@ class Orchestrator:
 
             elapsed = int(time.monotonic() - start)
             if elapsed >= timebox_seconds:
-                raise CommandExecutionError(
-                    f"Hard gate '{gate_label}' timed out ({elapsed}s/{timebox_seconds}s). "
-                    "Next action: inspect latest test report and TEST_FAILURE_REASON file."
+                # Timeout is treated as non-fatal by policy. We analyze and continue.
+                self._run_failure_assistant(
+                    job=job,
+                    repository_path=repository_path,
+                    log_path=log_path,
+                    reason=(
+                        f"Hard gate timeout at {gate_label} ({elapsed}s/{timebox_seconds}s). "
+                        "Do not fail the run. Summarize root cause and next unblock actions."
+                    ),
                 )
+                self._append_actor_log(
+                    log_path,
+                    "ORCHESTRATOR",
+                    f"[SOFT_TIMEOUT:{gate_label}] timeout reached ({elapsed}s). Continuing workflow by policy.",
+                )
+                return
             if signature and signatures.get(signature, 0) >= 2:
+                if self._is_recovery_mode_enabled():
+                    recovered = self._try_recovery_flow(
+                        job=job,
+                        repository_path=repository_path,
+                        paths=paths,
+                        log_path=log_path,
+                        stage=stage,
+                        gate_label=gate_label,
+                        reason=(
+                            f"Hard gate repeated failure signature at {gate_label}. "
+                            "Analyze recoverability and attempt one recovery cycle."
+                        ),
+                    )
+                    if recovered:
+                        return
+                    self._append_actor_log(log_path, "ORCHESTRATOR", f"[RECOVERY_MODE:{gate_label}] not recovered. Continuing workflow by policy.")
+                    return
+                self._run_failure_assistant(
+                    job=job,
+                    repository_path=repository_path,
+                    log_path=log_path,
+                    reason=(
+                        f"Hard gate repeated failure signature at {gate_label}. "
+                        "Summarize root cause and concrete fix plan."
+                    ),
+                )
                 raise CommandExecutionError(
                     f"Hard gate '{gate_label}' stopped due to repeated failure signature. "
                     "Next action: resolve root cause before retrying."
@@ -1620,10 +1912,220 @@ class Orchestrator:
                 log_path,
             )
 
+        if self._is_recovery_mode_enabled():
+            recovered = self._try_recovery_flow(
+                job=job,
+                repository_path=repository_path,
+                paths=paths,
+                log_path=log_path,
+                stage=stage,
+                gate_label=gate_label,
+                reason=(
+                    f"Hard gate max attempts reached at {gate_label}. "
+                    "Analyze recoverability and attempt one recovery cycle."
+                ),
+            )
+            if recovered:
+                return
+            self._append_actor_log(log_path, "ORCHESTRATOR", f"[RECOVERY_MODE:{gate_label}] not recovered. Continuing workflow by policy.")
+            return
         raise CommandExecutionError(
             f"Hard gate '{gate_label}' failed after {max_attempts} attempts. "
             "Next action: inspect test reports and apply targeted fix."
         )
+
+    def _run_test_gate_by_policy(
+        self,
+        *,
+        job: JobRecord,
+        repository_path: Path,
+        paths: Dict[str, Path],
+        log_path: Path,
+        stage: JobStage,
+        gate_label: str,
+        app_type: str,
+    ) -> None:
+        """Run hard/soft test gate by policy. Default keeps non-web as soft gate."""
+
+        # Default policy keeps legacy behavior: do not stop pipeline on test gate failure.
+        policy = (os.getenv("AGENTHUB_TEST_GATE_POLICY", "soft") or "soft").strip().lower()
+        use_hard_gate = policy == "hard" or (policy == "mixed" and (app_type or "").strip().lower() == "web")
+        if policy in {"soft", "continue"}:
+            use_hard_gate = False
+
+        if use_hard_gate:
+            self._run_test_hard_gate(
+                job=job,
+                repository_path=repository_path,
+                paths=paths,
+                log_path=log_path,
+                stage=stage,
+                gate_label=gate_label,
+            )
+            return
+
+        passed = self._stage_run_tests(job, repository_path, stage, log_path)
+        if not passed:
+            self._append_actor_log(
+                log_path,
+                "ORCHESTRATOR",
+                f"[SOFT_GATE:{gate_label}] test failed but continuing by policy.",
+            )
+            if self._is_recovery_mode_enabled():
+                recovered = self._try_recovery_flow(
+                    job=job,
+                    repository_path=repository_path,
+                    paths=paths,
+                    log_path=log_path,
+                    stage=stage,
+                    gate_label=gate_label,
+                    reason=(
+                        f"Soft gate failure at {gate_label}. "
+                        "Analyze recoverability and attempt one recovery cycle."
+                    ),
+                )
+                if recovered:
+                    return
+            self._run_failure_assistant(
+                job=job,
+                repository_path=repository_path,
+                log_path=log_path,
+                reason=(
+                    f"Soft gate failure at {gate_label}. Workflow continues by policy. "
+                    "Analyze probable root cause and recommend next fixes."
+                ),
+            )
+
+    def _try_recovery_flow(
+        self,
+        *,
+        job: JobRecord,
+        repository_path: Path,
+        paths: Dict[str, Path],
+        log_path: Path,
+        stage: JobStage,
+        gate_label: str,
+        reason: str,
+    ) -> bool:
+        """Analyze recoverability and run one fix+retest cycle when worth trying."""
+
+        self._run_failure_assistant(
+            job=job,
+            repository_path=repository_path,
+            log_path=log_path,
+            reason=reason,
+        )
+        if not self._is_recoverable_failure(repository_path, stage):
+            self._append_actor_log(
+                log_path,
+                "ORCHESTRATOR",
+                f"[RECOVERY_MODE:{gate_label}] not recoverable by heuristic. Skip auto-recovery.",
+            )
+            return False
+        self._append_actor_log(
+            log_path,
+            "ORCHESTRATOR",
+            f"[RECOVERY_MODE:{gate_label}] recoverable. Running fix + retest once.",
+        )
+        self._stage_fix_with_codex(job, repository_path, paths, log_path)
+        self._commit_markdown_changes_after_stage(
+            job,
+            repository_path,
+            JobStage.FIX_WITH_CODEX.value,
+            log_path,
+        )
+        passed = self._stage_run_tests(job, repository_path, stage, log_path)
+        if passed:
+            self._append_actor_log(
+                log_path,
+                "ORCHESTRATOR",
+                f"[RECOVERY_MODE:{gate_label}] recovery succeeded.",
+            )
+            return True
+        self._append_actor_log(
+            log_path,
+            "ORCHESTRATOR",
+            f"[RECOVERY_MODE:{gate_label}] recovery attempt failed.",
+        )
+        return False
+
+    @staticmethod
+    def _is_recoverable_failure(repository_path: Path, stage: JobStage) -> bool:
+        """Cheap heuristic for auto-recovery eligibility."""
+
+        reason_path = repository_path / f"TEST_FAILURE_REASON_{stage.value.upper()}.md"
+        report_path = repository_path / f"TEST_REPORT_{stage.value.upper()}.md"
+        text = ""
+        if reason_path.exists():
+            text += "\n" + reason_path.read_text(encoding="utf-8", errors="replace")
+        if report_path.exists():
+            text += "\n" + report_path.read_text(encoding="utf-8", errors="replace")
+        lowered = text.lower()
+        if any(token in lowered for token in ["auth", "permission denied", "rate limit", "quota", "repository not found", "dns", "network is unreachable"]):
+            return False
+        if any(token in lowered for token in ["test failed", "lint", "type error", "module not found", "assert", "failed"]):
+            return True
+        return bool(lowered.strip())
+
+    def _run_failure_assistant(
+        self,
+        *,
+        job: JobRecord,
+        repository_path: Path,
+        log_path: Path,
+        reason: str,
+    ) -> None:
+        """Run copilot/escalation helper on failure and persist analysis markdown."""
+
+        prompt_path = self._docs_file(repository_path, "FAILURE_ANALYSIS_PROMPT.md")
+        output_path = self._docs_file(repository_path, "FAILURE_ANALYSIS.md")
+        prompt_path.write_text(
+            (
+                "실패 원인 분석을 작성하세요.\n"
+                "- 한국어\n"
+                "- 재현 단서 3개 이내\n"
+                "- 근본 원인(가설) 1~3개\n"
+                "- 즉시 조치 3개(명령/파일 기준)\n"
+                "- 다음 라운드 체크리스트\n\n"
+                f"job_id: {job.job_id}\n"
+                f"issue: #{job.issue_number}\n"
+                f"reason: {reason}\n"
+            ),
+            encoding="utf-8",
+        )
+
+        if self.command_templates.has_template("copilot"):
+            try:
+                result = self.command_templates.run_template(
+                    template_name=self._template_for_profile("copilot"),
+                    variables=self._build_template_variables(
+                        job,
+                        {
+                            "spec": self._docs_file(repository_path, "SPEC.md"),
+                            "plan": self._docs_file(repository_path, "PLAN.md"),
+                            "review": self._docs_file(repository_path, "REVIEW.md"),
+                            "design": self._docs_file(repository_path, "DESIGN_SYSTEM.md"),
+                            "status": self._docs_file(repository_path, "STATUS.md"),
+                        },
+                        prompt_path,
+                    ),
+                    cwd=repository_path,
+                    log_writer=self._actor_log_writer(log_path, "COPILOT"),
+                )
+                analysis = str(getattr(result, "stdout", "")).strip()
+                if analysis:
+                    output_path.write_text(analysis + "\n", encoding="utf-8")
+                    self._append_actor_log(
+                        log_path,
+                        "ORCHESTRATOR",
+                        f"Failure analysis written: {output_path.name}",
+                    )
+                    return
+            except Exception as error:  # noqa: BLE001
+                self._append_actor_log(log_path, "ORCHESTRATOR", f"Failure assistant failed: {error}")
+
+        if self._is_escalation_enabled() and self.command_templates.has_template("escalation"):
+            self._run_optional_escalation(job.job_id, log_path, reason)
 
     def _resolve_app_type(self, repository_path: Path, paths: Dict[str, Path]) -> str:
         """Resolve app_type from SPEC.json with safe fallback."""
@@ -2191,6 +2693,38 @@ class Orchestrator:
             return self.settings.test_command_secondary or self.settings.test_command
         return self.settings.test_command
 
+    def _wrap_test_command_with_timeout(self, command: str, log_path: Path) -> str:
+        """Wrap test command with shell timeout when available."""
+
+        timeout_seconds = self._test_command_timeout_seconds()
+        if timeout_seconds <= 0:
+            return command
+        if not self._has_timeout_utility():
+            self._append_actor_log(
+                log_path,
+                "ORCHESTRATOR",
+                "timeout utility not found. Running tests without process-level timeout wrapper.",
+            )
+            return command
+        return f"timeout --preserve-status {timeout_seconds}s {command}"
+
+    @staticmethod
+    def _has_timeout_utility() -> bool:
+        """Return True when GNU/BSD timeout utility is available."""
+
+        return shutil.which("timeout") is not None
+
+    @staticmethod
+    def _test_command_timeout_seconds() -> int:
+        """Read per-test-command timeout in seconds (0 disables wrapping)."""
+
+        raw = (os.getenv("AGENTHUB_TEST_COMMAND_TIMEOUT_SECONDS", "900") or "").strip()
+        try:
+            value = int(raw)
+        except ValueError:
+            return 900
+        return max(0, min(7200, value))
+
     def _write_test_report(
         self,
         repository_path: Path,
@@ -2220,6 +2754,10 @@ class Orchestrator:
             pass_lines.append("테스트 명령이 종료코드 0으로 완료되었습니다.")
         else:
             fail_lines.append(f"테스트 명령이 종료코드 {exit_code}로 실패했습니다.")
+            if exit_code == 124:
+                fail_lines.append(
+                    "테스트 명령이 시간 제한으로 종료되었습니다(timeout, exit 124)."
+                )
         if passed_count > 0:
             pass_lines.append(f"통과된 테스트 수를 감지했습니다: {passed_count}")
         if skipped_count > 0:
@@ -3341,6 +3879,8 @@ class Orchestrator:
             "_docs/COMMIT_MESSAGE_PROMPT_",
             "_docs/PLANNER_TOOL_REQUEST",
             "_docs/ESCALATION_PROMPT",
+            "_docs/DOCUMENTATION_PROMPT",
+            "_docs/DOCUMENTATION_BUNDLE",
         )
         normalized = [str(path).strip() for path in changed_md_paths if str(path).strip()]
         if not normalized:
@@ -3357,6 +3897,8 @@ class Orchestrator:
             "gemini_plan": JobStage.PLAN_WITH_GEMINI.value,
             "designer_task": JobStage.DESIGN_WITH_CODEX.value,
             "publisher_task": "publisher_task",
+            "copywriter_task": "copywriter_task",
+            "documentation_task": JobStage.DOCUMENTATION_TASK.value,
             "codex_implement": JobStage.IMPLEMENT_WITH_CODEX.value,
             "code_change_summary": JobStage.SUMMARIZE_CODE_CHANGES.value,
             "test_after_implement": JobStage.TEST_AFTER_IMPLEMENT.value,
@@ -3382,6 +3924,8 @@ class Orchestrator:
             JobStage.WRITE_SPEC.value: "스펙 문서 작성",
             JobStage.PLAN_WITH_GEMINI.value: "제미나이 플래너 작성",
             JobStage.DESIGN_WITH_CODEX.value: "코덱스 디자이너 작성",
+            JobStage.COPYWRITER_TASK.value: "카피라이터 작성",
+            JobStage.DOCUMENTATION_TASK.value: "기술 문서 작성",
             JobStage.IMPLEMENT_WITH_CODEX.value: "코덱스 구현자 작성",
             JobStage.SUMMARIZE_CODE_CHANGES.value: "코드 변경 요약 작성",
             JobStage.TEST_AFTER_IMPLEMENT.value: "구현 후 테스트 리포트 작성",
@@ -3396,6 +3940,8 @@ class Orchestrator:
             "gemini_plan": "제미나이 플래너 작성",
             "designer_task": "코덱스 디자이너 작성",
             "publisher_task": "퍼블리셔 작성",
+            "copywriter_task": "카피라이터 작성",
+            "documentation_task": "기술 문서 작성",
             "codex_implement": "코덱스 구현자 작성",
             "code_change_summary": "코드 변경 요약 작성",
             "test_after_implement": "구현 후 테스트 리포트 작성",
@@ -3575,6 +4121,13 @@ class Orchestrator:
             "token_handoff_path": str(paths.get("token_handoff", Path("_docs/TOKEN_HANDOFF.md"))),
             "publish_checklist_path": str(paths.get("publish_checklist", Path("_docs/PUBLISH_CHECKLIST.md"))),
             "publish_handoff_path": str(paths.get("publish_handoff", Path("_docs/PUBLISH_HANDOFF.md"))),
+            "copy_plan_path": str(paths.get("copy_plan", Path("_docs/COPYWRITING_PLAN.md"))),
+            "copy_deck_path": str(paths.get("copy_deck", Path("_docs/COPY_DECK.md"))),
+            "documentation_plan_path": str(paths.get("documentation_plan", Path("_docs/DOCUMENTATION_PLAN.md"))),
+            "readme_path": str(paths.get("readme", Path("README.md"))),
+            "copyright_path": str(paths.get("copyright", Path("COPYRIGHT.md"))),
+            "development_guide_path": str(paths.get("development_guide", Path("DEVELOPMENT_GUIDE.md"))),
+            "docs_bundle_path": str(self._docs_file(self.settings.repository_workspace_path(job.repository, job.app_code), "DOCUMENTATION_BUNDLE.md")),
             "status_path": str(paths["status"]),
             "prompt_file": str(prompt_file_path),
         }
@@ -3660,6 +4213,137 @@ class Orchestrator:
                 encoding="utf-8",
             )
             self._append_actor_log(log_path, "ORCHESTRATOR", "Fallback PUBLISH_HANDOFF.md generated.")
+
+    def _ensure_copywriter_artifacts(
+        self,
+        repository_path: Path,
+        paths: Dict[str, Path],
+        log_path: Path,
+    ) -> None:
+        """Ensure copywriter artifacts exist for downstream coding/review."""
+
+        copy_plan = paths.get("copy_plan", self._docs_file(repository_path, "COPYWRITING_PLAN.md"))
+        copy_deck = paths.get("copy_deck", self._docs_file(repository_path, "COPY_DECK.md"))
+        if not copy_plan.exists():
+            copy_plan.write_text(
+                (
+                    "# COPYWRITING PLAN\n\n"
+                    "## 기획 의도\n"
+                    "- 사용자가 한눈에 이해하는 쉬운 문구를 우선합니다.\n\n"
+                    "## 톤앤매너\n"
+                    "- 한국어 중심, 친근하고 명확한 표현\n"
+                    "- 짧은 문장, 행동 유도 중심\n\n"
+                    "## 화면별 전략\n"
+                    "- 헤드라인: 가치 제안 1문장\n"
+                    "- 버튼: 동사형 CTA(2~8자)\n"
+                    "- 오류/빈상태: 원인 + 다음 행동 제시\n"
+                ),
+                encoding="utf-8",
+            )
+            self._append_actor_log(log_path, "ORCHESTRATOR", "Fallback COPYWRITING_PLAN.md generated.")
+        if not copy_deck.exists():
+            copy_deck.write_text(
+                (
+                    "# COPY DECK\n\n"
+                    "## 헤드라인\n"
+                    "- 오늘 뭐 먹을지, 빠르게 정해드릴게요.\n\n"
+                    "## 버튼 문구\n"
+                    "- 추천받기\n"
+                    "- 다시 고르기\n\n"
+                    "## 안내/오류 문구\n"
+                    "- 잠시 문제가 생겼어요. 다시 시도해 주세요.\n"
+                    "- 먼저 카테고리를 선택해 주세요.\n"
+                ),
+                encoding="utf-8",
+            )
+            self._append_actor_log(log_path, "ORCHESTRATOR", "Fallback COPY_DECK.md generated.")
+
+    def _ensure_documentation_artifacts(
+        self,
+        repository_path: Path,
+        paths: Dict[str, Path],
+        log_path: Path,
+    ) -> None:
+        """Ensure root-level development documents exist before PR stage."""
+
+        readme_path = paths.get("readme", repository_path / "README.md")
+        copyright_path = paths.get("copyright", repository_path / "COPYRIGHT.md")
+        development_guide_path = paths.get("development_guide", repository_path / "DEVELOPMENT_GUIDE.md")
+        documentation_plan_path = paths.get(
+            "documentation_plan", self._docs_file(repository_path, "DOCUMENTATION_PLAN.md")
+        )
+
+        if not readme_path.exists() or not readme_path.read_text(encoding="utf-8", errors="replace").strip():
+            readme_path.write_text(
+                (
+                    "# Project README\n\n"
+                    "## Overview\n"
+                    "- 프로젝트 목적과 핵심 기능을 요약하세요.\n\n"
+                    "## Quick Start\n"
+                    "1. 의존성 설치\n"
+                    "2. 로컬 실행\n"
+                    "3. 테스트 실행\n\n"
+                    "## Environment\n"
+                    "- 필수 환경변수와 기본값을 정리하세요.\n\n"
+                    "## Structure\n"
+                    "- 주요 디렉토리/역할을 정리하세요.\n"
+                ),
+                encoding="utf-8",
+            )
+            self._append_actor_log(log_path, "ORCHESTRATOR", "Fallback README.md generated.")
+
+        if not copyright_path.exists() or not copyright_path.read_text(
+            encoding="utf-8", errors="replace"
+        ).strip():
+            copyright_path.write_text(
+                (
+                    "# COPYRIGHT\n\n"
+                    "Copyright (c) 2026 Project Contributors. All rights reserved.\n\n"
+                    "## Third-party licenses\n"
+                    "- 사용 라이브러리의 라이선스 고지를 여기에 정리하세요.\n"
+                ),
+                encoding="utf-8",
+            )
+            self._append_actor_log(log_path, "ORCHESTRATOR", "Fallback COPYRIGHT.md generated.")
+
+        if not development_guide_path.exists() or not development_guide_path.read_text(
+            encoding="utf-8", errors="replace"
+        ).strip():
+            development_guide_path.write_text(
+                (
+                    "# DEVELOPMENT GUIDE\n\n"
+                    "## Workflow\n"
+                    "1. 이슈 확인\n"
+                    "2. 스펙/플랜 확인\n"
+                    "3. 구현/테스트\n"
+                    "4. 리뷰/PR\n\n"
+                    "## AgentHub usage\n"
+                    "- 오케스트레이션 단계와 역할별 책임을 정리하세요.\n\n"
+                    "## Troubleshooting\n"
+                    "- 자주 발생하는 실패 유형과 복구 방법을 정리하세요.\n"
+                ),
+                encoding="utf-8",
+            )
+            self._append_actor_log(log_path, "ORCHESTRATOR", "Fallback DEVELOPMENT_GUIDE.md generated.")
+
+        if not documentation_plan_path.exists() or not documentation_plan_path.read_text(
+            encoding="utf-8", errors="replace"
+        ).strip():
+            documentation_plan_path.write_text(
+                (
+                    "# DOCUMENTATION PLAN\n\n"
+                    "## Updated in this run\n"
+                    "- README.md\n"
+                    "- COPYRIGHT.md\n"
+                    "- DEVELOPMENT_GUIDE.md\n\n"
+                    "## Next maintenance points\n"
+                    "- 기능/환경변수 변경 시 README 갱신\n"
+                    "- 라이선스 변경 시 COPYRIGHT 갱신\n"
+                    "- 워크플로우 변경 시 DEVELOPMENT_GUIDE 갱신\n"
+                ),
+                encoding="utf-8",
+            )
+            self._append_actor_log(log_path, "ORCHESTRATOR", "Fallback DOCUMENTATION_PLAN.md generated.")
 
     def _is_design_system_locked(self, repository_path: Path, paths: Dict[str, Path]) -> bool:
         """Return True when design-system decision is locked and reusable."""
@@ -3944,6 +4628,13 @@ class Orchestrator:
         if raw_env:
             return raw_env.strip().lower() in {"1", "true", "yes", "on"}
         return self.settings.enable_escalation
+
+    @staticmethod
+    def _is_recovery_mode_enabled() -> bool:
+        """Read recovery mode toggle from environment with default enabled."""
+
+        raw = (os.getenv("AGENTHUB_RECOVERY_MODE", "true") or "true").strip().lower()
+        return raw in {"1", "true", "yes", "on"}
 
     @staticmethod
     def _is_long_track(job: JobRecord) -> bool:

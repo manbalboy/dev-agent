@@ -1073,6 +1073,56 @@ def request_job_stop(
     return JSONResponse({"requested": True, "job_id": job_id, "stop_file": str(path)})
 
 
+@router.post("/api/jobs/{job_id}/requeue", response_class=JSONResponse)
+def requeue_job(
+    job_id: str,
+    store: JobStore = Depends(get_store),
+) -> JSONResponse:
+    """Requeue one failed job from dashboard."""
+
+    job = store.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+    if job.status in {JobStatus.QUEUED.value, JobStatus.RUNNING.value}:
+        return JSONResponse({"requeued": False, "reason": "already_active", "job_id": job_id})
+    if job.status != JobStatus.FAILED.value:
+        raise HTTPException(status_code=400, detail="실패 상태 작업만 재큐잉할 수 있습니다.")
+
+    store.update_job(
+        job_id,
+        status=JobStatus.QUEUED.value,
+        stage=JobStage.QUEUED.value,
+        attempt=0,
+        error_message=None,
+        started_at=None,
+        finished_at=None,
+    )
+    store.enqueue_job(job_id)
+    return JSONResponse({"requeued": True, "job_id": job_id})
+
+
+@router.post("/api/jobs/requeue-failed", response_class=JSONResponse)
+def requeue_failed_jobs(
+    store: JobStore = Depends(get_store),
+) -> JSONResponse:
+    """Requeue all failed jobs in one action."""
+
+    jobs = store.list_jobs()
+    failed_job_ids = [job.job_id for job in jobs if job.status == JobStatus.FAILED.value]
+    for job_id in failed_job_ids:
+        store.update_job(
+            job_id,
+            status=JobStatus.QUEUED.value,
+            stage=JobStage.QUEUED.value,
+            attempt=0,
+            error_message=None,
+            started_at=None,
+            finished_at=None,
+        )
+        store.enqueue_job(job_id)
+    return JSONResponse({"requeued": len(failed_job_ids)})
+
+
 @router.get("/logs/{file_name}", response_class=PlainTextResponse)
 def job_log_file(
     file_name: str,
