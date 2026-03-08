@@ -768,6 +768,13 @@
               id: String(node?.id || `n${index + 1}`).trim(),
               type: String(node?.type || "gh_read_issue").trim(),
               title: String(node?.title || "").trim(),
+              agent_profile: String(node?.agent_profile || "auto").trim() || "auto",
+              planning_mode: String(
+                String(node?.type || "gh_read_issue").trim() === "gemini_plan"
+                  ? (node?.planning_mode || "auto")
+                  : "auto"
+              ).trim() || "auto",
+              notes: String(node?.notes || "").trim(),
             }))
           : cloneWorkflowDefinition(base).nodes;
         workflow.edges = Array.isArray(workflow.edges)
@@ -806,6 +813,9 @@
           id: String(row.querySelector(".workflow-editor-node-id")?.value || "").trim(),
           type: String(row.querySelector(".workflow-editor-node-type")?.value || "gh_read_issue").trim(),
           title: String(row.querySelector(".workflow-editor-node-title")?.value || "").trim(),
+          agent_profile: String(row.querySelector(".workflow-editor-node-agent-profile")?.value || "auto").trim() || "auto",
+          planning_mode: String(row.querySelector(".workflow-editor-node-planning-mode")?.value || "auto").trim() || "auto",
+          notes: String(row.querySelector(".workflow-editor-node-notes")?.value || "").trim(),
         }));
         const nodeIdRemap = new Map();
         const nodes = rawNodes
@@ -814,7 +824,14 @@
             if (previousId && node.id && previousId !== node.id) {
               nodeIdRemap.set(previousId, node.id);
             }
-            return { id: node.id, type: node.type, title: node.title };
+            return {
+              id: node.id,
+              type: node.type,
+              title: node.title,
+              agent_profile: node.agent_profile || "auto",
+              planning_mode: node.type === "gemini_plan" ? (node.planning_mode || "auto") : "auto",
+              notes: node.notes,
+            };
           })
           .filter((node) => node.id);
         const edges = Array.from(box.querySelectorAll(".workflow-editor-edge-row")).map((row) => ({
@@ -1296,6 +1313,8 @@
         workflowEditorState.selectedWorkflowId = workflow.workflow_id || "";
         const schema = workflowEditorState.schema || { node_types: {}, supported_edge_events: ["success", "failure", "always"] };
         const nodeTypes = schema.node_types || {};
+        const agentProfiles = Array.isArray(schema.node_agent_profiles) ? schema.node_agent_profiles : ["auto", "primary", "fallback"];
+        const planningModes = Array.isArray(schema.node_planning_modes) ? schema.node_planning_modes : ["auto", "general", "big_picture", "dev_planning"];
         const supportedEdgeEvents = Array.isArray(schema.supported_edge_events)
           ? schema.supported_edge_events
           : ["success", "failure", "always"];
@@ -1321,6 +1340,17 @@
                 </select>
               </td>
               <td><input class="workflow-editor-node-title" type="text" value="${esc(node.title || "")}" maxlength="120" /></td>
+              <td>
+                <select class="workflow-editor-node-agent-profile">
+                  ${agentProfiles.map((profile) => `<option value="${esc(profile)}"${profile === (node.agent_profile || "auto") ? " selected" : ""}>${esc(profile)}</option>`).join("")}
+                </select>
+              </td>
+              <td>
+                <select class="workflow-editor-node-planning-mode"${node.type === "gemini_plan" ? "" : " disabled"}>
+                  ${planningModes.map((mode) => `<option value="${esc(mode)}"${mode === (node.type === "gemini_plan" ? (node.planning_mode || "auto") : "auto") ? " selected" : ""}>${esc(mode)}</option>`).join("")}
+                </select>
+              </td>
+              <td><input class="workflow-editor-node-notes" type="text" value="${esc(node.notes || "")}" maxlength="240" placeholder="운영 메모" /></td>
               <td><button type="button" class="action-button workflow-editor-delete" data-target="node" data-index="${index}">삭제</button></td>
             </tr>
           `)
@@ -1350,6 +1380,10 @@
         const nodeTypeChips = Object.entries(nodeTypes)
           .map(([nodeType, meta]) => `<span class="workflow-editor-chip">${esc(nodeType)} · ${esc(meta?.label || "")}</span>`)
           .join("");
+        const metadataChips = [
+          ...agentProfiles.map((profile) => `<span class="workflow-editor-chip">agent_profile · ${esc(profile)}</span>`),
+          ...planningModes.map((mode) => `<span class="workflow-editor-chip">planning_mode · ${esc(mode)}</span>`),
+        ].join("");
 
         box.innerHTML = `
           <div class="workflow-editor-toolbar">
@@ -1393,14 +1427,14 @@
               <div class="workflow-settings-head">
                 <div>
                   <h3>Nodes</h3>
-                  <p class="hint">ID, 타입, 표시명을 편집합니다. write_spec 이후 노드만 수동 resume 후보가 됩니다.</p>
+                  <p class="hint">ID, 타입, 표시명과 실행 메타데이터를 편집합니다. write_spec 이후 노드만 수동 resume 후보가 됩니다.</p>
                 </div>
                 <button type="button" id="workflow-editor-add-node" class="action-button">노드 추가</button>
               </div>
               <div class="app-table-wrap">
                 <table class="app-table workflow-editor-table">
-                  <thead><tr><th>ID</th><th>Type</th><th>Title</th><th>삭제</th></tr></thead>
-                  <tbody>${nodeRows || `<tr><td colspan="4" class="jobs-empty">노드 없음</td></tr>`}</tbody>
+                  <thead><tr><th>ID</th><th>Type</th><th>Title</th><th>AI</th><th>Plan</th><th>메모</th><th>삭제</th></tr></thead>
+                  <tbody>${nodeRows || `<tr><td colspan="7" class="jobs-empty">노드 없음</td></tr>`}</tbody>
                 </table>
               </div>
             </div>
@@ -1430,7 +1464,7 @@
               </div>
             </div>
             <div id="workflow-editor-result" class="hint workflow-config-result${workflowEditorState.resultIsError ? " text-error" : ""}">${esc(workflowEditorState.resultMessage || "")}</div>
-            <div class="workflow-editor-schema">${nodeTypeChips}</div>
+            <div class="workflow-editor-schema">${nodeTypeChips}${metadataChips}</div>
           </div>
         `;
 
@@ -1642,6 +1676,9 @@
               id: nextWorkflowNodeId(workflow.nodes),
               type: "gh_read_issue",
               title: "",
+              agent_profile: "auto",
+              planning_mode: "auto",
+              notes: "",
             });
             if (!workflow.entry_node_id) {
               workflow.entry_node_id = workflow.nodes[0]?.id || "";
@@ -1757,10 +1794,10 @@
         editorBox?.addEventListener("change", (event) => {
           const target = event.target;
           if (!(target instanceof Element)) return;
-          if (target.closest(".workflow-editor-node-id")) {
+          if (target.closest(".workflow-editor-node-id") || target.closest(".workflow-editor-node-type")) {
             const workflow = readWorkflowEditorDom();
             renderWorkflowEditor(workflow);
-            setWorkflowEditorResult("노드 ID 변경을 반영했습니다.");
+            setWorkflowEditorResult("노드 메타데이터 변경을 반영했습니다.");
           }
         });
       }

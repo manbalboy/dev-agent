@@ -613,17 +613,35 @@ class Orchestrator:
         for node in ordered_nodes[start_index:]:
             node_id = str(node.get("id", ""))
             node_type = str(node.get("type", ""))
+            node_notes = str(node.get("notes", "")).strip()
+            previous_agent_profile = self._agent_profile
+            effective_agent_profile = self._workflow_node_agent_profile(node)
             self._append_actor_log(
                 log_path,
                 "ORCHESTRATOR",
                 f"Workflow node start: {node_id} ({node_type})",
             )
+            if node_notes:
+                self._append_actor_log(
+                    log_path,
+                    "ORCHESTRATOR",
+                    f"Workflow node note: {node_notes}",
+                )
+            if effective_agent_profile != previous_agent_profile:
+                self._append_actor_log(
+                    log_path,
+                    "ORCHESTRATOR",
+                    f"Workflow node agent profile override: {previous_agent_profile} -> {effective_agent_profile}",
+                )
+            self._agent_profile = effective_agent_profile
 
             executor = self._resolve_workflow_node_executor(node_type)
             if executor is None:
+                self._agent_profile = previous_agent_profile
                 raise CommandExecutionError(f"Unsupported workflow node type: {node_type}")
-            node_run = self._start_node_run(job, workflow, node)
+            node_run: NodeRunRecord | None = None
             try:
+                node_run = self._start_node_run(job, workflow, node)
                 executor(
                     job=job,
                     repository_path=repository_path,
@@ -632,13 +650,17 @@ class Orchestrator:
                     log_path=log_path,
                 )
             except Exception as error:
-                self._finish_node_run(
-                    node_run,
-                    status="failed",
-                    error_message=str(error),
-                )
+                if node_run is not None:
+                    self._finish_node_run(
+                        node_run,
+                        status="failed",
+                        error_message=str(error),
+                    )
                 raise
-            self._finish_node_run(node_run, status="success")
+            finally:
+                self._agent_profile = previous_agent_profile
+            if node_run is not None:
+                self._finish_node_run(node_run, status="success")
 
             if node_type not in WORKFLOW_NODE_SKIP_AUTO_COMMIT:
                 self._commit_markdown_changes_after_stage(job, repository_path, node_type, log_path)
@@ -690,6 +712,14 @@ class Orchestrator:
         if callable(handler):
             return handler
         return None
+
+    def _workflow_node_agent_profile(self, node: Dict[str, Any]) -> str:
+        """Return the effective agent profile for one workflow node."""
+
+        requested = str(node.get("agent_profile", "")).strip().lower()
+        if requested in {"primary", "fallback"}:
+            return requested
+        return self._agent_profile
 
     def _start_node_run(
         self,
@@ -777,8 +807,11 @@ class Orchestrator:
     ) -> None:
         paths = self._workflow_context_paths(context)
         node_title = str(node.get("title", "")).strip().lower()
+        requested_mode = str(node.get("planning_mode", "")).strip().lower()
         planning_mode = "general"
-        if "개발 기획" in node_title or "development" in node_title:
+        if requested_mode in {"general", "dev_planning", "big_picture"}:
+            planning_mode = requested_mode
+        elif "개발 기획" in node_title or "development" in node_title:
             planning_mode = "dev_planning"
         elif "큰틀" in node_title or "big picture" in node_title:
             planning_mode = "big_picture"

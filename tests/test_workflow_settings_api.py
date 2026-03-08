@@ -100,6 +100,8 @@ def test_workflow_schema_api_returns_supported_node_types(app_components):
     assert "gh_read_issue" in payload["node_types"]
     assert "product_review" in payload["node_types"]
     assert payload["supported_edge_events"] == ["success", "failure", "always"]
+    assert payload["node_agent_profiles"] == ["auto", "primary", "fallback"]
+    assert payload["node_planning_modes"] == ["auto", "general", "big_picture", "dev_planning"]
 
 
 def test_save_workflow_api_persists_new_definition(app_components, monkeypatch, tmp_path: Path):
@@ -120,11 +122,13 @@ def test_save_workflow_api_persists_new_definition(app_components, monkeypatch, 
                 "version": 3,
                 "entry_node_id": "n1",
                 "nodes": [
-                    {"id": "n1", "type": "gh_read_issue", "title": "이슈 읽기"},
-                    {"id": "n2", "type": "write_spec", "title": "SPEC 작성"},
+                    {"id": "n1", "type": "gh_read_issue", "title": "이슈 읽기", "notes": "read first"},
+                    {"id": "n2", "type": "write_spec", "title": "SPEC 작성", "agent_profile": "fallback", "notes": "spec note"},
+                    {"id": "n3", "type": "gemini_plan", "title": "플랜", "planning_mode": "dev_planning"},
                 ],
                 "edges": [
                     {"from": "n1", "to": "n2", "on": "success"},
+                    {"from": "n2", "to": "n3", "on": "success"},
                 ],
             },
             "set_default": True,
@@ -142,6 +146,9 @@ def test_save_workflow_api_persists_new_definition(app_components, monkeypatch, 
     stored = next(item for item in saved["workflows"] if item["workflow_id"] == "wf-product-loop")
     assert stored["name"] == "Product Loop"
     assert stored["entry_node_id"] == "n1"
+    assert stored["nodes"][1]["agent_profile"] == "fallback"
+    assert stored["nodes"][1]["notes"] == "spec note"
+    assert stored["nodes"][2]["planning_mode"] == "dev_planning"
 
 
 def test_issue_register_stores_requested_workflow_override(app_components, monkeypatch, tmp_path: Path):

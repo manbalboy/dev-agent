@@ -775,6 +775,79 @@ def test_fix_stage_routes_to_planner_when_strategy_requires_rebaseline(app_compo
     assert fake_runner.calls == []
 
 
+def test_workflow_node_metadata_controls_planning_mode_and_agent_profile(app_components):
+    settings, store, _ = app_components
+    job = replace(_make_job("job-node-metadata"), attempt=1)
+    store.create_job(job)
+
+    repository_path = settings.repository_workspace_path(job.repository, job.app_code)
+    repository_path.mkdir(parents=True, exist_ok=True)
+    log_path = settings.logs_debug_dir / job.log_file
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text("", encoding="utf-8")
+
+    paths = {
+        "spec": Orchestrator._docs_file(repository_path, "SPEC.md"),
+        "plan": Orchestrator._docs_file(repository_path, "PLAN.md"),
+    }
+    for path in paths.values():
+        path.write_text("# stub\n", encoding="utf-8")
+
+    workflow = {
+        "workflow_id": "wf-node-metadata",
+        "entry_node_id": "n1",
+        "nodes": [
+            {
+                "id": "n1",
+                "type": "gemini_plan",
+                "title": "메타데이터 기반 플랜",
+                "agent_profile": "fallback",
+                "planning_mode": "big_picture",
+                "notes": "fallback planner note",
+            }
+        ],
+        "edges": [],
+    }
+
+    fake_runner = FakeTemplateRunner()
+    orchestrator = Orchestrator(settings, store, fake_runner)
+    orchestrator._workflow_context_paths = lambda _context: paths  # type: ignore[method-assign]
+    orchestrator._commit_markdown_changes_after_stage = lambda *args, **kwargs: None  # type: ignore[method-assign]
+
+    observed: dict[str, str] = {}
+
+    def fake_plan_stage(job_obj, repo_path, passed_paths, passed_log_path, planning_mode="general"):
+        observed["planning_mode"] = planning_mode
+        observed["agent_profile"] = orchestrator._agent_profile
+        assert repo_path == repository_path
+        assert passed_paths == paths
+        assert passed_log_path == log_path
+
+    orchestrator._stage_plan_with_gemini = fake_plan_stage  # type: ignore[method-assign]
+    orchestrator._agent_profile = "primary"
+
+    orchestrator._run_workflow_pipeline(
+        job,
+        repository_path,
+        workflow,
+        workflow["nodes"],
+        log_path,
+    )
+
+    assert observed["planning_mode"] == "big_picture"
+    assert observed["agent_profile"] == "fallback"
+    assert orchestrator._agent_profile == "primary"
+
+    node_runs = store.list_node_runs(job.job_id)
+    assert len(node_runs) == 1
+    assert node_runs[0].agent_profile == "fallback"
+    assert node_runs[0].status == "success"
+
+    log_text = log_path.read_text(encoding="utf-8")
+    assert "Workflow node note: fallback planner note" in log_text
+    assert "Workflow node agent profile override: primary -> fallback" in log_text
+
+
 def test_fix_prompt_uses_next_improvement_tasks_context(app_components):
     settings, store, _ = app_components
     job = _make_job("job-fix-next-tasks")

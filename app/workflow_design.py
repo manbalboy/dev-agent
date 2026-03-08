@@ -48,6 +48,9 @@ SUPPORTED_NODE_TYPES: Dict[str, Dict[str, Any]] = {
     "create_pr": {"label": "PR 생성", "kind": "git"},
 }
 
+SUPPORTED_NODE_AGENT_PROFILES = {"", "auto", "primary", "fallback"}
+SUPPORTED_NODE_PLANNING_MODES = {"", "auto", "general", "big_picture", "dev_planning"}
+
 
 def default_workflow_template() -> Dict[str, Any]:
     """Return a default workflow template equivalent to fixed orchestration."""
@@ -135,6 +138,13 @@ def schema_payload() -> Dict[str, Any]:
         "phase": "phase-1",
         "supported_edge_events": ["success", "failure", "always"],
         "node_types": SUPPORTED_NODE_TYPES,
+        "node_agent_profiles": ["auto", "primary", "fallback"],
+        "node_planning_modes": ["auto", "general", "big_picture", "dev_planning"],
+        "node_metadata_fields": [
+            {"key": "agent_profile", "label": "AI 프로필", "applies_to": ["*"]},
+            {"key": "planning_mode", "label": "Planning Mode", "applies_to": ["gemini_plan"]},
+            {"key": "notes", "label": "운영 메모", "applies_to": ["*"]},
+        ],
         "notes": [
             "phase-1은 저장/검증 중심이며, 실행엔진 전환은 다음 단계에서 연결",
             "노드 type은 사전 정의 목록만 허용",
@@ -204,6 +214,17 @@ def validate_workflow(workflow: Dict[str, Any]) -> Tuple[bool, List[str]]:
         node_ids.append(node_id)
         if node_type not in SUPPORTED_NODE_TYPES:
             errors.append(f"unsupported node.type: {node_type}")
+        agent_profile = str(node.get("agent_profile", "")).strip().lower()
+        if agent_profile not in SUPPORTED_NODE_AGENT_PROFILES:
+            errors.append(f"unsupported node.agent_profile: {agent_profile}")
+        planning_mode = str(node.get("planning_mode", "")).strip().lower()
+        if planning_mode not in SUPPORTED_NODE_PLANNING_MODES:
+            errors.append(f"unsupported node.planning_mode: {planning_mode}")
+        if planning_mode and planning_mode != "auto" and node_type != "gemini_plan":
+            errors.append(f"node.planning_mode is only supported for gemini_plan: {node_id}")
+        notes = node.get("notes", "")
+        if notes is not None and not isinstance(notes, str):
+            errors.append(f"node.notes must be string: {node_id}")
 
     duplicate_ids = {nid for nid in node_ids if node_ids.count(nid) > 1}
     for duplicate in sorted(duplicate_ids):

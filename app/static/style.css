@@ -953,7 +953,7 @@ code {
 }
 
 .workflow-editor-table {
-  min-width: 760px;
+  min-width: 1120px;
 }
 
 .workflow-editor-table input,
@@ -978,6 +978,11 @@ code {
 .workflow-editor-table td:last-child {
   width: 92px;
   text-align: center;
+}
+
+.workflow-editor-table th:nth-child(6),
+.workflow-editor-table td:nth-child(6) {
+  min-width: 220px;
 }
 
 .workflow-editor-foot {
