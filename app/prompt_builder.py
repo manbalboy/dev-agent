@@ -754,6 +754,15 @@ def build_reviewer_prompt(spec_path: str, plan_path: str, review_path: str) -> s
         - {review_path}
 
         필수 리뷰 카테고리:
+        - Code quality
+        - Architecture structure
+        - Maintainability
+        - Usability
+        - UX clarity
+        - Test coverage
+        - Error state handling
+        - Empty state handling
+        - Loading state handling
         - Functional bugs
         - Security concerns
         - Missing tests / weak test coverage

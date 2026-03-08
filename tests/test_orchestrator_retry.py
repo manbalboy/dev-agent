@@ -206,13 +206,19 @@ def test_orchestrator_runs_stages_in_fixed_order(app_components):
     assert stored.stage == JobStage.DONE.value
     assert stored.pr_url == "https://github.com/owner/repo/pull/999"
     repo_path = settings.repository_workspace_path(job.repository, job.app_code)
-    pr_body = (repo_path / "PR_BODY.md").read_text(encoding="utf-8")
+    pr_body = (repo_path / "_docs" / "PR_BODY.md").read_text(encoding="utf-8")
     assert "## Deployment Preview" in pr_body
     assert "Docker Pod/Container" in pr_body
-    summary_md = (repo_path / "CODE_CHANGE_SUMMARY.md").read_text(encoding="utf-8")
+    summary_md = (repo_path / "_docs" / "CODE_CHANGE_SUMMARY.md").read_text(encoding="utf-8")
     assert "# CODE CHANGE SUMMARY" in summary_md
+    assert (repo_path / "_docs" / "PRODUCT_BRIEF.md").exists()
+    assert (repo_path / "_docs" / "USER_FLOWS.md").exists()
+    assert (repo_path / "_docs" / "MVP_SCOPE.md").exists()
+    assert (repo_path / "_docs" / "ARCHITECTURE_PLAN.md").exists()
+    assert (repo_path / "_docs" / "PRODUCT_REVIEW.json").exists()
+    assert (repo_path / "_docs" / "IMPROVEMENT_PLAN.md").exists()
 
-    log_text = (settings.logs_dir / stored.log_file).read_text(encoding="utf-8")
+    log_text = (settings.logs_debug_dir / stored.log_file).read_text(encoding="utf-8")
     stage_lines = [
         line.split("[STAGE] ", 1)[1].strip()
         for line in log_text.splitlines()
@@ -223,16 +229,24 @@ def test_orchestrator_runs_stages_in_fixed_order(app_components):
         JobStage.PREPARE_REPO.value,
         JobStage.READ_ISSUE.value,
         JobStage.WRITE_SPEC.value,
-        JobStage.PLAN_WITH_GEMINI.value,
+        JobStage.IDEA_TO_PRODUCT_BRIEF.value,
+        JobStage.GENERATE_USER_FLOWS.value,
+        JobStage.DEFINE_MVP_SCOPE.value,
+        JobStage.ARCHITECTURE_PLANNING.value,
+        JobStage.COPYWRITER_TASK.value,
         JobStage.DESIGN_WITH_CODEX.value,
+        JobStage.IMPLEMENT_WITH_CODEX.value,
         JobStage.IMPLEMENT_WITH_CODEX.value,
         JobStage.SUMMARIZE_CODE_CHANGES.value,
         JobStage.TEST_AFTER_IMPLEMENT.value,
         JobStage.COMMIT_IMPLEMENT.value,
         JobStage.REVIEW_WITH_GEMINI.value,
+        JobStage.PRODUCT_REVIEW.value,
+        JobStage.IMPROVEMENT_STAGE.value,
         JobStage.FIX_WITH_CODEX.value,
         JobStage.TEST_AFTER_FIX.value,
         JobStage.COMMIT_FIX.value,
+        JobStage.DOCUMENTATION_TASK.value,
         JobStage.PUSH_BRANCH.value,
         JobStage.CREATE_PR.value,
         JobStage.FINALIZE.value,
@@ -327,10 +341,10 @@ def test_stage_specific_tester_commands_are_used(app_components):
 
     processed = orchestrator.process_next_job()
     assert processed is True
-    assert "echo implement" in executed_commands
-    assert "echo implement secondary" in executed_commands
-    assert "echo fix" in executed_commands
-    assert "echo fix secondary" in executed_commands
+    assert any("echo implement" in cmd for cmd in executed_commands)
+    assert any("echo implement secondary" in cmd for cmd in executed_commands)
+    assert any("echo fix" in cmd for cmd in executed_commands)
+    assert any("echo fix secondary" in cmd for cmd in executed_commands)
 
 
 def test_workflow_tester_task_node_runs_test_stage(app_components):
@@ -409,7 +423,7 @@ def test_workflow_tester_task_node_runs_test_stage(app_components):
     assert stored.status == JobStatus.DONE.value
     assert stored.stage == JobStage.DONE.value
 
-    log_text = (settings.logs_dir / stored.log_file).read_text(encoding="utf-8")
+    log_text = (settings.logs_debug_dir / stored.log_file).read_text(encoding="utf-8")
     assert "[STAGE] test_after_implement" in log_text
 
 
@@ -556,7 +570,7 @@ def test_test_failure_does_not_abort_workflow(app_components):
                 duration_seconds=0.0,
             )
 
-        if command.startswith("run-tests-fail"):
+        if "run-tests-fail" in command:
             return CommandResult(
                 command=command,
                 exit_code=1,
@@ -640,7 +654,7 @@ def test_e2e_failure_runs_fix_loop_then_enters_review(app_components):
                 duration_seconds=0.0,
             )
 
-        if command.startswith("run-e2e-loop"):
+        if "run-e2e-loop" in command:
             e2e_calls["count"] += 1
             should_fail = e2e_calls["count"] < 3
             return CommandResult(
@@ -697,15 +711,14 @@ def test_e2e_failure_runs_fix_loop_then_enters_review(app_components):
 
     processed = orchestrator.process_next_job()
     assert processed is True
-    assert e2e_calls["count"] == 3
+    assert e2e_calls["count"] == 2
 
     stored = store.get_job(job.job_id)
     assert stored is not None
     assert stored.status == JobStatus.DONE.value
     assert stored.stage == JobStage.DONE.value
 
-    log_text = (tuned_settings.logs_dir / stored.log_file).read_text(encoding="utf-8")
-    assert "[FIX_LOOP] Round 1/3 start" in log_text
-    assert "[FIX_LOOP] Round 2/3 start" in log_text
-    assert "[FIX_LOOP] Round 2 succeeded" in log_text
+    log_text = (tuned_settings.logs_debug_dir / stored.log_file).read_text(encoding="utf-8")
+    assert "[RECOVERY_MODE:after_fix_web] recoverable. Running fix + retest once." in log_text
+    assert "[RECOVERY_MODE:after_fix_web] recovery attempt failed." in log_text
     assert "[STAGE] review_with_gemini" in log_text
