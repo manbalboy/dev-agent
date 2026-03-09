@@ -11,7 +11,7 @@ import shlex
 from app.command_runner import CommandResult
 from app.command_runner import CommandExecutionError
 from app.models import JobRecord, JobStage, JobStatus, NodeRunRecord, utc_now_iso
-from app.orchestrator import Orchestrator
+from app.orchestrator import IssueDetails, Orchestrator
 
 
 class FakeTemplateRunner:
@@ -98,6 +98,15 @@ def _improvement_paths(repository_path: Path) -> dict[str, Path]:
         "next_improvement_tasks": Orchestrator._docs_file(repository_path, "NEXT_IMPROVEMENT_TASKS.json"),
         "repo_maturity": Orchestrator._docs_file(repository_path, "REPO_MATURITY.json"),
         "quality_trend": Orchestrator._docs_file(repository_path, "QUALITY_TREND.json"),
+        "memory_log": Orchestrator._docs_file(repository_path, "MEMORY_LOG.jsonl"),
+        "decision_history": Orchestrator._docs_file(repository_path, "DECISION_HISTORY.json"),
+        "failure_patterns": Orchestrator._docs_file(repository_path, "FAILURE_PATTERNS.json"),
+        "conventions": Orchestrator._docs_file(repository_path, "CONVENTIONS.json"),
+        "memory_selection": Orchestrator._docs_file(repository_path, "MEMORY_SELECTION.json"),
+        "memory_context": Orchestrator._docs_file(repository_path, "MEMORY_CONTEXT.json"),
+        "memory_feedback": Orchestrator._docs_file(repository_path, "MEMORY_FEEDBACK.json"),
+        "memory_rankings": Orchestrator._docs_file(repository_path, "MEMORY_RANKINGS.json"),
+        "strategy_shadow_report": Orchestrator._docs_file(repository_path, "STRATEGY_SHADOW_REPORT.json"),
     }
 
 
@@ -603,6 +612,126 @@ def test_orchestrator_uses_source_repository_for_clone_and_pr(app_components):
     repo_path = settings.repository_workspace_path(job.source_repository, job.app_code)
     pr_body = (repo_path / "_docs" / "PR_BODY.md").read_text(encoding="utf-8")
     assert "Tracking issue: https://github.com/owner/repo/issues/55" in pr_body
+
+
+def test_prepare_repo_reclones_when_workspace_exists_without_git_metadata(app_components):
+    settings, store, _ = app_components
+    job = _make_job("job-prepare-reclone")
+    job.repository = "owner/hub"
+    job.source_repository = "owner/source-repo"
+    store.create_job(job)
+
+    repository_path = settings.repository_workspace_path(job.source_repository, job.app_code)
+    repository_path.mkdir(parents=True, exist_ok=True)
+    (repository_path / "README.tmp").write_text("orphan workspace\n", encoding="utf-8")
+    log_path = settings.logs_debug_dir / job.log_file
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text("", encoding="utf-8")
+
+    executed_commands: list[str] = []
+
+    def fake_shell(command, cwd, log_writer, check, command_purpose):
+        executed_commands.append(str(command))
+        log_writer(f"[FAKE_SHELL] {command_purpose}: {command}")
+
+        if command.startswith("gh repo clone"):
+            parts = shlex.split(command)
+            target = Path(parts[-1])
+            target.mkdir(parents=True, exist_ok=True)
+            (target / ".git").mkdir(parents=True, exist_ok=True)
+
+        return CommandResult(
+            command=command,
+            exit_code=0,
+            stdout="",
+            stderr="",
+            duration_seconds=0.0,
+        )
+
+    orchestrator = Orchestrator(
+        settings=settings,
+        store=store,
+        command_templates=FakeTemplateRunner(),
+        shell_executor=fake_shell,
+    )
+
+    prepared_path = orchestrator._stage_prepare_repo(job, log_path)
+
+    assert prepared_path == repository_path
+    assert (prepared_path / ".git").exists()
+    assert not (prepared_path / "README.tmp").exists()
+
+    backup_dirs = list(repository_path.parent.glob(f"{repository_path.name}__invalid_*"))
+    assert len(backup_dirs) == 1
+    assert (backup_dirs[0] / "README.tmp").exists()
+    assert any(
+        command.startswith("gh repo clone owner/source-repo ")
+        for command in executed_commands
+    )
+    assert any("git -C" in command and "fetch origin" in command for command in executed_commands)
+
+
+def test_prepare_repo_reclones_when_workspace_origin_mismatches_execution_repository(app_components):
+    settings, store, _ = app_components
+    job = _make_job("job-prepare-origin-mismatch")
+    job.repository = "owner/hub"
+    job.source_repository = "owner/source-repo"
+    store.create_job(job)
+
+    repository_path = settings.repository_workspace_path(job.source_repository, job.app_code)
+    repository_path.mkdir(parents=True, exist_ok=True)
+    (repository_path / ".git").mkdir(parents=True, exist_ok=True)
+    (repository_path / "README.tmp").write_text("wrong repo workspace\n", encoding="utf-8")
+    log_path = settings.logs_debug_dir / job.log_file
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text("", encoding="utf-8")
+
+    executed_commands: list[str] = []
+
+    def fake_shell(command, cwd, log_writer, check, command_purpose):
+        executed_commands.append(str(command))
+        log_writer(f"[FAKE_SHELL] {command_purpose}: {command}")
+
+        if "remote get-url origin" in command:
+            return CommandResult(
+                command=command,
+                exit_code=0,
+                stdout="https://github.com/owner/wrong-repo.git\n",
+                stderr="",
+                duration_seconds=0.0,
+            )
+
+        if command.startswith("gh repo clone"):
+            parts = shlex.split(command)
+            target = Path(parts[-1])
+            target.mkdir(parents=True, exist_ok=True)
+            (target / ".git").mkdir(parents=True, exist_ok=True)
+
+        return CommandResult(
+            command=command,
+            exit_code=0,
+            stdout="",
+            stderr="",
+            duration_seconds=0.0,
+        )
+
+    orchestrator = Orchestrator(
+        settings=settings,
+        store=store,
+        command_templates=FakeTemplateRunner(),
+        shell_executor=fake_shell,
+    )
+
+    prepared_path = orchestrator._stage_prepare_repo(job, log_path)
+
+    assert prepared_path == repository_path
+    assert (prepared_path / ".git").exists()
+    assert not (prepared_path / "README.tmp").exists()
+    backup_dirs = list(repository_path.parent.glob(f"{repository_path.name}__invalid_*"))
+    assert len(backup_dirs) == 1
+    assert (backup_dirs[0] / "README.tmp").exists()
+    assert any("remote get-url origin" in command for command in executed_commands)
+    assert any(command.startswith("gh repo clone owner/source-repo ") for command in executed_commands)
 
 
 def test_workflow_tester_task_node_runs_test_stage(app_components):
@@ -1182,6 +1311,752 @@ def test_improvement_stage_uses_persistent_low_category_trend_for_strategy(app_c
     assert loop_state_payload["strategy_inputs"]["stagnant_categories"] == ["test_coverage"]
 
 
+def test_improvement_stage_writes_structured_memory_artifacts(app_components):
+    settings, store, _ = app_components
+    job = _make_job("job-memory-structured")
+    store.create_job(job)
+
+    repository_path = settings.repository_workspace_path(job.repository, job.app_code)
+    repository_path.mkdir(parents=True, exist_ok=True)
+    (repository_path / "tests").mkdir(parents=True, exist_ok=True)
+    (repository_path / "app" / "components").mkdir(parents=True, exist_ok=True)
+    (repository_path / "package.json").write_text('{"name":"memory-app"}\n', encoding="utf-8")
+    (repository_path / "README.md").write_text("# App\n", encoding="utf-8")
+
+    log_path = settings.logs_debug_dir / job.log_file
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text("", encoding="utf-8")
+
+    review_payload = _base_review_payload(job.job_id, overall=3.3)
+    review_payload["scores"]["test_coverage"] = 2
+    review_payload["quality_gate"] = {"passed": False, "categories_below_threshold": ["test_coverage"]}
+    review_payload["artifact_health"] = {"tests": {"test_file_count": 0, "report_count": 0}}
+
+    paths = _improvement_paths(repository_path)
+    _write_improvement_stage_inputs(
+        repository_path=repository_path,
+        paths=paths,
+        review_payload=review_payload,
+        history_entries=[
+            {
+                "generated_at": utc_now_iso(),
+                "job_id": job.job_id,
+                "overall": 3.1,
+                "scores": {"test_coverage": 1, "ux_clarity": 3},
+            },
+            {
+                "generated_at": utc_now_iso(),
+                "job_id": job.job_id,
+                "overall": 3.3,
+                "scores": {"test_coverage": 1, "ux_clarity": 3},
+            },
+        ],
+        backlog_items=[
+            {
+                "id": "tests_regression",
+                "title": "추천 플로우 회귀 테스트 보강",
+                "priority": "P1",
+                "reason": "테스트 저점이 지속됨",
+                "action": "회귀 테스트를 추가",
+            }
+        ],
+        maturity_payload={
+            "level": "mvp",
+            "previous_level": "mvp",
+            "progression": "unchanged",
+            "score": 61,
+            "quality_gate_passed": False,
+        },
+        trend_payload={
+            "trend_direction": "stable",
+            "delta_from_previous": 0.2,
+            "review_round_count": 2,
+            "maturity_progression": "unchanged",
+            "persistent_low_categories": ["test_coverage"],
+            "stagnant_categories": ["test_coverage"],
+            "category_deltas": {"test_coverage": 0},
+        },
+    )
+
+    orchestrator = Orchestrator(settings, store, FakeTemplateRunner())
+    orchestrator._stage_improvement_stage(job, repository_path, paths, log_path)
+
+    memory_lines = [
+        json.loads(line)
+        for line in paths["memory_log"].read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(memory_lines) == 1
+    assert memory_lines[0]["memory_type"] == "episodic"
+    assert memory_lines[0]["signals"]["strategy"] == "test_hardening"
+    assert memory_lines[0]["signals"]["persistent_low_categories"] == ["test_coverage"]
+
+    decision_payload = json.loads(paths["decision_history"].read_text(encoding="utf-8"))
+    assert decision_payload["entries"][0]["decision_type"] == "improvement_strategy"
+    assert decision_payload["entries"][0]["chosen_strategy"] == "test_hardening"
+
+    patterns_payload = json.loads(paths["failure_patterns"].read_text(encoding="utf-8"))
+    pattern_ids = {item["pattern_id"] for item in patterns_payload["items"]}
+    assert "low_category:test_coverage" in pattern_ids
+    assert "persistent_low:test_coverage" in pattern_ids
+
+    conventions_payload = json.loads(paths["conventions"].read_text(encoding="utf-8"))
+    rule_ids = {item["id"] for item in conventions_payload["rules"]}
+    assert "conv_tests_dir" in rule_ids
+    assert "conv_app_components" in rule_ids
+    assert "conv_node_runtime" in rule_ids
+
+    feedback_payload = json.loads(paths["memory_feedback"].read_text(encoding="utf-8"))
+    feedback_ids = {item["memory_id"] for item in feedback_payload["entries"]}
+    assert f"episodic_job_summary:{job.job_id}" in feedback_ids
+    assert f"improvement_strategy:{job.job_id}" in feedback_ids
+    assert all(item["verdict"] == "promote" for item in feedback_payload["entries"])
+
+    rankings_payload = json.loads(paths["memory_rankings"].read_text(encoding="utf-8"))
+    ranking_map = {item["memory_id"]: item for item in rankings_payload["items"]}
+    assert ranking_map[f"episodic_job_summary:{job.job_id}"]["state"] in {"active", "promoted"}
+    assert ranking_map[f"improvement_strategy:{job.job_id}"]["score"] >= 1.0
+
+
+def test_improvement_stage_extracts_richer_repo_conventions(app_components):
+    settings, store, _ = app_components
+    job = _make_job("job-memory-conventions-rich")
+    store.create_job(job)
+
+    repository_path = settings.repository_workspace_path(job.repository, job.app_code)
+    (repository_path / "tests" / "e2e").mkdir(parents=True, exist_ok=True)
+    (repository_path / "app" / "components").mkdir(parents=True, exist_ok=True)
+    (repository_path / "app").mkdir(parents=True, exist_ok=True)
+    (repository_path / "app" / "layout.tsx").write_text("export default function Layout() { return null }\n", encoding="utf-8")
+    (repository_path / "app" / "components" / "Button.tsx").write_text(
+        "export function Button() { return <button /> }\n",
+        encoding="utf-8",
+    )
+    (repository_path / "tests" / "e2e" / "smoke.test.ts").write_text(
+        "test('smoke', async () => {})\n",
+        encoding="utf-8",
+    )
+    (repository_path / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "food-random",
+                "dependencies": {
+                    "next": "15.0.0",
+                    "react": "19.0.0",
+                    "tailwindcss": "4.0.0",
+                    "framer-motion": "12.0.0",
+                    "lucide-react": "0.500.0",
+                },
+                "devDependencies": {
+                    "@playwright/test": "1.55.0",
+                    "typescript": "5.9.0",
+                    "vitest": "3.2.0",
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (repository_path / "README.md").write_text("# Food Random\n", encoding="utf-8")
+
+    log_path = settings.logs_debug_dir / job.log_file
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text("", encoding="utf-8")
+
+    review_payload = _base_review_payload(job.job_id, overall=3.8)
+    paths = _improvement_paths(repository_path)
+    _write_improvement_stage_inputs(
+        repository_path=repository_path,
+        paths=paths,
+        review_payload=review_payload,
+        history_entries=[
+            {"generated_at": utc_now_iso(), "job_id": job.job_id, "overall": 3.6, "scores": {"ux_clarity": 3}},
+        ],
+        backlog_items=[],
+        maturity_payload={
+            "level": "usable",
+            "previous_level": "mvp",
+            "progression": "up",
+            "score": 74,
+            "quality_gate_passed": True,
+        },
+        trend_payload={
+            "trend_direction": "up",
+            "delta_from_previous": 0.2,
+            "review_round_count": 1,
+            "maturity_progression": "up",
+            "persistent_low_categories": [],
+            "stagnant_categories": [],
+            "category_deltas": {"ux_clarity": 1},
+        },
+    )
+
+    orchestrator = Orchestrator(settings, store, FakeTemplateRunner())
+    orchestrator._stage_improvement_stage(job, repository_path, paths, log_path)
+
+    conventions_payload = json.loads(paths["conventions"].read_text(encoding="utf-8"))
+    rule_ids = {item["id"] for item in conventions_payload["rules"]}
+
+    assert "nextjs" in conventions_payload["detected_stack"]
+    assert "react" in conventions_payload["detected_stack"]
+    assert "tailwindcss" in conventions_payload["detected_stack"]
+    assert "playwright" in conventions_payload["detected_stack"]
+    assert "typescript" in conventions_payload["detected_stack"]
+    assert "conv_nextjs" in rule_ids
+    assert "conv_tailwindcss" in rule_ids
+    assert "conv_playwright" in rule_ids
+    assert "conv_typescript" in rule_ids
+    assert "conv_next_app_router" in rule_ids
+    assert "conv_component_tsx" in rule_ids
+    assert "conv_tests_e2e_dir" in rule_ids
+    assert "conv_js_test_pattern" in rule_ids
+
+
+def test_memory_retrieval_artifacts_build_route_specific_context(app_components):
+    settings, store, _ = app_components
+    job = _make_job("job-memory-retrieval")
+    store.create_job(job)
+
+    repository_path = settings.repository_workspace_path(job.repository, job.app_code)
+    repository_path.mkdir(parents=True, exist_ok=True)
+    (repository_path / "tests").mkdir(parents=True, exist_ok=True)
+    (repository_path / "app" / "components").mkdir(parents=True, exist_ok=True)
+    (repository_path / "package.json").write_text('{"name":"retrieval-app"}\n', encoding="utf-8")
+    (repository_path / "README.md").write_text("# App\n", encoding="utf-8")
+
+    log_path = settings.logs_debug_dir / job.log_file
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text("", encoding="utf-8")
+
+    review_payload = _base_review_payload(job.job_id, overall=3.3)
+    review_payload["scores"]["test_coverage"] = 2
+    review_payload["quality_gate"] = {"passed": False, "categories_below_threshold": ["test_coverage"]}
+    review_payload["artifact_health"] = {"tests": {"test_file_count": 0, "report_count": 0}}
+
+    paths = _improvement_paths(repository_path)
+    _write_improvement_stage_inputs(
+        repository_path=repository_path,
+        paths=paths,
+        review_payload=review_payload,
+        history_entries=[
+            {"generated_at": utc_now_iso(), "job_id": job.job_id, "overall": 3.0, "scores": {"test_coverage": 1}},
+            {"generated_at": utc_now_iso(), "job_id": job.job_id, "overall": 3.3, "scores": {"test_coverage": 1}},
+        ],
+        backlog_items=[
+            {
+                "id": "tests_regression",
+                "title": "추천 플로우 회귀 테스트 보강",
+                "priority": "P1",
+                "reason": "테스트 저점이 지속됨",
+                "action": "회귀 테스트를 추가",
+            }
+        ],
+        maturity_payload={
+            "level": "mvp",
+            "previous_level": "mvp",
+            "progression": "unchanged",
+            "score": 61,
+            "quality_gate_passed": False,
+        },
+        trend_payload={
+            "trend_direction": "stable",
+            "delta_from_previous": 0.2,
+            "review_round_count": 2,
+            "maturity_progression": "unchanged",
+            "persistent_low_categories": ["test_coverage"],
+            "stagnant_categories": ["test_coverage"],
+            "category_deltas": {"test_coverage": 0},
+        },
+    )
+
+    orchestrator = Orchestrator(settings, store, FakeTemplateRunner())
+    orchestrator._stage_improvement_stage(job, repository_path, paths, log_path)
+    orchestrator._write_memory_retrieval_artifacts(job=job, repository_path=repository_path, paths=paths)
+
+    selection_payload = json.loads(paths["memory_selection"].read_text(encoding="utf-8"))
+    context_payload = json.loads(paths["memory_context"].read_text(encoding="utf-8"))
+
+    assert selection_payload["corpus_counts"]["episodic"] == 1
+    assert selection_payload["corpus_counts"]["decisions"] == 1
+    assert selection_payload["corpus_counts"]["failure_patterns"] >= 2
+    assert selection_payload["corpus_counts"]["conventions"] >= 3
+    assert selection_payload["planner_context"]
+    assert selection_payload["reviewer_context"]
+    assert selection_payload["coder_context"]
+    assert any(item["kind"] == "decision" for item in context_payload["coder_context"])
+    assert any(item["kind"] == "failure_pattern" for item in context_payload["reviewer_context"])
+    assert any(item["kind"] == "convention" for item in context_payload["planner_context"])
+
+
+def test_memory_retrieval_skips_banned_memory_entries(app_components):
+    settings, store, _ = app_components
+    job = _make_job("job-memory-retrieval-banned")
+    store.create_job(job)
+
+    repository_path = settings.repository_workspace_path(job.repository, job.app_code)
+    repository_path.mkdir(parents=True, exist_ok=True)
+    paths = _improvement_paths(repository_path)
+
+    paths["memory_log"].write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "memory_id": "episodic_job_summary:good",
+                        "memory_type": "episodic",
+                        "generated_at": "2026-03-10T10:00:00Z",
+                        "signals": {"strategy": "stabilization", "overall": 3.8, "maturity_level": "usable"},
+                    },
+                    ensure_ascii=False,
+                ),
+                json.dumps(
+                    {
+                        "memory_id": "episodic_job_summary:banned",
+                        "memory_type": "episodic",
+                        "generated_at": "2026-03-10T11:00:00Z",
+                        "signals": {"strategy": "feature_expansion", "overall": 4.2, "maturity_level": "stable"},
+                    },
+                    ensure_ascii=False,
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    paths["decision_history"].write_text(json.dumps({"entries": []}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    paths["failure_patterns"].write_text(json.dumps({"items": []}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    paths["conventions"].write_text(json.dumps({"rules": []}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    paths["memory_rankings"].write_text(
+        json.dumps(
+            {
+                "items": [
+                    {"memory_id": "episodic_job_summary:good", "score": 2.0, "confidence": 0.8, "usage_count": 2, "state": "promoted"},
+                    {"memory_id": "episodic_job_summary:banned", "score": -5.0, "confidence": 0.1, "usage_count": 3, "state": "banned"},
+                ]
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    orchestrator = Orchestrator(settings, store, FakeTemplateRunner())
+    orchestrator._write_memory_retrieval_artifacts(job=job, repository_path=repository_path, paths=paths)
+
+    context_payload = json.loads(paths["memory_context"].read_text(encoding="utf-8"))
+    planner_ids = [item["id"] for item in context_payload["planner_context"]]
+    assert "episodic_job_summary:good" in planner_ids
+    assert "episodic_job_summary:banned" not in planner_ids
+
+
+def test_planner_prompt_includes_memory_context_snapshot(app_components):
+    settings, store, _ = app_components
+    job = _make_job("job-planner-memory-prompt")
+    store.create_job(job)
+
+    repository_path = settings.repository_workspace_path(job.repository, job.app_code)
+    repository_path.mkdir(parents=True, exist_ok=True)
+    log_path = settings.logs_debug_dir / job.log_file
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text("", encoding="utf-8")
+
+    paths = _improvement_paths(repository_path)
+    paths["spec"] = Orchestrator._docs_file(repository_path, "SPEC.md")
+    paths["plan"] = Orchestrator._docs_file(repository_path, "PLAN.md")
+    paths["review"] = Orchestrator._docs_file(repository_path, "REVIEW.md")
+    paths["spec"].write_text("# SPEC\n", encoding="utf-8")
+    paths["review"].write_text("# REVIEW\n", encoding="utf-8")
+    paths["memory_log"].write_text(
+        json.dumps(
+            {
+                "memory_id": f"episodic_job_summary:{job.job_id}",
+                "memory_type": "episodic",
+                "generated_at": utc_now_iso(),
+                "signals": {
+                    "strategy": "test_hardening",
+                    "overall": 3.3,
+                    "maturity_level": "mvp",
+                    "persistent_low_categories": ["test_coverage"],
+                },
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    paths["decision_history"].write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "decision_id": f"improvement_strategy:{job.job_id}",
+                        "generated_at": utc_now_iso(),
+                        "chosen_strategy": "test_hardening",
+                        "strategy_focus": "testing",
+                        "change_reasons": ["테스트 저점이 지속됨"],
+                        "selected_task_titles": ["회귀 테스트 보강"],
+                    }
+                ]
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    paths["failure_patterns"].write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "pattern_id": "persistent_low:test_coverage",
+                        "pattern_type": "persistent_low",
+                        "category": "test_coverage",
+                        "trigger": "trend_persistent_low",
+                        "count": 3,
+                        "recommended_actions": ["회귀 테스트 보강"],
+                    }
+                ]
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    paths["conventions"].write_text(
+        json.dumps(
+            {
+                "rules": [
+                    {
+                        "id": "conv_tests_dir",
+                        "type": "filesystem",
+                        "rule": "Tests live under tests/",
+                        "evidence_paths": ["tests"],
+                        "confidence": 0.74,
+                    }
+                ]
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    orchestrator = Orchestrator(settings, store, FakeTemplateRunner())
+    orchestrator._run_planner_legacy_one_shot(job, repository_path, paths, log_path)
+
+    prompt_text = (repository_path / "_docs" / "PLANNER_PROMPT.md").read_text(encoding="utf-8")
+    assert "Memory Selection" in prompt_text
+    assert "Memory Context" in prompt_text
+    assert "strategy=test_hardening" in prompt_text
+
+
+def test_improvement_stage_writes_strategy_shadow_report_with_memory_divergence(app_components):
+    settings, store, _ = app_components
+    job = _make_job("job-strategy-shadow")
+    store.create_job(job)
+
+    repository_path = settings.repository_workspace_path(job.repository, job.app_code)
+    repository_path.mkdir(parents=True, exist_ok=True)
+    log_path = settings.logs_debug_dir / job.log_file
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text("", encoding="utf-8")
+
+    paths = _improvement_paths(repository_path)
+    review_payload = _base_review_payload(job.job_id, overall=3.7)
+    history_entries = [
+        {"generated_at": utc_now_iso(), "job_id": job.job_id, "overall": 3.5, "top_issue_ids": ["stability"]},
+        {"generated_at": utc_now_iso(), "job_id": job.job_id, "overall": 3.7, "top_issue_ids": ["stability"]},
+    ]
+    backlog_items = [{"id": "feat-1", "priority": "P2", "title": "다음 기능 후보", "reason": "사용자 가치 개선"}]
+    maturity_payload = {"level": "usable", "score": 76, "progression": "up"}
+    trend_payload = {
+        "trend_direction": "stable",
+        "delta_from_previous": 0.0,
+        "review_round_count": 2,
+        "persistent_low_categories": [],
+        "stagnant_categories": [],
+        "category_deltas": {},
+        "maturity_progression": "unchanged",
+    }
+    _write_improvement_stage_inputs(
+        repository_path=repository_path,
+        paths=paths,
+        review_payload=review_payload,
+        history_entries=history_entries,
+        backlog_items=backlog_items,
+        maturity_payload=maturity_payload,
+        trend_payload=trend_payload,
+    )
+    paths["memory_log"].write_text(
+        json.dumps(
+            {
+                "memory_id": "episodic_job_summary:stable-feature",
+                "memory_type": "episodic",
+                "generated_at": utc_now_iso(),
+                "signals": {
+                    "strategy": "feature_expansion",
+                    "overall": 4.3,
+                    "maturity_level": "stable",
+                },
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    paths["decision_history"].write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "decision_id": "improvement_strategy:stable-feature",
+                        "generated_at": utc_now_iso(),
+                        "chosen_strategy": "feature_expansion",
+                        "strategy_focus": "feature",
+                        "change_reasons": ["상승 추세에서 기능 확장을 선택"],
+                        "selected_task_titles": ["검색 필터 확장"],
+                    }
+                ]
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    paths["failure_patterns"].write_text(json.dumps({"items": []}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    paths["conventions"].write_text(json.dumps({"rules": []}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    paths["memory_rankings"].write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "memory_id": "episodic_job_summary:stable-feature",
+                        "score": 5.0,
+                        "confidence": 0.92,
+                        "usage_count": 4,
+                        "state": "promoted",
+                    },
+                    {
+                        "memory_id": "improvement_strategy:stable-feature",
+                        "score": 4.0,
+                        "confidence": 0.9,
+                        "usage_count": 3,
+                        "state": "promoted",
+                    },
+                ]
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    orchestrator = Orchestrator(settings, store, FakeTemplateRunner())
+    orchestrator._stage_improvement_stage(job, repository_path, paths, log_path)
+
+    shadow_payload = json.loads(paths["strategy_shadow_report"].read_text(encoding="utf-8"))
+    assert shadow_payload["selected_strategy"] == "normal_iterative_improvement"
+    assert shadow_payload["shadow_strategy"] == "feature_expansion"
+    assert shadow_payload["diverged"] is True
+    assert shadow_payload["decision_mode"] == "memory_divergence"
+    assert any(item["recommended_strategy"] == "feature_expansion" for item in shadow_payload["evidence"])
+
+
+def test_improvement_stage_keeps_protected_strategy_in_shadow_mode(app_components):
+    settings, store, _ = app_components
+    job = _make_job("job-strategy-shadow-locked")
+    store.create_job(job)
+
+    repository_path = settings.repository_workspace_path(job.repository, job.app_code)
+    repository_path.mkdir(parents=True, exist_ok=True)
+    log_path = settings.logs_debug_dir / job.log_file
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text("", encoding="utf-8")
+
+    paths = _improvement_paths(repository_path)
+    review_payload = _base_review_payload(job.job_id, overall=3.2)
+    review_payload["operating_policy"]["requires_design_reset"] = True
+    history_entries = [{"generated_at": utc_now_iso(), "job_id": job.job_id, "overall": 3.0, "top_issue_ids": ["design"]}]
+    backlog_items = [{"id": "design-1", "priority": "P0", "title": "설계 문서 재정렬", "reason": "설계 계약 위반"}]
+    maturity_payload = {"level": "mvp", "score": 60, "progression": "unchanged"}
+    trend_payload = {
+        "trend_direction": "stable",
+        "delta_from_previous": 0.0,
+        "review_round_count": 1,
+        "persistent_low_categories": [],
+        "stagnant_categories": [],
+        "category_deltas": {},
+        "maturity_progression": "unchanged",
+    }
+    _write_improvement_stage_inputs(
+        repository_path=repository_path,
+        paths=paths,
+        review_payload=review_payload,
+        history_entries=history_entries,
+        backlog_items=backlog_items,
+        maturity_payload=maturity_payload,
+        trend_payload=trend_payload,
+    )
+    paths["memory_log"].write_text(
+        json.dumps(
+            {
+                "memory_id": "episodic_job_summary:feature-memory",
+                "memory_type": "episodic",
+                "generated_at": utc_now_iso(),
+                "signals": {"strategy": "feature_expansion", "overall": 4.1, "maturity_level": "stable"},
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    paths["decision_history"].write_text(json.dumps({"entries": []}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    paths["failure_patterns"].write_text(json.dumps({"items": []}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    paths["conventions"].write_text(json.dumps({"rules": []}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    paths["memory_rankings"].write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "memory_id": "episodic_job_summary:feature-memory",
+                        "score": 5.0,
+                        "confidence": 0.95,
+                        "usage_count": 5,
+                        "state": "promoted",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    orchestrator = Orchestrator(settings, store, FakeTemplateRunner())
+    orchestrator._stage_improvement_stage(job, repository_path, paths, log_path)
+
+    shadow_payload = json.loads(paths["strategy_shadow_report"].read_text(encoding="utf-8"))
+    assert shadow_payload["selected_strategy"] == "design_rebaseline"
+    assert shadow_payload["shadow_strategy"] == "design_rebaseline"
+    assert shadow_payload["diverged"] is False
+    assert shadow_payload["decision_mode"] == "locked_by_guardrail"
+
+
+def test_memory_retrieval_flag_writes_disabled_context_payload(app_components, tmp_path: Path):
+    settings, store, _ = app_components
+    job = _make_job("job-memory-retrieval-disabled")
+    store.create_job(job)
+
+    repository_path = settings.repository_workspace_path(job.repository, job.app_code)
+    repository_path.mkdir(parents=True, exist_ok=True)
+    paths = _improvement_paths(repository_path)
+
+    feature_flags_path = tmp_path / "config" / "feature_flags.json"
+    feature_flags_path.parent.mkdir(parents=True, exist_ok=True)
+    feature_flags_path.write_text(
+        json.dumps(
+            {
+                "flags": {
+                    "memory_logging": True,
+                    "memory_retrieval": False,
+                    "convention_extraction": True,
+                    "memory_scoring": True,
+                    "strategy_shadow": True,
+                }
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    orchestrator = Orchestrator(settings, store, FakeTemplateRunner())
+    orchestrator.feature_flags_path = feature_flags_path
+    orchestrator._write_memory_retrieval_artifacts(job=job, repository_path=repository_path, paths=paths)
+
+    selection_payload = json.loads(paths["memory_selection"].read_text(encoding="utf-8"))
+    context_payload = json.loads(paths["memory_context"].read_text(encoding="utf-8"))
+    assert selection_payload["enabled"] is False
+    assert selection_payload["planner_context"] == []
+    assert context_payload["enabled"] is False
+    assert context_payload["coder_context"] == []
+
+
+def test_improvement_stage_writes_disabled_strategy_shadow_when_flag_off(app_components, tmp_path: Path):
+    settings, store, _ = app_components
+    job = _make_job("job-strategy-shadow-disabled")
+    store.create_job(job)
+
+    repository_path = settings.repository_workspace_path(job.repository, job.app_code)
+    repository_path.mkdir(parents=True, exist_ok=True)
+    log_path = settings.logs_debug_dir / job.log_file
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text("", encoding="utf-8")
+
+    paths = _improvement_paths(repository_path)
+    review_payload = _base_review_payload(job.job_id, overall=3.4)
+    history_entries = [{"generated_at": utc_now_iso(), "job_id": job.job_id, "overall": 3.1, "top_issue_ids": ["qa"]}]
+    backlog_items = [{"id": "qa-1", "priority": "P1", "title": "테스트 보강", "reason": "품질 강화"}]
+    maturity_payload = {"level": "usable", "score": 71, "progression": "up"}
+    trend_payload = {
+        "trend_direction": "improving",
+        "delta_from_previous": 0.3,
+        "review_round_count": 1,
+        "persistent_low_categories": [],
+        "stagnant_categories": [],
+        "category_deltas": {},
+        "maturity_progression": "up",
+    }
+    _write_improvement_stage_inputs(
+        repository_path=repository_path,
+        paths=paths,
+        review_payload=review_payload,
+        history_entries=history_entries,
+        backlog_items=backlog_items,
+        maturity_payload=maturity_payload,
+        trend_payload=trend_payload,
+    )
+
+    feature_flags_path = tmp_path / "config" / "feature_flags.json"
+    feature_flags_path.parent.mkdir(parents=True, exist_ok=True)
+    feature_flags_path.write_text(
+        json.dumps(
+            {
+                "flags": {
+                    "memory_logging": True,
+                    "memory_retrieval": True,
+                    "convention_extraction": True,
+                    "memory_scoring": True,
+                    "strategy_shadow": False,
+                }
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    orchestrator = Orchestrator(settings, store, FakeTemplateRunner())
+    orchestrator.feature_flags_path = feature_flags_path
+    orchestrator._stage_improvement_stage(job, repository_path, paths, log_path)
+
+    shadow_payload = json.loads(paths["strategy_shadow_report"].read_text(encoding="utf-8"))
+    assert shadow_payload["enabled"] is False
+    assert shadow_payload["decision_mode"] == "disabled"
+    assert shadow_payload["shadow_strategy"] == ""
+
+
 def test_quality_trend_snapshot_tracks_category_level_history():
     maturity_snapshot = {
         "level": "usable",
@@ -1457,6 +2332,76 @@ def test_workflow_node_metadata_controls_planning_mode_and_agent_profile(app_com
     log_text = log_path.read_text(encoding="utf-8")
     assert "Workflow node note: fallback planner note" in log_text
     assert "Workflow node agent profile override: primary -> fallback" in log_text
+
+
+def test_workflow_context_results_accumulate_previous_node_outputs(app_components):
+    settings, store, _ = app_components
+    job = _make_job("job-workflow-context-results")
+    store.create_job(job)
+
+    repository_path = settings.repository_workspace_path(job.repository, job.app_code)
+    repository_path.mkdir(parents=True, exist_ok=True)
+    log_path = settings.logs_debug_dir / job.log_file
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text("", encoding="utf-8")
+
+    workflow = {
+        "workflow_id": "wf-context-results",
+        "entry_node_id": "n1",
+        "nodes": [
+            {"id": "n1", "type": "gh_read_issue", "title": "Issue"},
+            {"id": "n2", "type": "write_spec", "title": "Spec"},
+            {"id": "n3", "type": "tester_task", "title": "Assert context"},
+        ],
+        "edges": [
+            {"from": "n1", "to": "n2", "on": "success"},
+            {"from": "n2", "to": "n3", "on": "success"},
+        ],
+    }
+
+    orchestrator = Orchestrator(settings, store, FakeTemplateRunner())
+    orchestrator._commit_markdown_changes_after_stage = lambda *args, **kwargs: None  # type: ignore[method-assign]
+    orchestrator._stage_read_issue = lambda *_args, **_kwargs: IssueDetails(  # type: ignore[method-assign]
+        title="Issue title",
+        body="Issue body",
+        url="https://github.com/owner/repo/issues/55",
+        labels=("mobile",),
+    )
+
+    def fake_write_spec(*_args, **_kwargs):
+        paths = {
+            "spec": Orchestrator._docs_file(repository_path, "SPEC.md"),
+            "spec_json": Orchestrator._docs_file(repository_path, "SPEC.json"),
+        }
+        paths["spec"].write_text("# SPEC\n", encoding="utf-8")
+        paths["spec_json"].write_text('{"app_type":"web"}\n', encoding="utf-8")
+        return paths
+
+    observed: dict[str, object] = {}
+
+    def fake_tester_task(*, job, repository_path, node, context, log_path):
+        results = context.get("results")
+        assert isinstance(results, dict)
+        assert results["n1"]["node_type"] == "gh_read_issue"
+        assert results["n1"]["artifacts"] == []
+        assert results["n2"]["node_type"] == "write_spec"
+        assert results["n2"]["artifact_keys"] == ["spec", "spec_json"]
+        assert len(results["n2"]["artifacts"]) == 2
+        observed["results"] = results
+        return None
+
+    orchestrator._stage_write_spec = fake_write_spec  # type: ignore[method-assign]
+    orchestrator._workflow_node_tester_task = fake_tester_task  # type: ignore[method-assign]
+
+    orchestrator._run_workflow_pipeline(
+        job,
+        repository_path,
+        workflow,
+        workflow["nodes"],
+        log_path,
+    )
+
+    assert "results" in observed
 
 
 def test_workflow_failure_edge_routes_without_new_attempt(app_components):

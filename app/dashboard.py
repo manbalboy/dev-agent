@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections import Counter
+from datetime import date, datetime, timedelta
 import json
 import os
 from pathlib import Path
@@ -19,6 +21,7 @@ from pydantic import BaseModel, Field
 
 from app.config import AppSettings
 from app.dependencies import get_settings, get_store
+from app.feature_flags import feature_flags_payload, read_feature_flags, write_feature_flags
 from app.models import JobRecord, JobStage, JobStatus, utc_now_iso
 from app.store import JobStore
 from app.workflow_design import (
@@ -56,6 +59,7 @@ _TRACK_CHOICES = {"new", "enhance", "bug", "long", "ultra", "ultra10"}
 _APPS_CONFIG_PATH = Path.cwd() / "config" / "apps.json"
 _WORKFLOWS_CONFIG_PATH = Path.cwd() / "config" / "workflows.json"
 _ROLES_CONFIG_PATH = Path.cwd() / "config" / "roles.json"
+_FEATURE_FLAGS_CONFIG_PATH = Path.cwd() / "config" / "feature_flags.json"
 _DEFAULT_DASHBOARD_PAGE_SIZE = 20
 _MAX_DASHBOARD_PAGE_SIZE = 100
 
@@ -79,6 +83,7 @@ class AppConfigRequest(BaseModel):
     code: str = Field(min_length=1, max_length=32)
     name: str = Field(min_length=1, max_length=80)
     source_repository: str = Field(default="", max_length=200)
+    workflow_id: str = Field(default="", max_length=120)
 
 
 class AppWorkflowMappingRequest(BaseModel):
@@ -140,6 +145,12 @@ class WorkflowDefaultRequest(BaseModel):
     workflow_id: str = Field(min_length=1, max_length=120)
 
 
+class FeatureFlagsRequest(BaseModel):
+    """Payload for adaptive feature flag updates."""
+
+    flags: Dict[str, bool] = Field(default_factory=dict)
+
+
 class AssistantChatRequest(BaseModel):
     """Payload for dashboard assistant chat."""
 
@@ -190,6 +201,7 @@ def _build_job_runtime_signals(
     trend_payload = _read_dashboard_json(docs_dir / "QUALITY_TREND.json")
     loop_payload = _read_dashboard_json(docs_dir / "IMPROVEMENT_LOOP_STATE.json")
     next_tasks_payload = _read_dashboard_json(docs_dir / "NEXT_IMPROVEMENT_TASKS.json")
+    strategy_shadow_payload = _read_dashboard_json(docs_dir / "STRATEGY_SHADOW_REPORT.json")
     node_runs = store.list_node_runs(job.job_id)
     resume_state = _compute_job_resume_state(job, node_runs, settings)
 
@@ -221,6 +233,10 @@ def _build_job_runtime_signals(
         "persistent_low_categories": trend_payload.get("persistent_low_categories", []),
         "stagnant_categories": trend_payload.get("stagnant_categories", []),
         "category_deltas": trend_payload.get("category_deltas", {}),
+        "shadow_strategy": str(strategy_shadow_payload.get("shadow_strategy", "")).strip(),
+        "shadow_confidence": strategy_shadow_payload.get("confidence"),
+        "shadow_diverged": bool(strategy_shadow_payload.get("diverged")),
+        "shadow_decision_mode": str(strategy_shadow_payload.get("decision_mode", "")).strip(),
         "execution_repository": _job_execution_repository(job),
     }
 
@@ -321,11 +337,30 @@ def _filter_dashboard_jobs(
                     str(job.get("stage", "")),
                     str(job.get("branch_name", "")),
                     str(job.get("pr_url", "")),
+                    str(job.get("workflow_id", "")),
                     str(job.get("error_message", "")),
                     str(job.get("recovery_status", "")),
                     str(job.get("strategy", "")),
                     str(job.get("resume_mode", "")),
                     str(job.get("review_overall", "")),
+                    str((job.get("runtime_signals", {}) if isinstance(job.get("runtime_signals"), dict) else {}).get("maturity_level", "")),
+                    str((job.get("runtime_signals", {}) if isinstance(job.get("runtime_signals"), dict) else {}).get("quality_trend_direction", "")),
+                    str((job.get("runtime_signals", {}) if isinstance(job.get("runtime_signals"), dict) else {}).get("shadow_strategy", "")),
+                    str((job.get("runtime_signals", {}) if isinstance(job.get("runtime_signals"), dict) else {}).get("shadow_decision_mode", "")),
+                    " ".join(
+                        str(item)
+                        for item in (
+                            (job.get("runtime_signals", {}) if isinstance(job.get("runtime_signals"), dict) else {}).get("persistent_low_categories", [])
+                            or []
+                        )
+                    ),
+                    " ".join(
+                        str(item)
+                        for item in (
+                            (job.get("runtime_signals", {}) if isinstance(job.get("runtime_signals"), dict) else {}).get("quality_gate_categories", [])
+                            or []
+                        )
+                    ),
                 ]
             ).lower()
             if normalized_query not in haystack:
@@ -395,6 +430,410 @@ def _dashboard_filter_options(jobs: List[Dict[str, Any]]) -> Dict[str, List[str]
         "stages": stages,
         "recovery_statuses": recovery_statuses,
         "strategies": strategies,
+    }
+
+
+def _read_dashboard_jsonl(path: Path) -> List[Dict[str, Any]]:
+    """Read one JSONL file into a list of dict entries."""
+
+    if not path.exists():
+        return []
+    entries: List[Dict[str, Any]] = []
+    for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            entries.append(payload)
+    return entries
+
+
+def _top_counter_items(counter: Counter[str], *, limit: int = 5) -> List[Dict[str, Any]]:
+    """Convert counter into stable top-N payload for dashboard rendering."""
+
+    return [
+        {"name": name, "count": count}
+        for name, count in sorted(counter.items(), key=lambda item: (-item[1], item[0]))[:limit]
+        if str(name).strip()
+    ]
+
+
+def _safe_average(values: List[float]) -> Optional[float]:
+    """Return rounded average or None when list is empty."""
+
+    cleaned = [float(value) for value in values if value is not None]
+    if not cleaned:
+        return None
+    return round(sum(cleaned) / len(cleaned), 2)
+
+
+def _latest_non_empty(values: List[str]) -> str:
+    """Return latest non-empty ISO-like string using lexical max."""
+
+    normalized = [str(value).strip() for value in values if str(value).strip()]
+    if not normalized:
+        return ""
+    return max(normalized)
+
+
+def _build_admin_metrics(store: JobStore, settings: AppSettings) -> Dict[str, Any]:
+    """Aggregate read-only admin metrics from jobs and workspace artifacts."""
+
+    feature_flags = read_feature_flags(_FEATURE_FLAGS_CONFIG_PATH)
+    jobs = _list_dashboard_jobs(store, settings)
+    summary = _build_job_summary(jobs)
+
+    default_workflow_id = _read_default_workflow_id(_WORKFLOWS_CONFIG_PATH)
+    apps = _read_registered_apps(
+        _APPS_CONFIG_PATH,
+        settings.allowed_repository,
+        default_workflow_id=default_workflow_id,
+    )
+    workflows_payload = load_workflows(_WORKFLOWS_CONFIG_PATH)
+    workflows = workflows_payload.get("workflows", []) if isinstance(workflows_payload, dict) else []
+    roles_payload = _read_roles_payload(_ROLES_CONFIG_PATH)
+    roles = roles_payload.get("roles", []) if isinstance(roles_payload, dict) else []
+    presets = roles_payload.get("presets", []) if isinstance(roles_payload, dict) else []
+
+    review_overalls: List[float] = []
+    maturity_scores: List[float] = []
+    trend_counter: Counter[str] = Counter()
+    maturity_counter: Counter[str] = Counter()
+    strategy_counter: Counter[str] = Counter()
+    recovery_counter: Counter[str] = Counter()
+    resume_counter: Counter[str] = Counter()
+    shadow_strategy_counter: Counter[str] = Counter()
+    shadow_decision_counter: Counter[str] = Counter()
+    stage_counter: Counter[str] = Counter()
+    app_counter: Counter[str] = Counter()
+    track_counter: Counter[str] = Counter()
+    workflow_counter: Counter[str] = Counter()
+    low_category_counter: Counter[str] = Counter()
+    gate_pass_count = 0
+    reviewed_job_count = 0
+    shadow_divergence_count = 0
+    adaptive_workflow_id = "adaptive_quality_loop_v1"
+    workflow_daily_counter: Dict[str, Counter[str]] = {}
+    timeline_anchor: Optional[date] = None
+
+    for job in jobs:
+        runtime = job.get("runtime_signals", {}) if isinstance(job.get("runtime_signals"), dict) else {}
+        review_overall = runtime.get("review_overall")
+        if isinstance(review_overall, (int, float)):
+            review_overalls.append(float(review_overall))
+            reviewed_job_count += 1
+        maturity_score = runtime.get("maturity_score")
+        if isinstance(maturity_score, (int, float)):
+            maturity_scores.append(float(maturity_score))
+        if runtime.get("quality_gate_passed") is True:
+            gate_pass_count += 1
+        trend = str(runtime.get("quality_trend_direction", "")).strip()
+        if trend:
+            trend_counter[trend] += 1
+        maturity = str(runtime.get("maturity_level", "")).strip()
+        if maturity:
+            maturity_counter[maturity] += 1
+        strategy = str(runtime.get("strategy", "")).strip()
+        if strategy:
+            strategy_counter[strategy] += 1
+        stage = str(job.get("stage", "")).strip()
+        if stage:
+            stage_counter[stage] += 1
+        app_code = str(job.get("app_code", "")).strip()
+        if app_code:
+            app_counter[app_code] += 1
+        track = str(job.get("track", "")).strip()
+        if track:
+            track_counter[track] += 1
+        workflow_id = str(job.get("workflow_id", "")).strip()
+        if workflow_id:
+            workflow_counter[workflow_id] += 1
+        created_at_raw = str(job.get("created_at", "")).strip()
+        if created_at_raw:
+            try:
+                created_at = datetime.fromisoformat(created_at_raw.replace("Z", "+00:00"))
+                created_day = created_at.date()
+                timeline_anchor = created_day if timeline_anchor is None or created_day > timeline_anchor else timeline_anchor
+                day_counter = workflow_daily_counter.setdefault(created_day.isoformat(), Counter())
+                day_counter[workflow_id or "unspecified"] += 1
+            except ValueError:
+                pass
+        recovery = str(job.get("recovery_status", "")).strip()
+        if recovery:
+            recovery_counter[recovery] += 1
+        resume_mode = str(runtime.get("resume_mode", "")).strip()
+        if resume_mode and resume_mode != "none":
+            resume_counter[resume_mode] += 1
+        shadow_strategy = str(runtime.get("shadow_strategy", "")).strip()
+        if shadow_strategy:
+            shadow_strategy_counter[shadow_strategy] += 1
+        shadow_decision_mode = str(runtime.get("shadow_decision_mode", "")).strip()
+        if shadow_decision_mode:
+            shadow_decision_counter[shadow_decision_mode] += 1
+        if bool(runtime.get("shadow_diverged")):
+            shadow_divergence_count += 1
+        for category in runtime.get("quality_gate_categories", []) or []:
+            normalized = str(category).strip()
+            if normalized:
+                low_category_counter[normalized] += 1
+        for category in runtime.get("persistent_low_categories", []) or []:
+            normalized = str(category).strip()
+            if normalized:
+                low_category_counter[normalized] += 1
+
+    workspace_paths: Dict[str, Path] = {}
+    for job in store.list_jobs():
+        workspace = _job_workspace_path(job, settings)
+        workspace_paths[str(workspace)] = workspace
+
+    memory_totals = {
+        "workspace_count": 0,
+        "workspaces_with_memory": 0,
+        "workspaces_with_retrieval": 0,
+        "workspaces_with_scoring": 0,
+        "episodic_entries": 0,
+        "decision_entries": 0,
+        "failure_patterns": 0,
+        "conventions": 0,
+        "feedback_entries": 0,
+        "workspaces_with_strategy_shadow": 0,
+    }
+    ranking_state_counter: Counter[str] = Counter()
+    retrieval_generated_ats: List[str] = []
+    scoring_generated_ats: List[str] = []
+    shadow_generated_ats: List[str] = []
+
+    for workspace in workspace_paths.values():
+        docs_dir = workspace / "_docs"
+        memory_totals["workspace_count"] += 1
+        memory_log_entries = _read_dashboard_jsonl(docs_dir / "MEMORY_LOG.jsonl")
+        decision_entries = _read_dashboard_json((docs_dir / "DECISION_HISTORY.json")).get("entries", [])
+        failure_items = _read_dashboard_json((docs_dir / "FAILURE_PATTERNS.json")).get("items", [])
+        convention_items = _read_dashboard_json((docs_dir / "CONVENTIONS.json")).get("rules", [])
+        feedback_entries = _read_dashboard_json((docs_dir / "MEMORY_FEEDBACK.json")).get("entries", [])
+        ranking_items = _read_dashboard_json((docs_dir / "MEMORY_RANKINGS.json")).get("items", [])
+        memory_selection_payload = _read_dashboard_json(docs_dir / "MEMORY_SELECTION.json")
+        memory_context_payload = _read_dashboard_json(docs_dir / "MEMORY_CONTEXT.json")
+        memory_feedback_payload = _read_dashboard_json(docs_dir / "MEMORY_FEEDBACK.json")
+        memory_rankings_payload = _read_dashboard_json(docs_dir / "MEMORY_RANKINGS.json")
+        strategy_shadow_payload = _read_dashboard_json(docs_dir / "STRATEGY_SHADOW_REPORT.json")
+
+        if any(
+            [
+                memory_log_entries,
+                isinstance(decision_entries, list) and len(decision_entries) > 0,
+                isinstance(failure_items, list) and len(failure_items) > 0,
+                isinstance(convention_items, list) and len(convention_items) > 0,
+                isinstance(feedback_entries, list) and len(feedback_entries) > 0,
+                isinstance(ranking_items, list) and len(ranking_items) > 0,
+            ]
+        ):
+            memory_totals["workspaces_with_memory"] += 1
+        if memory_selection_payload or memory_context_payload:
+            memory_totals["workspaces_with_retrieval"] += 1
+            retrieval_generated_ats.extend(
+                [
+                    str(memory_selection_payload.get("generated_at", "")).strip(),
+                    str(memory_context_payload.get("generated_at", "")).strip(),
+                ]
+            )
+        if memory_feedback_payload or memory_rankings_payload:
+            memory_totals["workspaces_with_scoring"] += 1
+            scoring_generated_ats.extend(
+                [
+                    str(memory_feedback_payload.get("generated_at", "")).strip(),
+                    str(memory_rankings_payload.get("generated_at", "")).strip(),
+                ]
+            )
+        if strategy_shadow_payload:
+            memory_totals["workspaces_with_strategy_shadow"] += 1
+            shadow_generated_ats.append(str(strategy_shadow_payload.get("generated_at", "")).strip())
+
+        memory_totals["episodic_entries"] += len(memory_log_entries)
+        memory_totals["decision_entries"] += len(decision_entries) if isinstance(decision_entries, list) else 0
+        memory_totals["failure_patterns"] += len(failure_items) if isinstance(failure_items, list) else 0
+        memory_totals["conventions"] += len(convention_items) if isinstance(convention_items, list) else 0
+        memory_totals["feedback_entries"] += len(feedback_entries) if isinstance(feedback_entries, list) else 0
+        if isinstance(ranking_items, list):
+            for item in ranking_items:
+                if not isinstance(item, dict):
+                    continue
+                ranking_state = str(item.get("state", "")).strip() or "active"
+                ranking_state_counter[ranking_state] += 1
+
+    unique_execution_repositories = sorted(
+        {
+            str((job.get("runtime_signals", {}) if isinstance(job.get("runtime_signals"), dict) else {}).get("execution_repository", "")).strip()
+            for job in jobs
+            if str((job.get("runtime_signals", {}) if isinstance(job.get("runtime_signals"), dict) else {}).get("execution_repository", "")).strip()
+        }
+    )
+    app_workflow_counter: Counter[str] = Counter()
+    apps_using_adaptive_workflow = 0
+    apps_using_default_workflow = 0
+    for app_entry in apps:
+        if not isinstance(app_entry, dict):
+            continue
+        resolved_workflow_id = str(app_entry.get("workflow_id") or default_workflow_id or "").strip()
+        if not resolved_workflow_id:
+            continue
+        app_workflow_counter[resolved_workflow_id] += 1
+        if resolved_workflow_id == adaptive_workflow_id:
+            apps_using_adaptive_workflow += 1
+        if resolved_workflow_id == default_workflow_id:
+            apps_using_default_workflow += 1
+    if timeline_anchor is None:
+        timeline_anchor = datetime.fromisoformat(utc_now_iso().replace("Z", "+00:00")).date()
+    workflow_timeline: List[Dict[str, Any]] = []
+    for offset in range(6, -1, -1):
+        bucket_day = timeline_anchor - timedelta(days=offset)
+        bucket_key = bucket_day.isoformat()
+        bucket_counter = workflow_daily_counter.get(bucket_key, Counter())
+        default_count = bucket_counter.get(default_workflow_id, 0) if default_workflow_id else 0
+        adaptive_count = bucket_counter.get(adaptive_workflow_id, 0)
+        total_count = sum(bucket_counter.values())
+        workflow_timeline.append(
+            {
+                "day": bucket_key,
+                "default_count": default_count,
+                "adaptive_count": adaptive_count,
+                "other_count": max(0, total_count - default_count - adaptive_count),
+                "total_count": total_count,
+            }
+        )
+    supported_node_types = schema_payload().get("node_types", {})
+    retrieval_enabled = bool(feature_flags.get("memory_retrieval"))
+    scoring_enabled = bool(feature_flags.get("memory_scoring"))
+    shadow_enabled = bool(feature_flags.get("strategy_shadow"))
+    capabilities = [
+        {
+            "id": "workflow_control_nodes",
+            "label": "Workflow Control Nodes",
+            "enabled": "if_label_match" in supported_node_types and "loop_until_pass" in supported_node_types,
+            "detail": "조건 분기와 루프 노드를 실행 엔진이 지원합니다.",
+        },
+        {
+            "id": "memory_logging",
+            "label": "Structured Memory Logging",
+            "enabled": bool(feature_flags.get("memory_logging")),
+            "detail": f"completed workspace의 memory log / decision / failure pattern을 기록합니다. active workspace {memory_totals['workspaces_with_memory']}",
+        },
+        {
+            "id": "memory_retrieval",
+            "label": "Controlled Retrieval",
+            "enabled": retrieval_enabled,
+            "detail": f"planner/reviewer/coder prompt에 read-only memory context를 주입합니다. active workspace {memory_totals['workspaces_with_retrieval']}",
+        },
+        {
+            "id": "convention_extraction",
+            "label": "Convention Extraction",
+            "enabled": bool(feature_flags.get("convention_extraction")),
+            "detail": f"manifest/dir/test pattern 기반 convention 규칙을 추출합니다. rule count {memory_totals['conventions']}",
+        },
+        {
+            "id": "memory_scoring",
+            "label": "Memory Quality Scoring",
+            "enabled": scoring_enabled,
+            "detail": f"memory feedback/ranking으로 promote/decay/banned 상태를 집계합니다. active workspace {memory_totals['workspaces_with_scoring']}",
+        },
+        {
+            "id": "strategy_shadow",
+            "label": "Adaptive Strategy Shadow",
+            "enabled": shadow_enabled,
+            "detail": f"실제 전략은 유지한 채 memory-aware shadow strategy를 비교 기록합니다. active workspace {memory_totals['workspaces_with_strategy_shadow']}",
+        },
+    ]
+    phase_status = [
+        {"phase": "Phase 1", "status": "closed", "detail": "제품형 workflow/runtime/review/recovery 기반 완료"},
+        {"phase": "Phase 2-A", "status": "implemented", "detail": "workflow result context + interrupted cleanup + read-first ops"},
+        {"phase": "Phase 2-B", "status": "implemented", "detail": "structured memory write path"},
+        {"phase": "Phase 2-C", "status": "implemented", "detail": "controlled retrieval prompt injection"},
+        {"phase": "Phase 2-D", "status": "implemented", "detail": "repo convention extraction v1"},
+        {"phase": "Phase 2-E", "status": "implemented", "detail": "memory feedback/rankings + banned-memory avoidance"},
+        {"phase": "Phase 2-F", "status": "implemented", "detail": "adaptive strategy shadow report"},
+    ]
+
+    return {
+        "generated_at": utc_now_iso(),
+        "system": {
+            "apps_count": len(apps),
+            "workflows_count": len(workflows) if isinstance(workflows, list) else 0,
+            "roles_count": len(roles) if isinstance(roles, list) else 0,
+            "role_presets_count": len(presets) if isinstance(presets, list) else 0,
+            "jobs_total": summary["total"],
+            "jobs_running": summary["running"],
+            "jobs_failed": summary["failed"],
+            "workspaces_count": memory_totals["workspace_count"],
+            "execution_repositories_count": len(unique_execution_repositories),
+            "execution_repositories": unique_execution_repositories[:8],
+            "default_workflow_id": default_workflow_id,
+            "adaptive_workflow_id": adaptive_workflow_id,
+            "apps_using_default_workflow": apps_using_default_workflow,
+            "apps_using_adaptive_workflow": apps_using_adaptive_workflow,
+        },
+        "runtime": {
+            "job_summary": summary,
+            "reviewed_jobs_count": reviewed_job_count,
+            "quality_gate_pass_rate": round(gate_pass_count / reviewed_job_count, 3) if reviewed_job_count else None,
+            "strategy_counts": _top_counter_items(strategy_counter, limit=8),
+            "stage_counts": _top_counter_items(stage_counter, limit=8),
+            "app_counts": _top_counter_items(app_counter, limit=8),
+            "track_counts": _top_counter_items(track_counter, limit=8),
+            "workflow_counts": _top_counter_items(workflow_counter, limit=8),
+            "recovery_counts": _top_counter_items(recovery_counter, limit=8),
+            "resume_mode_counts": _top_counter_items(resume_counter, limit=8),
+            "shadow_strategy_counts": _top_counter_items(shadow_strategy_counter, limit=8),
+            "shadow_decision_counts": _top_counter_items(shadow_decision_counter, limit=8),
+            "shadow_divergence_count": shadow_divergence_count,
+            "adaptive_job_count": workflow_counter.get(adaptive_workflow_id, 0),
+            "default_job_count": workflow_counter.get(default_workflow_id, 0) if default_workflow_id else 0,
+        },
+        "quality": {
+            "average_review_overall": _safe_average(review_overalls),
+            "average_maturity_score": _safe_average(maturity_scores),
+            "trend_direction_counts": _top_counter_items(trend_counter, limit=8),
+            "maturity_level_counts": _top_counter_items(maturity_counter, limit=8),
+            "low_category_counts": _top_counter_items(low_category_counter, limit=8),
+        },
+        "workflow_adoption": {
+            "default_workflow_id": default_workflow_id,
+            "adaptive_workflow_id": adaptive_workflow_id,
+            "app_workflow_counts": _top_counter_items(app_workflow_counter, limit=8),
+            "apps_using_default_workflow": apps_using_default_workflow,
+            "apps_using_adaptive_workflow": apps_using_adaptive_workflow,
+            "adaptive_app_rate": round(apps_using_adaptive_workflow / len(apps), 3) if apps else None,
+            "timeline": workflow_timeline,
+        },
+        "memory": {
+            **memory_totals,
+            "ranking_state_counts": _top_counter_items(ranking_state_counter, limit=8),
+        },
+        "feature_flags": feature_flags,
+        "capabilities": capabilities,
+        "phase_status": phase_status,
+        "retrieval": {
+            "enabled": retrieval_enabled,
+            "latest_generated_at": _latest_non_empty(retrieval_generated_ats),
+            "workspaces_with_retrieval": memory_totals["workspaces_with_retrieval"],
+            "active": memory_totals["workspaces_with_retrieval"] > 0,
+        },
+        "scoring": {
+            "enabled": scoring_enabled,
+            "latest_generated_at": _latest_non_empty(scoring_generated_ats),
+            "workspaces_with_scoring": memory_totals["workspaces_with_scoring"],
+            "active": memory_totals["workspaces_with_scoring"] > 0,
+        },
+        "shadow": {
+            "enabled": shadow_enabled,
+            "latest_generated_at": _latest_non_empty(shadow_generated_ats),
+            "workspaces_with_strategy_shadow": memory_totals["workspaces_with_strategy_shadow"],
+            "divergence_count": shadow_divergence_count,
+            "active": memory_totals["workspaces_with_strategy_shadow"] > 0,
+        },
     }
 
 
@@ -475,6 +914,16 @@ def jobs_api(
             "filter_options": _dashboard_filter_options(jobs),
         }
     )
+
+
+@router.get("/api/admin/metrics", response_class=JSONResponse)
+def admin_metrics_api(
+    store: JobStore = Depends(get_store),
+    settings: AppSettings = Depends(get_settings),
+) -> JSONResponse:
+    """Return read-only admin metrics for dashboard management view."""
+
+    return JSONResponse(_build_admin_metrics(store, settings))
 
 
 @router.get("/api/jobs/options", response_class=JSONResponse)
@@ -563,6 +1012,17 @@ def upsert_app(
         )
 
     default_workflow_id = _read_default_workflow_id(_WORKFLOWS_CONFIG_PATH)
+    workflows_payload = load_workflows(_WORKFLOWS_CONFIG_PATH)
+    workflows = workflows_payload.get("workflows", [])
+    known_workflow_ids = {
+        str(item.get("workflow_id", "")).strip()
+        for item in workflows
+        if isinstance(item, dict)
+    }
+    requested_workflow_id = str(payload.workflow_id or "").strip()
+    workflow_id = requested_workflow_id or default_workflow_id
+    if workflow_id and workflow_id not in known_workflow_ids:
+        raise HTTPException(status_code=400, detail=f"등록되지 않은 workflow_id 입니다: {workflow_id}")
     apps = _read_registered_apps(
         _APPS_CONFIG_PATH,
         settings.allowed_repository,
@@ -580,7 +1040,7 @@ def upsert_app(
                     "code": code,
                     "name": name,
                     "repository": settings.allowed_repository,
-                    "workflow_id": app.get("workflow_id", default_workflow_id),
+                    "workflow_id": workflow_id,
                     "source_repository": source_repository,
                 }
             )
@@ -593,7 +1053,7 @@ def upsert_app(
                 "code": code,
                 "name": name,
                 "repository": settings.allowed_repository,
-                "workflow_id": default_workflow_id,
+                "workflow_id": workflow_id,
                 "source_repository": source_repository,
             }
         )
@@ -944,6 +1404,23 @@ def set_default_workflow_api(
     saved["default_workflow_id"] = workflow_id
     save_workflows(_WORKFLOWS_CONFIG_PATH, saved)
     return JSONResponse({"saved": True, "default_workflow_id": workflow_id})
+
+
+@router.get("/api/feature-flags", response_class=JSONResponse)
+def get_feature_flags_api() -> JSONResponse:
+    """Return adaptive feature flags for settings/admin UI."""
+
+    return JSONResponse(feature_flags_payload(_FEATURE_FLAGS_CONFIG_PATH))
+
+
+@router.post("/api/feature-flags", response_class=JSONResponse)
+def save_feature_flags_api(
+    payload: FeatureFlagsRequest,
+) -> JSONResponse:
+    """Persist adaptive feature flags."""
+
+    flags = write_feature_flags(_FEATURE_FLAGS_CONFIG_PATH, payload.flags)
+    return JSONResponse({"saved": True, **feature_flags_payload(_FEATURE_FLAGS_CONFIG_PATH), "flags": flags})
 
 
 @router.get("/api/agents/config", response_class=JSONResponse)

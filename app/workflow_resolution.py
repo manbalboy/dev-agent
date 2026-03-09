@@ -162,7 +162,7 @@ def resolve_workflow_selection(
     default_workflow_id, known_workflows = load_workflow_catalog(workflows_path)
     known_workflow_ids = set(known_workflows)
 
-    requested = requested_workflow_id.strip()
+    requested = str(requested_workflow_id or "").strip()
     if requested:
         if requested in known_workflow_ids:
             return WorkflowSelection(workflow_id=requested, source="job")

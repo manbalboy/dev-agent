@@ -614,6 +614,8 @@ def build_planner_prompt(
     improvement_plan_path: str = "",
     improvement_loop_state_path: str = "",
     next_improvement_tasks_path: str = "",
+    memory_selection_path: str = "",
+    memory_context_path: str = "",
     is_long_term: bool = False,
     is_refinement_round: bool = False,
     planning_mode: str = "general",
@@ -630,6 +632,8 @@ def build_planner_prompt(
         - {improvement_plan_path} (파일이 존재하고 비어있지 않으면 다음 라운드 전략으로 반영)
         - {improvement_loop_state_path} (strategy / scope_restriction / rollback 신호 참고)
         - {next_improvement_tasks_path} (다음 우선 작업 목록이 있으면 반드시 반영)
+        - {memory_selection_path} (memory retrieval selection 결과가 있으면 참고)
+        - {memory_context_path} (retrieved memory context가 있으면 참고)
 
         출력 대상 경로(참고용):
         - {plan_path}
@@ -695,6 +699,16 @@ def build_planner_prompt(
         - tool 값은 반드시 research_search만 허용.
         """
     ).strip()
+    memory_addendum = "\n\n".join(
+        block
+        for block in [
+            _read_prompt_context(memory_selection_path, label="Memory Selection"),
+            _read_prompt_context(memory_context_path, label="Memory Context"),
+        ]
+        if block
+    ).strip()
+    if memory_addendum:
+        base += "\n\n" + memory_addendum
     base = base + "\n\n" + SEARCH_TOOL_GUIDE
 
     mode = (planning_mode or "general").strip().lower()
@@ -782,12 +796,14 @@ def build_coder_prompt(
     improvement_plan_path: str = "",
     improvement_loop_state_path: str = "",
     next_improvement_tasks_path: str = "",
+    memory_selection_path: str = "",
+    memory_context_path: str = "",
 ) -> str:
     """Prompt text for coder model (Codex)."""
 
     # We include both PLAN and REVIEW references in one prompt shape so the same
     # command template can be reused for implementation and fix stages.
-    return dedent(
+    base = dedent(
         f"""
         Goal: {coding_goal}
 
@@ -836,7 +852,18 @@ def build_coder_prompt(
         5. 유지보수성: 최소 변경으로 명확한 구조를 유지했는가?
         6. 반복 방지: 같은 문제를 기계적으로 다시 수정하는 패턴이 아닌가?
         """
-    ).strip() + "\n\n" + SEARCH_TOOL_GUIDE + "\n"
+    ).strip()
+    memory_addendum = "\n\n".join(
+        block
+        for block in [
+            _read_prompt_context(memory_selection_path, label="Memory Selection"),
+            _read_prompt_context(memory_context_path, label="Memory Context"),
+        ]
+        if block
+    ).strip()
+    if memory_addendum:
+        base += "\n\n" + memory_addendum
+    return base + "\n\n" + SEARCH_TOOL_GUIDE + "\n"
 
 
 
@@ -1111,10 +1138,16 @@ def build_commit_message_prompt(
     ).strip() + "\n"
 
 
-def build_reviewer_prompt(spec_path: str, plan_path: str, review_path: str) -> str:
+def build_reviewer_prompt(
+    spec_path: str,
+    plan_path: str,
+    review_path: str,
+    memory_selection_path: str = "",
+    memory_context_path: str = "",
+) -> str:
     """Prompt text for reviewer model (Gemini)."""
 
-    return dedent(
+    base = dedent(
         f"""
         당신은 REVIEW.md의 최종 markdown 본문을 생성합니다.
 
@@ -1155,7 +1188,18 @@ def build_reviewer_prompt(spec_path: str, plan_path: str, review_path: str) -> s
         - markdown 본문만 출력하고 작업 과정/내부 추론/메타 코멘트 금지.
         - 출력 내 후속 질문 금지.
         """
-    ).strip() + "\n"
+    ).strip()
+    memory_addendum = "\n\n".join(
+        block
+        for block in [
+            _read_prompt_context(memory_selection_path, label="Memory Selection"),
+            _read_prompt_context(memory_context_path, label="Memory Context"),
+        ]
+        if block
+    ).strip()
+    if memory_addendum:
+        base += "\n\n" + memory_addendum
+    return base + "\n"
 
 
 

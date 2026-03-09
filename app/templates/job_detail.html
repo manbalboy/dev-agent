@@ -284,6 +284,12 @@
         const nextTask = runtime.next_task_title || "-";
         const scopeRestriction = runtime.scope_restriction || "-";
         const strategy = runtime.strategy || "-";
+        const shadowStrategy = runtime.shadow_strategy || "-";
+        const shadowDiverged = runtime.shadow_diverged === true;
+        const shadowDecisionMode = runtime.shadow_decision_mode || "-";
+        const shadowConfidence = runtime.shadow_confidence !== undefined && runtime.shadow_confidence !== null
+          ? String(runtime.shadow_confidence)
+          : "-";
         const maturityLevel = runtime.maturity_level || "-";
         const maturityScore = runtime.maturity_score !== undefined && runtime.maturity_score !== null
           ? `${runtime.maturity_score}/100`
@@ -318,6 +324,16 @@
               <dt>범위 제한</dt><dd>${esc(scopeRestriction)}</dd>
               <dt>다음 작업</dt><dd>${esc(nextTask)}</dd>
               <dt>권장 노드</dt><dd>${esc(recommendedNodeType)}</dd>
+            </dl>
+          </article>
+          <article class="runtime-health-card">
+            <h3>전략 비교</h3>
+            <dl class="runtime-health-list">
+              <dt>현재</dt><dd>${esc(strategy)}</dd>
+              <dt>Shadow</dt><dd>${esc(shadowStrategy)}</dd>
+              <dt>판정</dt><dd>${shadowDiverged ? `<span class="badge status-running">diverged</span>` : `<span class="badge status-done">aligned</span>`}</dd>
+              <dt>모드</dt><dd>${esc(shadowDecisionMode)}</dd>
+              <dt>신뢰도</dt><dd>${esc(shadowConfidence)}</dd>
             </dl>
           </article>
           <article class="runtime-health-card">
@@ -991,6 +1007,7 @@
         const normalized = String(status || "").trim().toLowerCase();
         if (normalized === "success") return "done";
         if (normalized === "failed") return "failed";
+        if (normalized === "interrupted") return "interrupted";
         return "running";
       }
 
@@ -998,6 +1015,7 @@
         const normalized = String(status || "").trim().toLowerCase();
         if (normalized === "success") return "완료";
         if (normalized === "failed") return "실패";
+        if (normalized === "interrupted") return "중단";
         return "실행 중";
       }
 
@@ -1256,7 +1274,10 @@
             : "";
           const doneCount = latestRuns.filter((item) => workflowRunStatusClass(item?.status) === "done").length
             + (Array.isArray(resumeState.skipped_nodes) && resumeState.mode === "resume" ? resumeState.skipped_nodes.length : 0);
-          const failedCount = latestRuns.filter((item) => workflowRunStatusClass(item?.status) === "failed").length;
+          const failedCount = latestRuns.filter((item) => {
+            const statusClass = workflowRunStatusClass(item?.status);
+            return statusClass === "failed" || statusClass === "interrupted";
+          }).length;
           const runningCount = latestRuns.filter((item) => workflowRunStatusClass(item?.status) === "running").length;
           const lastRun = latestRuns[latestRuns.length - 1];
           const workflowHint = currentWorkflowId ? `workflow: ${esc(currentWorkflowId)} · ` : "";
@@ -1407,6 +1428,55 @@
         return "대기";
       }
 
+      function groupLastTimestampMs(group) {
+        const entries = Array.isArray(group?.entries) ? group.entries : [];
+        for (let index = entries.length - 1; index >= 0; index -= 1) {
+          const ms = parseEpochMillis(entries[index]?.timestamp || "");
+          if (ms !== null) return ms;
+        }
+        return null;
+      }
+
+      function groupLastTimestampText(group) {
+        const entries = Array.isArray(group?.entries) ? group.entries : [];
+        for (let index = entries.length - 1; index >= 0; index -= 1) {
+          const raw = String(entries[index]?.timestamp || "").trim();
+          if (raw) return formatKstDateTime(raw);
+        }
+        return "-";
+      }
+
+      function summarizeGroupDocuments(group) {
+        const snapshot = stageSnapshotMap.get(`${group.attempt}|${group.stage}`);
+        const changedRaw = Array.isArray(snapshot && snapshot.changed_files)
+          ? snapshot.changed_files
+          : [];
+        const changedMdPaths = changedRaw
+          .map((line) => String(line || "").replace(/^[A-Z?]{1,2}\s+/, "").trim())
+          .filter((path) => path.toLowerCase().endsWith(".md"));
+        const mdFiles = Array.isArray(snapshot && snapshot.md_files) ? snapshot.md_files : [];
+        const changedSet = new Set(changedMdPaths);
+        return mdFiles.filter((item) => changedSet.has(String(item.path || "").trim()));
+      }
+
+      function renderUserGroupSnapshot(group, title = "해당 시점 생성 문서") {
+        const stageDocs = summarizeGroupDocuments(group);
+        const docsHtml = stageDocs.length
+          ? stageDocs.map((doc) => {
+              const name = String(doc.path || "unknown.md");
+              const content = String(doc.content || "");
+              return `<details class="snapshot-file">
+                <summary>${esc(name)}</summary>
+                <pre class="snapshot-content">${esc(content)}</pre>
+              </details>`;
+            }).join("")
+          : `<p class="snapshot-empty">이 단계에서 생성/수정된 문서가 없습니다.</p>`;
+        return `<section class="stage-snapshot">
+          <h4>${esc(title)}</h4>
+          ${docsHtml}
+        </section>`;
+      }
+
       function chooseSummaryMdFiles(files) {
         const picked = [];
         const prefer = [
@@ -1468,6 +1538,7 @@
           board.innerHTML = `<p class="hint">표시할 사용자 로그가 아직 없습니다.</p>`;
           return;
         }
+
         const roleMap = new Map();
         for (const group of groups) {
           const actor = detectGroupActor(group);
@@ -1489,7 +1560,6 @@
           else if (progress === "완료") bucket.progress.done += 1;
           else if (progress === "진행중") bucket.progress.running += 1;
           else bucket.progress.pending += 1;
-
         }
 
         for (const entry of debugEntriesCache || []) {
@@ -1501,79 +1571,114 @@
           bucket.tools.set(tool, (bucket.tools.get(tool) || 0) + 1);
         }
 
-        const roleCards = Array.from(roleMap.values());
-        const roleCardsHtml = roleCards.map((role, index) => {
-          const workflow = Array.from(role.workflowStages.values());
-          const workflowHtml = workflow.length
-            ? `<ol class="failure-list">${workflow.map((stage) => `<li class="failure-item"><span class="failure-text">${esc(stage)}</span></li>`).join("")}</ol>`
-            : `<p class="snapshot-empty">워크플로우 단계 정보가 없습니다.</p>`;
+        const latestGroup = groups[groups.length - 1];
+        const latestActor = detectGroupActor(latestGroup);
+        const latestStageCode = String(latestGroup.stage || "").replace(/^stage:/, "");
+        const latestStageLabel = stageDisplayName(latestStageCode);
+        const latestAttemptLabel = String(latestGroup.attempt || "attempt:0").replace(/^attempt:/, "");
+        const latestProgress = summarizeGroupProgress(latestGroup);
+        const latestBadgeClass = latestProgress.startsWith("실패") ? "failed" : (latestProgress === "완료" ? "done" : "running");
 
-          const latestGroups = role.groups.slice(0, 1);
-          const groupRows = latestGroups
-            .map((group) => {
-              const stageCode = String(group.stage || "").replace(/^stage:/, "");
-              const stageLabel = stageDisplayName(stageCode);
-              const attemptLabel = String(group.attempt || "attempt:0").replace(/^attempt:/, "");
-              const progress = summarizeGroupProgress(group);
-              const snapshot = stageSnapshotMap.get(`${group.attempt}|${group.stage}`);
-              const changedRaw = Array.isArray(snapshot && snapshot.changed_files)
-                ? snapshot.changed_files
-                : [];
-              const changedMdPaths = changedRaw
-                .map((line) => String(line || "").replace(/^[A-Z?]{1,2}\s+/, "").trim())
-                .filter((path) => path.toLowerCase().endsWith(".md"));
-              const mdFiles = Array.isArray(snapshot && snapshot.md_files) ? snapshot.md_files : [];
-              const changedSet = new Set(changedMdPaths);
-              const stageDocs = mdFiles.filter((item) => changedSet.has(String(item.path || "").trim()));
-              const docsHtml = stageDocs.length
-                ? stageDocs.map((doc) => {
-                    const name = String(doc.path || "unknown.md");
-                    const content = String(doc.content || "");
-                    return `<details class="snapshot-file" open>
-                      <summary>${esc(name)}</summary>
-                      <pre class="snapshot-content">${esc(content)}</pre>
-                    </details>`;
-                  }).join("")
-                : `<p class="snapshot-empty">이 단계에서 생성/수정된 문서가 없습니다.</p>`;
-              return `<li class="failure-item">
-                <span class="failure-type">${esc(progress)}</span>
-                <span class="failure-text">시도 ${esc(attemptLabel)} · ${esc(stageLabel)} · 로그 ${group.entries.length}줄</span>
-                <section class="stage-snapshot">
-                  <h4>해당 시점 생성 문서</h4>
-                  ${docsHtml}
-                </section>
-              </li>`;
-            })
-            .join("");
+        const roleCards = Array.from(roleMap.values())
+          .sort((a, b) => {
+            const aTotal = a.progress.running + a.progress.done + a.progress.failed + a.progress.pending;
+            const bTotal = b.progress.running + b.progress.done + b.progress.failed + b.progress.pending;
+            return bTotal - aTotal;
+          });
 
-          const tools = Array.from(role.tools.entries()).sort((a, b) => b[1] - a[1]);
-          const toolsHtml = tools.length
-            ? `<ul class="failure-list">${tools.map(([name, count]) => `<li class="failure-item"><span class="failure-type">${esc(String(count))}회</span><span class="failure-text">${esc(name)}</span></li>`).join("")}</ul>`
-            : `<p class="snapshot-empty">기록된 도구 사용 정보가 없습니다.</p>`;
-
-          return `<article class="task-log-card user-log-card">
+        const roleSummaryHtml = roleCards.map((role) => {
+          const workflow = Array.from(role.workflowStages.values()).slice(0, 4);
+          const tools = Array.from(role.tools.entries()).sort((a, b) => b[1] - a[1]).slice(0, 3);
+          const workflowText = workflow.length ? workflow.join(" -> ") : "단계 정보 없음";
+          const toolText = tools.length ? tools.map(([name, count]) => `${name} ${count}`).join(" · ") : "도구 정보 없음";
+          return `<article class="task-log-card user-log-card user-log-role-card">
             <header class="task-log-head">
               <div class="task-log-title">
-                <strong>역할: ${esc(actorDisplayName(role.actor))}</strong>
+                <strong>${esc(actorDisplayName(role.actor))}</strong>
                 <span class="hint">진행중 ${role.progress.running} · 완료 ${role.progress.done} · 실패 ${role.progress.failed}</span>
               </div>
             </header>
-            <details class="stage-snapshot" open>
-              <summary>도구 사용 현황</summary>
-              ${toolsHtml}
-            </details>
-            <details class="stage-snapshot" open>
-              <summary>역할 워크플로우</summary>
-              ${workflowHtml}
-            </details>
-            <details class="stage-snapshot" open>
-              <summary>역할 단계 수행 로그</summary>
-              <ul class="failure-list">${groupRows || `<li class="failure-item"><span class="failure-text">기록 없음</span></li>`}</ul>
-            </details>
+            <p class="hint">${esc(workflowText)}</p>
+            <p class="hint">${esc(toolText)}</p>
           </article>`;
         }).join("");
 
-        board.innerHTML = roleCardsHtml;
+        const timelineHtml = [...groups]
+          .sort((a, b) => {
+            const aMs = groupLastTimestampMs(a) ?? 0;
+            const bMs = groupLastTimestampMs(b) ?? 0;
+            if (aMs !== bMs) return bMs - aMs;
+            return String(b.key || "").localeCompare(String(a.key || ""));
+          })
+          .map((group) => {
+            const actor = detectGroupActor(group);
+            const stageCode = String(group.stage || "").replace(/^stage:/, "");
+            const stageLabel = stageDisplayName(stageCode);
+            const attemptLabel = String(group.attempt || "attempt:0").replace(/^attempt:/, "");
+            const progress = summarizeGroupProgress(group);
+            const badgeClass = progress.startsWith("실패") ? "failed" : (progress === "완료" ? "done" : "running");
+            const latestLines = (group.entries || []).slice(-3);
+            const linesHtml = latestLines.map((entry) => {
+              const type = classifyLogEntry(entry);
+              return `<article class="log-entry type-${type}">
+                <div class="log-entry-head">
+                  <span class="log-entry-tag">${displayLabel(type)}</span>
+                  <span class="log-entry-actor actor-${esc(String(entry.actor || "ORCHESTRATOR").toLowerCase())}">${esc(actorDisplayName(entry.actor || "ORCHESTRATOR"))}</span>
+                  <span class="log-entry-time">${esc(formatKstDateTime(entry.timestamp || ""))}</span>
+                </div>
+                <pre class="log-entry-body">${esc(humanizeLogMessage(entry.message || ""))}</pre>
+              </article>`;
+            }).join("");
+            return `<article class="task-log-card user-log-card user-log-timeline-card">
+              <header class="task-log-head">
+                <div class="task-log-title">
+                  <strong>${esc(stageLabel)}</strong>
+                  <span class="hint">시도 ${esc(attemptLabel)}${group.roundLabel ? ` · ${esc(group.roundLabel)}` : ""} · ${esc(actorDisplayName(actor))}</span>
+                </div>
+                <div class="task-log-meta">
+                  <span class="badge status-${badgeClass}">${esc(progress)}</span>
+                  <span class="hint">${esc(groupLastTimestampText(group))}</span>
+                </div>
+              </header>
+              <div class="task-log-lines">${linesHtml || `<p class="snapshot-empty">표시할 로그 없음</p>`}</div>
+              ${renderUserGroupSnapshot(group, "이 시점의 문서 스냅샷")}
+            </article>`;
+          })
+          .join("");
+
+        board.innerHTML = `
+          <article class="task-log-card user-log-card user-log-current-card">
+            <header class="task-log-head">
+              <div class="task-log-title">
+                <strong>현재 스냅샷</strong>
+                <span class="hint">가장 최근 그룹 기준으로 표시합니다.</span>
+              </div>
+              <div class="task-log-meta">
+                <span class="badge status-${latestBadgeClass}">${esc(latestProgress)}</span>
+                <span class="hint">${esc(groupLastTimestampText(latestGroup))}</span>
+              </div>
+            </header>
+            <div class="workflow-kpis">
+              <span class="workflow-kpi">시도 <strong>${esc(latestAttemptLabel)}</strong></span>
+              <span class="workflow-kpi">단계 <strong>${esc(latestStageLabel)}</strong></span>
+              <span class="workflow-kpi">역할 <strong>${esc(actorDisplayName(latestActor))}</strong></span>
+              <span class="workflow-kpi">로그 <strong>${latestGroup.entries.length}줄</strong></span>
+            </div>
+            ${renderUserGroupSnapshot(latestGroup, "현재 단계 문서 스냅샷")}
+          </article>
+          <section class="user-log-role-grid">
+            ${roleSummaryHtml}
+          </section>
+          <section class="user-log-timeline">
+            <div class="panel-head">
+              <h3>실행 타임라인</h3>
+              <p class="hint">최신순으로 정렬되며, 각 카드가 한 단계 그룹입니다.</p>
+            </div>
+            <div class="task-log-board user-log-timeline-board">
+              ${timelineHtml}
+            </div>
+          </section>
+        `;
       }
 
       function buildGroupedEntries(entriesNewestFirst) {

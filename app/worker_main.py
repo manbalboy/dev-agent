@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 import sys
 import time
 
 from app.command_runner import CommandTemplateRunner
 from app.config import AppSettings
-from app.models import JobStage, JobStatus
+from app.models import JobRecord, JobStage, JobStatus
 from app.orchestrator import Orchestrator
 from app.store import JobStore, create_job_store
 
@@ -25,6 +26,46 @@ def _recover_orphan_queued_jobs(store: JobStore) -> int:
             store.enqueue_job(job.job_id)
             recovered += 1
     return recovered
+
+
+def _interrupt_running_node_runs(
+    store: JobStore,
+    job: JobRecord,
+    *,
+    reason: str,
+    finished_at: str,
+) -> int:
+    """Mark dangling running node runs for one job attempt as interrupted."""
+
+    interrupted = 0
+    for node_run in store.list_node_runs(job.job_id):
+        if node_run.status != "running":
+            continue
+        if int(node_run.attempt or 0) != int(job.attempt or 0):
+            continue
+        store.upsert_node_run(
+            replace(
+                node_run,
+                status="interrupted",
+                finished_at=finished_at,
+                error_message=reason,
+            )
+        )
+        interrupted += 1
+    return interrupted
+
+
+def _cleanup_orphan_running_node_runs(store: JobStore) -> int:
+    """Interrupt node runs that are still marked running for non-running jobs."""
+
+    now = datetime.now(timezone.utc).isoformat()
+    cleaned = 0
+    for job in store.list_jobs():
+        if job.status == JobStatus.RUNNING.value:
+            continue
+        reason = f"node run interrupted because job status is {job.status}"
+        cleaned += _interrupt_running_node_runs(store, job, reason=reason, finished_at=now)
+    return cleaned
 
 
 def _recover_stale_running_jobs(store: JobStore, settings: AppSettings) -> int:
@@ -53,6 +94,7 @@ def _recover_stale_running_jobs(store: JobStore, settings: AppSettings) -> int:
             "running heartbeat stale detected "
             f"after {int(stale_seconds)}s at stage={job.stage} attempt={job.attempt}"
         )
+        _interrupt_running_node_runs(store, job, reason=reason, finished_at=now.isoformat())
         if next_recovery_count > settings.worker_max_auto_recoveries:
             store.update_job(
                 job.job_id,
@@ -98,6 +140,9 @@ def run_worker_forever() -> None:
     store = create_job_store(settings)
     template_runner = CommandTemplateRunner(settings.command_config)
     orchestrator = Orchestrator(settings, store, template_runner)
+    cleaned_nodes = _cleanup_orphan_running_node_runs(store)
+    if cleaned_nodes > 0:
+        print(f"[worker] interrupted {cleaned_nodes} orphan running node(s)")
 
     print("[worker] started")
     while True:

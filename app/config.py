@@ -43,6 +43,8 @@ class AppSettings:
     api_port: int
     store_backend: str
     sqlite_file: Path
+    memory_enabled: bool = False
+    memory_dir: Path = Path("memory")
     cors_allow_all: bool = True
     cors_origins: str = "*"
     docker_preview_enabled: bool = True
@@ -166,6 +168,11 @@ class AppSettings:
             in {"1", "true", "yes", "on"}
         )
         cors_origins = os.getenv("AGENTHUB_CORS_ORIGINS", "*").strip() or "*"
+        memory_enabled = (
+            os.getenv("MEMORY_ENABLED", "false").strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
+        raw_memory_dir = os.getenv("MEMORY_DIR", str(Path(raw_data_dir) / "memory"))
 
         settings = cls(
             webhook_secret=webhook_secret,
@@ -193,6 +200,8 @@ class AppSettings:
             sqlite_file=Path(raw_sqlite_file).resolve(),
             cors_allow_all=cors_allow_all,
             cors_origins=cors_origins,
+            memory_enabled=memory_enabled,
+            memory_dir=Path(raw_memory_dir).resolve(),
             docker_preview_enabled=docker_preview_enabled,
             docker_preview_host=docker_preview_host,
             docker_preview_port_start=docker_preview_port_start,
@@ -213,6 +222,8 @@ class AppSettings:
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.logs_debug_dir.mkdir(parents=True, exist_ok=True)
         self.logs_user_dir.mkdir(parents=True, exist_ok=True)
+        if self.memory_enabled:
+            self.memory_dir.mkdir(parents=True, exist_ok=True)
 
     @property
     def jobs_file(self) -> Path:

@@ -132,6 +132,106 @@ def default_workflow_template() -> Dict[str, Any]:
     }
 
 
+def adaptive_workflow_template() -> Dict[str, Any]:
+    """Return an opt-in adaptive workflow with label routing and same-attempt quality loop."""
+
+    return {
+        "workflow_id": "adaptive_quality_loop_v1",
+        "name": "Adaptive Quality Loop V1",
+        "description": "옵트인 실험 플로우. UI 성격 라벨이면 디자인 트랙을 타고, 테스트/UX 실패는 같은 attempt 안에서 수정-재검증 루프를 돈다.",
+        "version": 1,
+        "entry_node_id": "n1",
+        "nodes": [
+            {"id": "n1", "type": "gh_read_issue", "title": "이슈 읽기"},
+            {"id": "n2", "type": "write_spec", "title": "SPEC 작성"},
+            {"id": "n3", "type": "idea_to_product_brief", "title": "제품 정의"},
+            {"id": "n4", "type": "generate_user_flows", "title": "사용자 흐름 정의"},
+            {"id": "n5", "type": "define_mvp_scope", "title": "MVP 범위 결정"},
+            {"id": "n6", "type": "architecture_planning", "title": "아키텍처 계획"},
+            {"id": "n6b", "type": "project_scaffolding", "title": "프로젝트 스캐폴딩"},
+            {"id": "n7", "type": "gemini_plan", "title": "큰틀 플랜"},
+            {
+                "id": "n7a",
+                "type": "if_label_match",
+                "title": "UI/모바일 성격 분기",
+                "match_labels": "ui,ux,mobile,frontend,design",
+                "match_mode": "any",
+            },
+            {"id": "n8", "type": "designer_task", "title": "디자인 시스템 기획"},
+            {"id": "n9", "type": "publisher_task", "title": "퍼블리싱(디자인 시스템 반영)"},
+            {"id": "n10", "type": "copywriter_task", "title": "카피라이팅(고객 문구 기획/작성)"},
+            {"id": "n11", "type": "gemini_plan", "title": "개발 기획(기술/라이브러리 확정)"},
+            {"id": "n12", "type": "codex_implement", "title": "코딩(기능 구현)"},
+            {"id": "n13", "type": "code_change_summary", "title": "코드 변경 요약"},
+            {"id": "n14", "type": "test_after_implement", "title": "1차 기능 테스트"},
+            {"id": "n15", "type": "tester_run_e2e", "title": "1차 E2E/타입별 테스트"},
+            {"id": "n16", "type": "ux_e2e_review", "title": "UX E2E 검수(PC/모바일 스샷)"},
+            {"id": "n17", "type": "coder_fix_from_test_report", "title": "품질 이슈 수정"},
+            {"id": "n18", "type": "tester_retest_e2e", "title": "수정 후 재검증"},
+            {
+                "id": "n18a",
+                "type": "loop_until_pass",
+                "title": "같은 attempt 품질 루프",
+                "loop_max_iterations": 3,
+            },
+            {"id": "n19", "type": "gemini_review", "title": "리뷰어 점검"},
+            {"id": "n20", "type": "product_review", "title": "제품 품질 리뷰"},
+            {"id": "n21", "type": "improvement_stage", "title": "개선 우선순위/전략 계획"},
+            {"id": "n22", "type": "gemini_plan", "title": "리뷰 반영 고도화 플랜"},
+            {"id": "n23", "type": "coder_fix_from_test_report", "title": "고도화 반영 구현"},
+            {"id": "n24", "type": "tester_retest_e2e", "title": "고도화 후 재테스트"},
+            {"id": "n25", "type": "gemini_review", "title": "최종 리뷰 게이트"},
+            {"id": "n26", "type": "product_review", "title": "최종 제품 리뷰"},
+            {"id": "n27", "type": "improvement_stage", "title": "다음 개선 루프 준비"},
+            {"id": "n28", "type": "commit_fix", "title": "최종 커밋"},
+            {"id": "n29", "type": "documentation_task", "title": "기술 문서 작성(README/저작권/개발가이드)"},
+            {"id": "n30", "type": "push_branch", "title": "브랜치 푸시"},
+            {"id": "n31", "type": "create_pr", "title": "PR 생성"},
+        ],
+        "edges": [
+            {"from": "n1", "to": "n2", "on": "success"},
+            {"from": "n2", "to": "n3", "on": "success"},
+            {"from": "n3", "to": "n4", "on": "success"},
+            {"from": "n4", "to": "n5", "on": "success"},
+            {"from": "n5", "to": "n6", "on": "success"},
+            {"from": "n6", "to": "n6b", "on": "success"},
+            {"from": "n6b", "to": "n7", "on": "success"},
+            {"from": "n7", "to": "n7a", "on": "success"},
+            {"from": "n7a", "to": "n8", "on": "success"},
+            {"from": "n7a", "to": "n11", "on": "failure"},
+            {"from": "n8", "to": "n9", "on": "success"},
+            {"from": "n9", "to": "n10", "on": "success"},
+            {"from": "n10", "to": "n11", "on": "success"},
+            {"from": "n11", "to": "n12", "on": "success"},
+            {"from": "n12", "to": "n13", "on": "success"},
+            {"from": "n13", "to": "n14", "on": "success"},
+            {"from": "n14", "to": "n15", "on": "success"},
+            {"from": "n14", "to": "n17", "on": "failure"},
+            {"from": "n15", "to": "n16", "on": "success"},
+            {"from": "n15", "to": "n17", "on": "failure"},
+            {"from": "n16", "to": "n19", "on": "success"},
+            {"from": "n16", "to": "n17", "on": "failure"},
+            {"from": "n17", "to": "n18", "on": "success"},
+            {"from": "n18", "to": "n18a", "on": "success"},
+            {"from": "n18", "to": "n18a", "on": "failure"},
+            {"from": "n18a", "to": "n17", "on": "failure"},
+            {"from": "n18a", "to": "n19", "on": "success"},
+            {"from": "n19", "to": "n20", "on": "success"},
+            {"from": "n20", "to": "n21", "on": "success"},
+            {"from": "n21", "to": "n22", "on": "success"},
+            {"from": "n22", "to": "n23", "on": "success"},
+            {"from": "n23", "to": "n24", "on": "success"},
+            {"from": "n24", "to": "n25", "on": "success"},
+            {"from": "n25", "to": "n26", "on": "success"},
+            {"from": "n26", "to": "n27", "on": "success"},
+            {"from": "n27", "to": "n28", "on": "success"},
+            {"from": "n28", "to": "n29", "on": "success"},
+            {"from": "n29", "to": "n30", "on": "success"},
+            {"from": "n30", "to": "n31", "on": "success"},
+        ],
+    }
+
+
 def schema_payload() -> Dict[str, Any]:
     """Return phase-1 schema metadata for dashboard/editor."""
 
@@ -162,7 +262,10 @@ def load_workflows(path: Path) -> Dict[str, Any]:
     """Load workflow config from JSON with safe fallback."""
 
     if not path.exists():
-        defaults = {"default_workflow_id": "default_product_dev_loop_v6", "workflows": [default_workflow_template()]}
+        defaults = {
+            "default_workflow_id": "default_product_dev_loop_v6",
+            "workflows": [default_workflow_template(), adaptive_workflow_template()],
+        }
         save_workflows(path, defaults)
         return defaults
 
@@ -175,7 +278,7 @@ def load_workflows(path: Path) -> Dict[str, Any]:
         loaded = {}
     workflows = loaded.get("workflows")
     if not isinstance(workflows, list) or not workflows:
-        loaded["workflows"] = [default_workflow_template()]
+        loaded["workflows"] = [default_workflow_template(), adaptive_workflow_template()]
     if not isinstance(loaded.get("default_workflow_id"), str):
         loaded["default_workflow_id"] = "default_product_dev_loop_v6"
     return loaded

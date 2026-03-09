@@ -215,6 +215,10 @@ def test_job_detail_api_includes_runtime_signals(app_components):
         '{\n  "trend_direction": "stable",\n  "delta_from_previous": 0.1,\n  "review_round_count": 3,\n  "persistent_low_categories": ["test_coverage"],\n  "stagnant_categories": ["test_coverage"],\n  "category_deltas": {"test_coverage": 0}\n}\n',
         encoding="utf-8",
     )
+    (docs_dir / "STRATEGY_SHADOW_REPORT.json").write_text(
+        '{\n  "shadow_strategy": "test_hardening",\n  "diverged": true,\n  "decision_mode": "memory_divergence",\n  "confidence": 0.84\n}\n',
+        encoding="utf-8",
+    )
 
     response = client.get(f"/api/jobs/{job.job_id}")
 
@@ -229,6 +233,9 @@ def test_job_detail_api_includes_runtime_signals(app_components):
     assert payload["runtime_signals"]["persistent_low_categories"] == ["test_coverage"]
     assert payload["runtime_signals"]["stagnant_categories"] == ["test_coverage"]
     assert payload["runtime_signals"]["category_deltas"]["test_coverage"] == 0
+    assert payload["runtime_signals"]["shadow_strategy"] == "test_hardening"
+    assert payload["runtime_signals"]["shadow_diverged"] is True
+    assert payload["runtime_signals"]["shadow_decision_mode"] == "memory_divergence"
 
 
 def test_job_detail_api_includes_manual_retry_options(app_components):

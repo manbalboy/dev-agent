@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+import app.dashboard as dashboard
 from app.models import JobRecord
 
 
@@ -21,6 +23,7 @@ def _make_job(
     created_at: str,
     updated_at: str,
     error_message: str | None = None,
+    workflow_id: str | None = None,
 ) -> JobRecord:
     return JobRecord(
         job_id=job_id,
@@ -42,6 +45,7 @@ def _make_job(
         finished_at=None,
         app_code=app_code,
         track=track,
+        workflow_id=workflow_id,
     )
 
 
@@ -316,6 +320,20 @@ def test_jobs_api_supports_recovery_and_strategy_filters(app_components):
         + "\n",
         encoding="utf-8",
     )
+    (docs_dir / "STRATEGY_SHADOW_REPORT.json").write_text(
+        json.dumps(
+            {
+                "shadow_strategy": "test_hardening",
+                "decision_mode": "memory_confirms_current",
+                "diverged": False,
+                "confidence": 0.71,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     response = client.get(
         "/api/jobs",
@@ -334,6 +352,8 @@ def test_jobs_api_supports_recovery_and_strategy_filters(app_components):
     assert payload["jobs"][0]["runtime_signals"]["quality_trend_direction"] == "improving"
     assert payload["jobs"][0]["runtime_signals"]["persistent_low_categories"] == ["test_coverage"]
     assert payload["jobs"][0]["runtime_signals"]["category_deltas"]["test_coverage"] == 0
+    assert payload["jobs"][0]["runtime_signals"]["shadow_strategy"] == "test_hardening"
+    assert payload["jobs"][0]["runtime_signals"]["shadow_diverged"] is False
     assert payload["filters"]["recovery_status"] == "auto_recovered"
     assert payload["filters"]["strategy"] == "quality_hardening"
     assert "auto_recovered" in payload["filter_options"]["recovery_statuses"]
@@ -354,3 +374,358 @@ def test_dashboard_root_renders_shell_without_preloading_jobs(app_components):
     assert response.status_code == 200
     assert "작업 목록을 불러오는 중..." in response.text
     assert "앱 목록 불러오는 중..." in response.text
+
+
+def test_admin_metrics_api_aggregates_system_quality_and_memory_signals(app_components, monkeypatch, tmp_path: Path):
+    settings, store, app = app_components
+    client = TestClient(app)
+
+    apps_path = tmp_path / "config" / "apps.json"
+    apps_path.parent.mkdir(parents=True, exist_ok=True)
+    apps_path.write_text(
+        json.dumps(
+            [
+                {
+                    "code": "default",
+                    "name": "Default",
+                    "repository": "owner/repo",
+                    "workflow_id": "wf-default",
+                    "source_repository": "",
+                },
+                {
+                    "code": "food",
+                    "name": "Food",
+                    "repository": "owner/repo",
+                    "workflow_id": "wf-default",
+                    "source_repository": "manbalboy/Food",
+                },
+            ],
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    workflows_path = tmp_path / "config" / "workflows.json"
+    workflows_path.write_text(
+        json.dumps(
+            {
+                "default_workflow_id": "wf-default",
+                "workflows": [
+                    {
+                        "workflow_id": "wf-default",
+                        "name": "Default Flow",
+                        "version": 1,
+                        "entry_node_id": "n1",
+                        "nodes": [{"id": "n1", "type": "gh_read_issue"}],
+                        "edges": [],
+                    },
+                    {
+                        "workflow_id": "wf-review-loop",
+                        "name": "Review Loop",
+                        "version": 1,
+                        "entry_node_id": "n1",
+                        "nodes": [{"id": "n1", "type": "gh_read_issue"}],
+                        "edges": [],
+                    },
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    roles_path = tmp_path / "config" / "roles.json"
+    roles_path.write_text(
+        json.dumps(
+            {
+                "roles": [
+                    {"code": "planner", "name": "Planner", "cli": "gemini", "template_key": "planner", "enabled": True},
+                    {"code": "coder", "name": "Coder", "cli": "codex", "template_key": "coder", "enabled": True},
+                ],
+                "presets": [
+                    {"preset_id": "core", "name": "Core", "role_codes": ["planner", "coder"]},
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    feature_flags_path = tmp_path / "config" / "feature_flags.json"
+    feature_flags_path.write_text(
+        json.dumps(
+            {
+                "flags": {
+                    "memory_logging": True,
+                    "memory_retrieval": False,
+                    "convention_extraction": True,
+                    "memory_scoring": True,
+                    "strategy_shadow": True,
+                }
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(dashboard, "_APPS_CONFIG_PATH", apps_path)
+    monkeypatch.setattr(dashboard, "_WORKFLOWS_CONFIG_PATH", workflows_path)
+    monkeypatch.setattr(dashboard, "_ROLES_CONFIG_PATH", roles_path)
+    monkeypatch.setattr(dashboard, "_FEATURE_FLAGS_CONFIG_PATH", feature_flags_path)
+
+    job = _make_job(
+        "job-admin-metrics",
+        issue_number=501,
+        issue_title="Admin metrics quality visibility",
+        status="failed",
+        stage="improvement_stage",
+        app_code="food",
+        track="enhance",
+        created_at="2026-03-08T05:00:00+00:00",
+        updated_at="2026-03-08T05:10:00+00:00",
+        workflow_id="adaptive_quality_loop_v1",
+    )
+    job.recovery_status = "auto_recovered"
+    store.create_job(job)
+    store.create_job(
+        _make_job(
+            "job-admin-default",
+            issue_number=502,
+            issue_title="Default workflow baseline",
+            status="done",
+            stage="done",
+            app_code="default",
+            track="enhance",
+            created_at="2026-03-07T05:10:00+00:00",
+            updated_at="2026-03-07T05:40:00+00:00",
+            workflow_id="wf-default",
+        )
+    )
+
+    docs_dir = settings.repository_workspace_path(job.repository, job.app_code) / "_docs"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    (docs_dir / "PRODUCT_REVIEW.json").write_text(
+        json.dumps(
+            {
+                "scores": {"overall": 3.6},
+                "quality_gate": {"passed": True, "categories_below_threshold": ["test_coverage"]},
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (docs_dir / "REPO_MATURITY.json").write_text(
+        json.dumps({"level": "usable", "score": 74, "progression": "up"}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    (docs_dir / "QUALITY_TREND.json").write_text(
+        json.dumps(
+            {
+                "trend_direction": "improving",
+                "delta_from_previous": 0.4,
+                "review_round_count": 3,
+                "persistent_low_categories": ["test_coverage"],
+                "stagnant_categories": [],
+                "category_deltas": {"test_coverage": 1},
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (docs_dir / "IMPROVEMENT_LOOP_STATE.json").write_text(
+        json.dumps(
+            {
+                "strategy": "test_hardening",
+                "strategy_change_required": True,
+                "next_scope_restriction": "P1_only",
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (docs_dir / "NEXT_IMPROVEMENT_TASKS.json").write_text(
+        json.dumps(
+            {"tasks": [{"title": "회귀 테스트 보강", "recommended_node_type": "codex_fix"}]},
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (docs_dir / "MEMORY_LOG.jsonl").write_text(
+        json.dumps({"memory_id": "episodic_job_summary:job-admin-metrics", "memory_type": "episodic"}, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    (docs_dir / "DECISION_HISTORY.json").write_text(
+        json.dumps({"entries": [{"decision_id": "improvement_strategy:job-admin-metrics"}]}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    (docs_dir / "FAILURE_PATTERNS.json").write_text(
+        json.dumps({"items": [{"pattern_id": "persistent_low:test_coverage"}]}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    (docs_dir / "CONVENTIONS.json").write_text(
+        json.dumps({"rules": [{"id": "conv_nextjs"}, {"id": "conv_tailwindcss"}]}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    (docs_dir / "MEMORY_FEEDBACK.json").write_text(
+        json.dumps({"entries": [{"feedback_id": "episodic_job_summary:job-admin-metrics:job-admin-metrics"}]}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    (docs_dir / "MEMORY_RANKINGS.json").write_text(
+        json.dumps(
+            {
+                "items": [
+                    {"memory_id": "episodic_job_summary:job-admin-metrics", "state": "promoted"},
+                    {"memory_id": "persistent_low:test_coverage", "state": "decayed"},
+                ]
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (docs_dir / "STRATEGY_SHADOW_REPORT.json").write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-03-10T05:20:00+00:00",
+                "shadow_strategy": "feature_expansion",
+                "decision_mode": "memory_divergence",
+                "diverged": True,
+                "confidence": 0.82,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    response = client.get("/api/admin/metrics")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["system"]["apps_count"] == 2
+    assert payload["system"]["workflows_count"] == 2
+    assert payload["system"]["roles_count"] == 2
+    assert payload["system"]["role_presets_count"] == 1
+    assert payload["runtime"]["job_summary"]["failed"] == 1
+    assert payload["runtime"]["strategy_counts"][0]["name"] == "test_hardening"
+    assert {item["name"] for item in payload["runtime"]["app_counts"]} == {"food", "default"}
+    assert {item["name"] for item in payload["runtime"]["stage_counts"]} == {"improvement_stage", "done"}
+    assert payload["runtime"]["track_counts"][0]["name"] == "enhance"
+    assert payload["runtime"]["workflow_counts"][0]["name"] == "adaptive_quality_loop_v1"
+    assert payload["runtime"]["adaptive_job_count"] == 1
+    assert payload["runtime"]["default_job_count"] == 1
+    assert payload["quality"]["average_review_overall"] == 3.6
+    assert payload["quality"]["average_maturity_score"] == 74.0
+    assert payload["quality"]["trend_direction_counts"][0]["name"] == "improving"
+    assert payload["workflow_adoption"]["apps_using_adaptive_workflow"] == 0
+    assert payload["workflow_adoption"]["apps_using_default_workflow"] == 2
+    assert payload["workflow_adoption"]["app_workflow_counts"][0]["name"] == "wf-default"
+    assert len(payload["workflow_adoption"]["timeline"]) == 7
+    assert payload["workflow_adoption"]["timeline"][-1]["day"] == "2026-03-08"
+    assert payload["workflow_adoption"]["timeline"][-1]["adaptive_count"] == 1
+    assert payload["workflow_adoption"]["timeline"][-1]["default_count"] == 0
+    assert payload["workflow_adoption"]["timeline"][-2]["day"] == "2026-03-07"
+    assert payload["workflow_adoption"]["timeline"][-2]["default_count"] == 1
+    assert payload["memory"]["episodic_entries"] == 1
+    assert payload["memory"]["decision_entries"] == 1
+    assert payload["memory"]["feedback_entries"] == 1
+    assert payload["feature_flags"]["memory_retrieval"] is False
+    assert {item["name"] for item in payload["memory"]["ranking_state_counts"]} == {"promoted", "decayed"}
+    capability_map = {item["id"]: item for item in payload["capabilities"]}
+    assert capability_map["workflow_control_nodes"]["enabled"] is True
+    assert capability_map["memory_retrieval"]["enabled"] is False
+    assert capability_map["memory_scoring"]["enabled"] is True
+    assert capability_map["strategy_shadow"]["enabled"] is True
+    phase_map = {item["phase"]: item for item in payload["phase_status"]}
+    assert phase_map["Phase 1"]["status"] == "closed"
+    assert phase_map["Phase 2-F"]["status"] == "implemented"
+    assert payload["retrieval"]["enabled"] is False
+    assert payload["scoring"]["enabled"] is True
+    assert payload["shadow"]["enabled"] is True
+    assert payload["shadow"]["divergence_count"] == 1
+    assert payload["runtime"]["shadow_strategy_counts"][0]["name"] == "feature_expansion"
+    assert payload["runtime"]["shadow_decision_counts"][0]["name"] == "memory_divergence"
+
+
+def test_jobs_api_query_matches_runtime_quality_signals(app_components):
+    settings, store, app = app_components
+    client = TestClient(app)
+
+    job = _make_job(
+        "job-runtime-query",
+        issue_number=601,
+        issue_title="Runtime signal search",
+        status="failed",
+        stage="product_review",
+        app_code="default",
+        track="enhance",
+        created_at="2026-03-08T06:00:00+00:00",
+        updated_at="2026-03-08T06:10:00+00:00",
+        workflow_id="adaptive_quality_loop_v1",
+    )
+    store.create_job(job)
+
+    docs_dir = settings.repository_workspace_path(job.repository, job.app_code) / "_docs"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    (docs_dir / "PRODUCT_REVIEW.json").write_text(
+        json.dumps(
+            {
+                "scores": {"overall": 2.9},
+                "quality_gate": {"passed": False, "categories_below_threshold": ["test_coverage"]},
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (docs_dir / "REPO_MATURITY.json").write_text(
+        json.dumps({"level": "mvp", "score": 58, "progression": "up"}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    (docs_dir / "QUALITY_TREND.json").write_text(
+        json.dumps(
+            {
+                "trend_direction": "improving",
+                "delta_from_previous": 0.2,
+                "review_round_count": 2,
+                "persistent_low_categories": ["test_coverage"],
+                "stagnant_categories": [],
+                "category_deltas": {"test_coverage": 0},
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    response = client.get("/api/jobs", params={"q": "improving"})
+    assert response.status_code == 200
+    assert [item["job_id"] for item in response.json()["jobs"]] == ["job-runtime-query"]
+
+    response = client.get("/api/jobs", params={"q": "mvp"})
+    assert response.status_code == 200
+    assert [item["job_id"] for item in response.json()["jobs"]] == ["job-runtime-query"]
+
+    response = client.get("/api/jobs", params={"q": "test_coverage"})
+    assert response.status_code == 200
+    assert [item["job_id"] for item in response.json()["jobs"]] == ["job-runtime-query"]
+
+    response = client.get("/api/jobs", params={"q": "adaptive_quality_loop_v1"})
+    assert response.status_code == 200
+    assert [item["job_id"] for item in response.json()["jobs"]] == ["job-runtime-query"]

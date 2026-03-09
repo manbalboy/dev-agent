@@ -30,6 +30,7 @@ from app.command_runner import (
 )
 from app.ai_role_routing import AIRoleRouter
 from app.config import AppSettings
+from app.feature_flags import is_feature_enabled
 from app.models import JobRecord, JobStage, JobStatus, NodeRunRecord, utc_now_iso
 from app.prompt_builder import (
     build_architecture_plan_prompt,
@@ -71,6 +72,7 @@ from app.workflow_resume import (
     read_improvement_runtime_context,
 )
 from app.workflow_resolution import load_workflow_catalog, resolve_workflow_selection
+from app.memory.fix_store import FixStore, NoOpFixStore
 
 
 ShellExecutor = Callable[..., object]
@@ -105,9 +107,18 @@ class Orchestrator:
             roles_path=Path.cwd() / "config" / "roles.json",
             routing_path=Path.cwd() / "config" / "ai_role_routing.json",
         )
+        self.feature_flags_path = Path.cwd() / "config" / "feature_flags.json"
         self._agent_profile = "primary"
         self._active_job_id: str | None = None
         self._last_heartbeat_monotonic: float = 0.0
+        self._fix_store: FixStore | NoOpFixStore = (
+            FixStore(settings.memory_dir) if settings.memory_enabled else NoOpFixStore()
+        )
+
+    def _feature_enabled(self, flag_name: str) -> bool:
+        """Read one adaptive feature flag without requiring process restart."""
+
+        return is_feature_enabled(self.feature_flags_path, flag_name)
 
     def process_next_job(self) -> bool:
         """Pop one job from queue and process it.
@@ -594,6 +605,7 @@ class Orchestrator:
             "issue": None,
             "paths": None,
             "last_node_result": None,
+            "results": {},
             "loop_counters": {},
         }
         current_node_id = str(workflow.get("entry_node_id", "")).strip()
@@ -707,6 +719,14 @@ class Orchestrator:
                 "status": node_status,
                 "error_message": node_error_message or "",
             }
+            self._record_workflow_node_result(
+                context=context,
+                node=node,
+                node_run=node_run,
+                event=node_event,
+                status=node_status,
+                error_message=node_error_message,
+            )
 
             if node_status == "success" and node_type not in WORKFLOW_NODE_SKIP_AUTO_COMMIT:
                 self._commit_markdown_changes_after_stage(job, repository_path, node_type, log_path)
@@ -914,6 +934,59 @@ class Orchestrator:
         if not isinstance(paths, dict):
             raise CommandExecutionError("Workflow requires paths context before AI/test/git stages.")
         return paths
+
+    def _record_workflow_node_result(
+        self,
+        *,
+        context: Dict[str, Any],
+        node: Dict[str, Any],
+        node_run: NodeRunRecord | None,
+        event: str,
+        status: str,
+        error_message: str | None,
+    ) -> None:
+        """Persist one normalized node result into workflow context."""
+
+        results = context.setdefault("results", {})
+        if not isinstance(results, dict):
+            results = {}
+            context["results"] = results
+
+        artifact_info = self._workflow_result_artifact_info(context)
+        result_payload = {
+            "node_id": str(node.get("id", "")).strip(),
+            "node_type": str(node.get("type", "")).strip(),
+            "node_title": str(node.get("title", "")).strip(),
+            "event": str(event or "success").strip().lower() or "success",
+            "status": str(status or "success").strip().lower() or "success",
+            "error_message": str(error_message or "").strip(),
+            "attempt": int(getattr(node_run, "attempt", 0) or 0),
+            "started_at": str(getattr(node_run, "started_at", "") or ""),
+            "finished_at": str(getattr(node_run, "finished_at", "") or ""),
+            "agent_profile": str(getattr(node_run, "agent_profile", self._agent_profile) or self._agent_profile),
+            "artifact_keys": artifact_info["keys"],
+            "artifacts": artifact_info["paths"],
+        }
+        results[result_payload["node_id"]] = result_payload
+
+    @staticmethod
+    def _workflow_result_artifact_info(context: Dict[str, Any]) -> Dict[str, List[str]]:
+        """Return currently available artifact keys and paths for workflow results."""
+
+        paths = context.get("paths")
+        if not isinstance(paths, dict):
+            return {"keys": [], "paths": []}
+
+        artifact_keys: List[str] = []
+        artifact_paths: List[str] = []
+        for key, raw_path in paths.items():
+            if not isinstance(raw_path, Path) or not raw_path.exists():
+                continue
+            artifact_keys.append(str(key))
+            artifact_paths.append(str(raw_path))
+        artifact_keys.sort()
+        artifact_paths.sort()
+        return {"keys": artifact_keys, "paths": artifact_paths}
 
     def _workflow_node_read_issue(
         self,
@@ -1323,15 +1396,33 @@ class Orchestrator:
         repository_path = self._job_workspace_path(job)
         execution_repository = self._job_execution_repository(job)
 
-        if not repository_path.exists():
-            self._run_shell(
-                command=f"gh repo clone {shlex.quote(execution_repository)} {shlex.quote(str(repository_path))}",
-                cwd=self.settings.workspace_dir,
-                log_path=log_path,
-                purpose="repository clone",
+        if not execution_repository:
+            raise CommandExecutionError(
+                "No execution repository is configured for this job. "
+                "Set app.source_repository or job.source_repository before running."
             )
+
+        if not repository_path.exists():
+            self._clone_repository_to_workspace(execution_repository, repository_path, log_path)
+        elif not self._workspace_has_git_metadata(repository_path):
+            backup_path = self._backup_invalid_workspace(repository_path, log_path)
+            self._append_log(
+                log_path,
+                f"Workspace existed without git metadata. Backed up to {backup_path} and recloning.",
+            )
+            self._clone_repository_to_workspace(execution_repository, repository_path, log_path)
         else:
-            self._append_log(log_path, f"Repository already exists at {repository_path}")
+            current_origin = self._read_workspace_origin_repository(repository_path, log_path)
+            if current_origin and current_origin != execution_repository:
+                backup_path = self._backup_invalid_workspace(repository_path, log_path)
+                self._append_log(
+                    log_path,
+                    f"Workspace origin mismatch ({current_origin} != {execution_repository}). "
+                    f"Backed up to {backup_path} and recloning.",
+                )
+                self._clone_repository_to_workspace(execution_repository, repository_path, log_path)
+            else:
+                self._append_log(log_path, f"Repository already exists at {repository_path}")
 
         self._run_shell(
             command=f"git -C {shlex.quote(str(repository_path))} fetch origin",
@@ -1385,6 +1476,71 @@ class Orchestrator:
 
         self._ensure_workspace_git_excludes(repository_path, log_path)
         return repository_path
+
+    def _clone_repository_to_workspace(self, execution_repository: str, repository_path: Path, log_path: Path) -> None:
+        """Clone the configured execution repository into the job workspace."""
+
+        self._run_shell(
+            command=f"gh repo clone {shlex.quote(execution_repository)} {shlex.quote(str(repository_path))}",
+            cwd=self.settings.workspace_dir,
+            log_path=log_path,
+            purpose="repository clone",
+        )
+
+    @staticmethod
+    def _workspace_has_git_metadata(repository_path: Path) -> bool:
+        """Return True when the workspace already contains git metadata."""
+
+        git_path = repository_path / ".git"
+        return git_path.exists()
+
+    def _read_workspace_origin_repository(self, repository_path: Path, log_path: Path) -> str:
+        """Return normalized `owner/repo` from workspace origin remote if available."""
+
+        try:
+            result = self._run_shell(
+                command=f"git -C {shlex.quote(str(repository_path))} remote get-url origin",
+                cwd=repository_path,
+                log_path=log_path,
+                purpose="git remote origin",
+            )
+        except CommandExecutionError:
+            return ""
+        return self._normalize_repository_ref(str(result.stdout or "").strip())
+
+    @staticmethod
+    def _normalize_repository_ref(value: str) -> str:
+        """Normalize GitHub repository references to `owner/repo`."""
+
+        normalized = (value or "").strip()
+        if not normalized:
+            return ""
+        normalized = normalized.removesuffix(".git")
+        https_match = re.match(r"^https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)$", normalized)
+        if https_match:
+            return f"{https_match.group('owner')}/{https_match.group('repo')}"
+        ssh_match = re.match(r"^git@github\.com:(?P<owner>[^/]+)/(?P<repo>[^/]+)$", normalized)
+        if ssh_match:
+            return f"{ssh_match.group('owner')}/{ssh_match.group('repo')}"
+        simple_match = re.match(r"^(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)$", normalized)
+        if simple_match:
+            return f"{simple_match.group('owner')}/{simple_match.group('repo')}"
+        return normalized
+
+    def _backup_invalid_workspace(self, repository_path: Path, log_path: Path) -> Path:
+        """Move aside a non-git workspace so clone can recreate it safely."""
+
+        parent = repository_path.parent
+        base_name = repository_path.name
+        timestamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+        candidate = parent / f"{base_name}__invalid_{timestamp}"
+        suffix = 1
+        while candidate.exists():
+            suffix += 1
+            candidate = parent / f"{base_name}__invalid_{timestamp}_{suffix}"
+        shutil.move(str(repository_path), str(candidate))
+        self._append_log(log_path, f"Moved invalid workspace to backup path: {candidate}")
+        return candidate
 
     def _ensure_workspace_git_excludes(self, repository_path: Path, log_path: Path) -> None:
         """Apply one shared workspace ignore file to each cloned repository."""
@@ -2902,6 +3058,17 @@ class Orchestrator:
                 "top_issue_ids": [item["id"] for item in ordered_candidates[:3]],
             }
         )
+        # Persist fix triplet for cross-job memory learning.
+        _prev_overall = history_entries[-2]["overall"] if len(history_entries) >= 2 else overall
+        _score_delta = round(overall - _prev_overall, 3)
+        _problem_text = "; ".join(item.get("id", "") for item in ordered_candidates[:3])
+        _diff_text = str(priority_summary or findings or "")[:800]
+        self._fix_store.upsert(
+            job_id=job.job_id,
+            problem=_problem_text,
+            diff_summary=_diff_text,
+            score_delta=_score_delta,
+        )
         review_history_path.write_text(
             json.dumps({"entries": history_entries[-30:]}, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
@@ -3220,11 +3387,1453 @@ class Orchestrator:
 
         improvement_plan_path = paths.get("improvement_plan", self._docs_file(repository_path, "IMPROVEMENT_PLAN.md"))
         improvement_plan_path.write_text("\n".join(plan_lines), encoding="utf-8")
+        self._write_structured_memory_artifacts(
+            job=job,
+            repository_path=repository_path,
+            paths=paths,
+            review_payload=review_payload,
+            maturity_payload=maturity_payload,
+            trend_payload=trend_payload,
+            loop_state=loop_state,
+            next_tasks_payload=next_tasks_payload,
+        )
+        self._write_memory_retrieval_artifacts(job=job, repository_path=repository_path, paths=paths)
+        self._write_strategy_shadow_report(
+            job=job,
+            repository_path=repository_path,
+            paths=paths,
+            strategy_inputs=strategy_inputs,
+            selected_strategy=strategy,
+            selected_focus=strategy_focus,
+        )
         self._append_actor_log(
             log_path, "ORCHESTRATOR",
             f"IMPROVEMENT_PLAN.md 생성 완료 — strategy={loop_state['strategy']}, "
             f"next_scope={next_scope_restriction}, rollback={rollback_recommended}",
         )
+
+    def _write_structured_memory_artifacts(
+        self,
+        *,
+        job: JobRecord,
+        repository_path: Path,
+        paths: Dict[str, Path],
+        review_payload: Dict[str, Any],
+        maturity_payload: Dict[str, Any],
+        trend_payload: Dict[str, Any],
+        loop_state: Dict[str, Any],
+        next_tasks_payload: Dict[str, Any],
+    ) -> None:
+        """Write Phase 2-B structured memory artifacts from review/improvement outputs."""
+
+        memory_logging_enabled = self._feature_enabled("memory_logging")
+        convention_extraction_enabled = self._feature_enabled("convention_extraction")
+        memory_scoring_enabled = self._feature_enabled("memory_scoring")
+        generated_at = str(loop_state.get("generated_at", "")).strip() or utc_now_iso()
+        scores = review_payload.get("scores", {}) if isinstance(review_payload, dict) else {}
+        if not isinstance(scores, dict):
+            scores = {}
+        overall = float(scores.get("overall", 0.0) or 0.0)
+        recommended_tasks = next_tasks_payload.get("tasks", []) if isinstance(next_tasks_payload, dict) else []
+        if not isinstance(recommended_tasks, list):
+            recommended_tasks = []
+        categories_below = loop_state.get("categories_below_threshold", []) if isinstance(loop_state, dict) else []
+        if not isinstance(categories_below, list):
+            categories_below = []
+
+        memory_log_path = paths.get("memory_log", self._docs_file(repository_path, "MEMORY_LOG.jsonl"))
+        decision_history_path = paths.get("decision_history", self._docs_file(repository_path, "DECISION_HISTORY.json"))
+        failure_patterns_path = paths.get("failure_patterns", self._docs_file(repository_path, "FAILURE_PATTERNS.json"))
+        conventions_path = paths.get("conventions", self._docs_file(repository_path, "CONVENTIONS.json"))
+        memory_feedback_path = paths.get("memory_feedback", self._docs_file(repository_path, "MEMORY_FEEDBACK.json"))
+        memory_rankings_path = paths.get("memory_rankings", self._docs_file(repository_path, "MEMORY_RANKINGS.json"))
+
+        base_payload = {
+            "job_id": job.job_id,
+            "app_code": job.app_code,
+            "repository": job.repository,
+            "execution_repository": self._job_execution_repository(job),
+            "workflow_id": str(job.workflow_id or "").strip(),
+            "issue_number": int(job.issue_number or 0),
+            "issue_title": str(job.issue_title or "").strip(),
+            "issue_url": str(job.issue_url or "").strip(),
+            "generated_at": generated_at,
+        }
+
+        episodic_entry = {
+            "memory_id": f"episodic_job_summary:{job.job_id}",
+            "memory_type": "episodic",
+            **base_payload,
+            "signals": {
+                "strategy": str(loop_state.get("strategy", "")).strip(),
+                "strategy_focus": str(loop_state.get("strategy_focus", "")).strip(),
+                "scope_restriction": str(loop_state.get("next_scope_restriction", "")).strip(),
+                "overall": overall,
+                "quality_trend_direction": str(trend_payload.get("trend_direction", "")).strip(),
+                "delta_from_previous": float(trend_payload.get("delta_from_previous", 0.0) or 0.0),
+                "maturity_level": str(maturity_payload.get("level", "")).strip(),
+                "maturity_progression": str(maturity_payload.get("progression", "")).strip(),
+                "persistent_low_categories": list(trend_payload.get("persistent_low_categories", []) or []),
+                "stagnant_categories": list(trend_payload.get("stagnant_categories", []) or []),
+                "categories_below_threshold": categories_below,
+                "recovery_mode": "resume"
+                if str(loop_state.get("next_scope_restriction", "")).strip() != "normal"
+                else "normal",
+            },
+            "artifacts": {
+                "product_review": str(paths.get("product_review", Path("_docs/PRODUCT_REVIEW.json"))),
+                "review_history": str(paths.get("review_history", Path("_docs/REVIEW_HISTORY.json"))),
+                "repo_maturity": str(paths.get("repo_maturity", Path("_docs/REPO_MATURITY.json"))),
+                "quality_trend": str(paths.get("quality_trend", Path("_docs/QUALITY_TREND.json"))),
+                "improvement_loop_state": str(paths.get("improvement_loop_state", Path("_docs/IMPROVEMENT_LOOP_STATE.json"))),
+                "next_improvement_tasks": str(paths.get("next_improvement_tasks", Path("_docs/NEXT_IMPROVEMENT_TASKS.json"))),
+            },
+            "outcome": {
+                "quality_gate_passed": bool(review_payload.get("quality_gate", {}).get("passed", False)),
+                "task_count": len(recommended_tasks),
+                "recommended_task_titles": [
+                    str(item.get("title", "")).strip()
+                    for item in recommended_tasks[:5]
+                    if isinstance(item, dict) and str(item.get("title", "")).strip()
+                ],
+            },
+        }
+        decision_entry = {
+            "decision_id": f"improvement_strategy:{job.job_id}",
+            **base_payload,
+            "decision_type": "improvement_strategy",
+            "chosen_strategy": str(loop_state.get("strategy", "")).strip(),
+            "strategy_focus": str(loop_state.get("strategy_focus", "")).strip(),
+            "scope_restriction": str(loop_state.get("next_scope_restriction", "")).strip(),
+            "trigger_signals": dict(loop_state.get("strategy_inputs", {}) or {}),
+            "change_reasons": list(loop_state.get("strategy_change_reasons", []) or []),
+            "selected_task_ids": [
+                str(item.get("source_issue_id", "")).strip()
+                for item in recommended_tasks
+                if isinstance(item, dict) and str(item.get("source_issue_id", "")).strip()
+            ],
+            "selected_task_titles": [
+                str(item.get("title", "")).strip()
+                for item in recommended_tasks
+                if isinstance(item, dict) and str(item.get("title", "")).strip()
+            ],
+        }
+
+        if memory_logging_enabled:
+            self._upsert_jsonl_entries(memory_log_path, [episodic_entry], key_field="memory_id")
+            self._upsert_json_history_entries(
+                decision_history_path,
+                [decision_entry],
+                key_field="decision_id",
+                root_key="entries",
+                max_entries=200,
+            )
+            self._update_failure_patterns_artifact(
+                failure_patterns_path=failure_patterns_path,
+                review_payload=review_payload,
+                loop_state=loop_state,
+                trend_payload=trend_payload,
+                next_tasks_payload=next_tasks_payload,
+                generated_at=generated_at,
+            )
+        if convention_extraction_enabled:
+            self._write_conventions_artifact(
+                repository_path=repository_path,
+                conventions_path=conventions_path,
+                job=job,
+                generated_at=generated_at,
+            )
+        else:
+            self._write_json_artifact(
+                conventions_path,
+                {"generated_at": generated_at, "enabled": False, "rules": []},
+            )
+        if memory_scoring_enabled:
+            self._write_memory_quality_artifacts(
+                job=job,
+                paths=paths,
+                review_payload=review_payload,
+                trend_payload=trend_payload,
+                loop_state=loop_state,
+                generated_at=generated_at,
+                current_memory_ids=[episodic_entry["memory_id"], decision_entry["decision_id"]],
+                memory_feedback_path=memory_feedback_path,
+                memory_rankings_path=memory_rankings_path,
+            )
+        else:
+            self._write_json_artifact(
+                memory_feedback_path,
+                {"generated_at": generated_at, "enabled": False, "entries": []},
+            )
+            self._write_json_artifact(
+                memory_rankings_path,
+                {"generated_at": generated_at, "enabled": False, "items": []},
+            )
+
+    @staticmethod
+    def _upsert_jsonl_entries(path: Path, entries: List[Dict[str, Any]], *, key_field: str) -> None:
+        """Upsert deterministic records into a JSONL file while keeping append-only shape."""
+
+        existing: List[Dict[str, Any]] = []
+        if path.exists():
+            for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(payload, dict):
+                    existing.append(payload)
+
+        merged: Dict[str, Dict[str, Any]] = {}
+        ordered_keys: List[str] = []
+        for item in existing + list(entries):
+            item_id = str(item.get(key_field, "")).strip()
+            if not item_id:
+                continue
+            if item_id not in merged:
+                ordered_keys.append(item_id)
+            merged[item_id] = item
+
+        lines = [json.dumps(merged[item_id], ensure_ascii=False) for item_id in ordered_keys]
+        path.write_text(("\n".join(lines) + "\n") if lines else "", encoding="utf-8")
+
+    @staticmethod
+    def _upsert_json_history_entries(
+        path: Path,
+        entries: List[Dict[str, Any]],
+        *,
+        key_field: str,
+        root_key: str,
+        max_entries: int,
+    ) -> None:
+        """Upsert deterministic history entries into one JSON document."""
+
+        payload: Dict[str, Any] = {}
+        if path.exists():
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+                if isinstance(raw, dict):
+                    payload = raw
+            except json.JSONDecodeError:
+                payload = {}
+
+        current_entries = payload.get(root_key, []) if isinstance(payload, dict) else []
+        if not isinstance(current_entries, list):
+            current_entries = []
+        merged: Dict[str, Dict[str, Any]] = {}
+        ordered_keys: List[str] = []
+        for item in current_entries + list(entries):
+            item_id = str(item.get(key_field, "")).strip()
+            if not item_id:
+                continue
+            if item_id not in merged:
+                ordered_keys.append(item_id)
+            merged[item_id] = item
+        if max_entries > 0 and len(ordered_keys) > max_entries:
+            ordered_keys = ordered_keys[-max_entries:]
+        payload[root_key] = [merged[item_id] for item_id in ordered_keys]
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    @staticmethod
+    def _write_json_artifact(path: Optional[Path], payload: Dict[str, Any]) -> None:
+        """Persist one JSON artifact if path exists."""
+
+        if path is None:
+            return
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    def _update_failure_patterns_artifact(
+        self,
+        *,
+        failure_patterns_path: Path,
+        review_payload: Dict[str, Any],
+        loop_state: Dict[str, Any],
+        trend_payload: Dict[str, Any],
+        next_tasks_payload: Dict[str, Any],
+        generated_at: str,
+    ) -> None:
+        """Accumulate recurring failure/quality patterns in one structured file."""
+
+        existing_payload = self._read_json_file(failure_patterns_path)
+        current_items = existing_payload.get("items", []) if isinstance(existing_payload, dict) else []
+        if not isinstance(current_items, list):
+            current_items = []
+        merged: Dict[str, Dict[str, Any]] = {}
+        for item in current_items:
+            if not isinstance(item, dict):
+                continue
+            pattern_id = str(item.get("pattern_id", "")).strip()
+            if pattern_id:
+                merged[pattern_id] = item
+
+        categories_below = review_payload.get("quality_gate", {}).get("categories_below_threshold", [])
+        if not isinstance(categories_below, list):
+            categories_below = []
+        persistent_low = trend_payload.get("persistent_low_categories", []) if isinstance(trend_payload, dict) else []
+        if not isinstance(persistent_low, list):
+            persistent_low = []
+        stagnant = trend_payload.get("stagnant_categories", []) if isinstance(trend_payload, dict) else []
+        if not isinstance(stagnant, list):
+            stagnant = []
+        next_titles = [
+            str(item.get("title", "")).strip()
+            for item in (next_tasks_payload.get("tasks", []) if isinstance(next_tasks_payload, dict) else [])
+            if isinstance(item, dict) and str(item.get("title", "")).strip()
+        ]
+
+        pattern_candidates: List[Dict[str, Any]] = []
+        for category in categories_below:
+            cat = str(category).strip()
+            if not cat:
+                continue
+            pattern_candidates.append(
+                {
+                    "pattern_id": f"low_category:{cat}",
+                    "pattern_type": "low_category",
+                    "category": cat,
+                    "trigger": "quality_gate_below_threshold",
+                    "recommended_actions": next_titles[:3],
+                }
+            )
+        for category in persistent_low:
+            cat = str(category).strip()
+            if not cat:
+                continue
+            pattern_candidates.append(
+                {
+                    "pattern_id": f"persistent_low:{cat}",
+                    "pattern_type": "persistent_low",
+                    "category": cat,
+                    "trigger": "trend_persistent_low",
+                    "recommended_actions": next_titles[:3],
+                }
+            )
+        for category in stagnant:
+            cat = str(category).strip()
+            if not cat:
+                continue
+            pattern_candidates.append(
+                {
+                    "pattern_id": f"stagnant:{cat}",
+                    "pattern_type": "stagnant_category",
+                    "category": cat,
+                    "trigger": "trend_stagnation",
+                    "recommended_actions": next_titles[:3],
+                }
+            )
+        if bool(loop_state.get("repeated_issue_limit_hit")):
+            pattern_candidates.append(
+                {
+                    "pattern_id": "loop_guard:repeated_issue",
+                    "pattern_type": "loop_guard",
+                    "category": "",
+                    "trigger": "repeated_issue_limit_hit",
+                    "recommended_actions": next_titles[:3],
+                }
+            )
+        if bool(loop_state.get("score_stagnation_detected")):
+            pattern_candidates.append(
+                {
+                    "pattern_id": "loop_guard:score_stagnation",
+                    "pattern_type": "loop_guard",
+                    "category": "",
+                    "trigger": "score_stagnation_detected",
+                    "recommended_actions": next_titles[:3],
+                }
+            )
+        if bool(loop_state.get("quality_regression_detected")):
+            pattern_candidates.append(
+                {
+                    "pattern_id": "loop_guard:quality_regression",
+                    "pattern_type": "loop_guard",
+                    "category": "",
+                    "trigger": "quality_regression_detected",
+                    "recommended_actions": next_titles[:3],
+                }
+            )
+
+        for candidate in pattern_candidates:
+            pattern_id = str(candidate.get("pattern_id", "")).strip()
+            if not pattern_id:
+                continue
+            current = merged.get(
+                pattern_id,
+                {
+                    "pattern_id": pattern_id,
+                    "pattern_type": str(candidate.get("pattern_type", "")).strip(),
+                    "category": str(candidate.get("category", "")).strip(),
+                    "trigger": str(candidate.get("trigger", "")).strip(),
+                    "count": 0,
+                    "first_seen_at": generated_at,
+                    "last_seen_at": generated_at,
+                    "recommended_actions": [],
+                },
+            )
+            current["count"] = int(current.get("count", 0) or 0) + 1
+            current["last_seen_at"] = generated_at
+            current["recommended_actions"] = list(candidate.get("recommended_actions", []) or [])
+            merged[pattern_id] = current
+
+        ordered_items = sorted(
+            merged.values(),
+            key=lambda item: (-int(item.get("count", 0) or 0), str(item.get("pattern_id", ""))),
+        )
+        failure_patterns_path.write_text(
+            json.dumps({"generated_at": generated_at, "items": ordered_items[:100]}, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    def _write_conventions_artifact(
+        self,
+        *,
+        repository_path: Path,
+        conventions_path: Path,
+        job: JobRecord,
+        generated_at: str,
+    ) -> None:
+        """Write a richer write-only convention snapshot from repo structure and manifests."""
+
+        rules: List[Dict[str, Any]] = []
+        detected_stack: List[str] = []
+
+        def add_rule(rule_id: str, convention_type: str, rule: str, evidence_paths: List[str], confidence: float) -> None:
+            rules.append(
+                {
+                    "id": rule_id,
+                    "type": convention_type,
+                    "rule": rule,
+                    "evidence_paths": evidence_paths,
+                    "confidence": confidence,
+                }
+            )
+
+        def add_stack(tag: str) -> None:
+            normalized = str(tag or "").strip().lower()
+            if normalized and normalized not in detected_stack:
+                detected_stack.append(normalized)
+
+        package_json = self._read_json_file(repository_path / "package.json")
+        package_deps = self._package_dependency_map(package_json)
+        pyproject_text = self._read_text_file(repository_path / "pyproject.toml")
+        requirements_text = self._read_text_file(repository_path / "requirements.txt")
+
+        if (repository_path / "tests").exists():
+            add_rule("conv_tests_dir", "filesystem", "Tests live under tests/", ["tests"], 0.74)
+        if (repository_path / "tests" / "e2e").exists():
+            add_rule("conv_tests_e2e_dir", "testing", "End-to-end tests live under tests/e2e/", ["tests/e2e"], 0.8)
+        if (repository_path / "src").exists():
+            add_rule("conv_src_dir", "filesystem", "Primary source files live under src/", ["src"], 0.72)
+        if (repository_path / "app").exists():
+            add_rule("conv_app_dir", "filesystem", "Primary application code lives under app/", ["app"], 0.72)
+        if (repository_path / "app" / "components").exists():
+            add_rule(
+                "conv_app_components",
+                "ui_structure",
+                "Reusable UI components live under app/components/",
+                ["app/components"],
+                0.82,
+            )
+        if (repository_path / "components").exists():
+            add_rule(
+                "conv_components_dir",
+                "ui_structure",
+                "Reusable UI components live under components/",
+                ["components"],
+                0.8,
+            )
+        if (repository_path / "src" / "components").exists():
+            add_rule(
+                "conv_src_components_dir",
+                "ui_structure",
+                "Reusable UI components live under src/components/",
+                ["src/components"],
+                0.82,
+            )
+        if (repository_path / "package.json").exists():
+            add_rule("conv_node_runtime", "runtime", "Node package manifest is package.json", ["package.json"], 0.9)
+            add_stack("node")
+        if (repository_path / "pyproject.toml").exists():
+            add_rule("conv_pyproject", "runtime", "Python project metadata is pyproject.toml", ["pyproject.toml"], 0.9)
+            add_stack("python")
+        elif (repository_path / "requirements.txt").exists():
+            add_rule("conv_requirements", "runtime", "Python dependencies are managed with requirements.txt", ["requirements.txt"], 0.86)
+            add_stack("python")
+        if (repository_path / "README.md").exists():
+            add_rule("conv_readme", "documentation", "Repository keeps top-level README.md", ["README.md"], 0.66)
+
+        if package_deps:
+            if "next" in package_deps:
+                add_stack("nextjs")
+                add_rule("conv_nextjs", "framework", "Frontend framework is Next.js", ["package.json"], 0.92)
+            if "react" in package_deps:
+                add_stack("react")
+                add_rule("conv_react", "framework", "UI layer is based on React", ["package.json"], 0.9)
+            if "react-native" in package_deps:
+                add_stack("react-native")
+                add_rule("conv_react_native", "framework", "App layer is based on React Native", ["package.json"], 0.92)
+            if "tailwindcss" in package_deps:
+                add_stack("tailwindcss")
+                add_rule("conv_tailwindcss", "styling", "Styling uses Tailwind CSS utilities", ["package.json"], 0.9)
+            if "framer-motion" in package_deps:
+                add_stack("framer-motion")
+                add_rule("conv_framer_motion", "animation", "Motion/animation uses framer-motion", ["package.json"], 0.88)
+            if "lucide-react" in package_deps:
+                add_stack("lucide-react")
+                add_rule("conv_lucide_react", "icons", "Icons use lucide-react", ["package.json"], 0.88)
+            if "@playwright/test" in package_deps or "playwright" in package_deps:
+                add_stack("playwright")
+                add_rule("conv_playwright", "testing", "Browser/E2E tests use Playwright", ["package.json"], 0.9)
+            if "vitest" in package_deps:
+                add_stack("vitest")
+                add_rule("conv_vitest", "testing", "Unit/integration tests use Vitest", ["package.json"], 0.88)
+            if "jest" in package_deps:
+                add_stack("jest")
+                add_rule("conv_jest", "testing", "Unit/integration tests use Jest", ["package.json"], 0.88)
+            if "typescript" in package_deps or (repository_path / "tsconfig.json").exists():
+                add_stack("typescript")
+                add_rule("conv_typescript", "language", "Source is authored in TypeScript", ["package.json", "tsconfig.json"], 0.86)
+
+        py_lower = pyproject_text.lower()
+        req_lower = requirements_text.lower()
+        if "fastapi" in py_lower or "fastapi" in req_lower:
+            add_stack("fastapi")
+            add_rule(
+                "conv_fastapi",
+                "framework",
+                "Backend/API layer uses FastAPI",
+                ["pyproject.toml" if pyproject_text else "requirements.txt"],
+                0.9,
+            )
+        if "pytest" in py_lower or "pytest" in req_lower:
+            add_stack("pytest")
+            add_rule(
+                "conv_pytest",
+                "testing",
+                "Python tests use pytest",
+                ["pyproject.toml" if pyproject_text else "requirements.txt"],
+                0.88,
+            )
+
+        if (repository_path / "app" / "layout.tsx").exists() or (repository_path / "app" / "page.tsx").exists():
+            add_rule("conv_next_app_router", "routing", "Next.js app router uses app/ directory entrypoints", ["app/layout.tsx", "app/page.tsx"], 0.84)
+        if (repository_path / "pages").exists():
+            add_rule("conv_pages_router", "routing", "Page routes live under pages/", ["pages"], 0.78)
+
+        component_extensions = self._detect_component_extension_preference(repository_path)
+        if component_extensions["tsx"] > 0 and component_extensions["tsx"] >= component_extensions["jsx"]:
+            add_rule(
+                "conv_component_tsx",
+                "language",
+                "Component implementations prefer .tsx files",
+                component_extensions["evidence_paths"][:3],
+                0.76,
+            )
+        elif component_extensions["jsx"] > 0:
+            add_rule(
+                "conv_component_jsx",
+                "language",
+                "Component implementations prefer .jsx files",
+                component_extensions["evidence_paths"][:3],
+                0.72,
+            )
+
+        test_convention = self._detect_test_file_conventions(repository_path)
+        if test_convention["python"] > 0:
+            add_rule(
+                "conv_pytest_file_pattern",
+                "testing",
+                "Python tests follow test_*.py naming under tests/",
+                test_convention["python_paths"][:3],
+                0.78,
+            )
+        if test_convention["js"] > 0:
+            add_rule(
+                "conv_js_test_pattern",
+                "testing",
+                "Frontend tests use *.test.* or *.spec.* naming",
+                test_convention["js_paths"][:3],
+                0.76,
+            )
+
+        payload = {
+            "generated_at": generated_at,
+            "job_id": job.job_id,
+            "app_code": job.app_code,
+            "repository": self._job_execution_repository(job),
+            "detected_stack": sorted(detected_stack),
+            "rules": sorted(rules, key=lambda item: str(item.get("id", ""))),
+        }
+        conventions_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    def _write_memory_quality_artifacts(
+        self,
+        *,
+        job: JobRecord,
+        paths: Dict[str, Path],
+        review_payload: Dict[str, Any],
+        trend_payload: Dict[str, Any],
+        loop_state: Dict[str, Any],
+        generated_at: str,
+        current_memory_ids: List[str],
+        memory_feedback_path: Path,
+        memory_rankings_path: Path,
+    ) -> None:
+        """Write memory feedback history and aggregated rankings."""
+
+        outcome = self._build_memory_feedback_outcome(
+            review_payload=review_payload,
+            trend_payload=trend_payload,
+            loop_state=loop_state,
+        )
+        selection_payload = self._read_json_file(paths.get("memory_selection"))
+
+        used_by_routes: Dict[str, List[str]] = {}
+        for route_key in ("planner_context", "reviewer_context", "coder_context"):
+            route_name = route_key.replace("_context", "")
+            route_ids = selection_payload.get(route_key, []) if isinstance(selection_payload, dict) else []
+            if not isinstance(route_ids, list):
+                continue
+            for raw_id in route_ids:
+                memory_id = str(raw_id or "").strip()
+                if not memory_id:
+                    continue
+                used_by_routes.setdefault(memory_id, [])
+                if route_name not in used_by_routes[memory_id]:
+                    used_by_routes[memory_id].append(route_name)
+
+        for memory_id in current_memory_ids:
+            normalized = str(memory_id or "").strip()
+            if not normalized:
+                continue
+            used_by_routes.setdefault(normalized, [])
+            if "generated" not in used_by_routes[normalized]:
+                used_by_routes[normalized].append("generated")
+
+        feedback_entries: List[Dict[str, Any]] = []
+        for memory_id, routes in sorted(used_by_routes.items()):
+            feedback_entries.append(
+                {
+                    "feedback_id": f"{memory_id}:{job.job_id}",
+                    "memory_id": memory_id,
+                    "memory_kind": self._memory_kind_from_id(memory_id),
+                    "job_id": job.job_id,
+                    "app_code": job.app_code,
+                    "repository": self._job_execution_repository(job),
+                    "generated_at": generated_at,
+                    "routes": sorted(routes),
+                    "verdict": outcome["verdict"],
+                    "score_delta": outcome["score_delta"],
+                    "evidence": outcome["evidence"],
+                }
+            )
+
+        self._upsert_json_history_entries(
+            memory_feedback_path,
+            feedback_entries,
+            key_field="feedback_id",
+            root_key="entries",
+            max_entries=800,
+        )
+        self._update_memory_rankings_artifact(
+            memory_rankings_path=memory_rankings_path,
+            feedback_entries=feedback_entries,
+            generated_at=generated_at,
+        )
+
+    @staticmethod
+    def _build_memory_feedback_outcome(
+        *,
+        review_payload: Dict[str, Any],
+        trend_payload: Dict[str, Any],
+        loop_state: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Translate current run quality signals into one simple memory verdict."""
+
+        quality_gate = review_payload.get("quality_gate", {}) if isinstance(review_payload, dict) else {}
+        if not isinstance(quality_gate, dict):
+            quality_gate = {}
+
+        delta = float(trend_payload.get("delta_from_previous", 0.0) or 0.0) if isinstance(trend_payload, dict) else 0.0
+        regression = bool(loop_state.get("quality_regression_detected"))
+        stagnation = bool(loop_state.get("score_stagnation_detected"))
+        repeated = bool(loop_state.get("repeated_issue_limit_hit"))
+        gate_passed = bool(quality_gate.get("passed", False))
+
+        if regression or delta <= -0.2:
+            verdict = "decay"
+            score_delta = -2
+        elif repeated:
+            verdict = "decay"
+            score_delta = -2
+        elif stagnation:
+            verdict = "decay"
+            score_delta = -1
+        elif gate_passed and delta >= 0.3:
+            verdict = "promote"
+            score_delta = 2
+        elif delta > 0.0:
+            verdict = "promote"
+            score_delta = 1
+        else:
+            verdict = "keep"
+            score_delta = 0
+
+        return {
+            "verdict": verdict,
+            "score_delta": score_delta,
+            "evidence": {
+                "quality_gate_passed": gate_passed,
+                "trend_direction": str(trend_payload.get("trend_direction", "")).strip()
+                if isinstance(trend_payload, dict)
+                else "",
+                "delta_from_previous": delta,
+                "quality_regression_detected": regression,
+                "score_stagnation_detected": stagnation,
+                "repeated_issue_limit_hit": repeated,
+                "persistent_low_categories": list(trend_payload.get("persistent_low_categories", []) or [])
+                if isinstance(trend_payload, dict)
+                else [],
+            },
+        }
+
+    def _update_memory_rankings_artifact(
+        self,
+        *,
+        memory_rankings_path: Path,
+        feedback_entries: List[Dict[str, Any]],
+        generated_at: str,
+    ) -> None:
+        """Aggregate feedback history into durable memory rankings."""
+
+        existing_payload = self._read_json_file(memory_rankings_path)
+        current_items = existing_payload.get("items", []) if isinstance(existing_payload, dict) else []
+        if not isinstance(current_items, list):
+            current_items = []
+
+        merged: Dict[str, Dict[str, Any]] = {}
+        for item in current_items:
+            if not isinstance(item, dict):
+                continue
+            memory_id = str(item.get("memory_id", "")).strip()
+            if memory_id:
+                merged[memory_id] = item
+
+        for feedback in feedback_entries:
+            memory_id = str(feedback.get("memory_id", "")).strip()
+            if not memory_id:
+                continue
+            current = merged.get(
+                memory_id,
+                {
+                    "memory_id": memory_id,
+                    "memory_kind": str(feedback.get("memory_kind", "")).strip(),
+                    "score": 0.0,
+                    "usage_count": 0,
+                    "positive_count": 0,
+                    "negative_count": 0,
+                    "neutral_count": 0,
+                    "confidence": 0.5,
+                    "state": "active",
+                    "last_feedback_at": generated_at,
+                },
+            )
+            score_delta = float(feedback.get("score_delta", 0.0) or 0.0)
+            current["usage_count"] = int(current.get("usage_count", 0) or 0) + 1
+            current["score"] = max(-6.0, min(6.0, float(current.get("score", 0.0) or 0.0) + score_delta))
+            if score_delta > 0:
+                current["positive_count"] = int(current.get("positive_count", 0) or 0) + 1
+            elif score_delta < 0:
+                current["negative_count"] = int(current.get("negative_count", 0) or 0) + 1
+            else:
+                current["neutral_count"] = int(current.get("neutral_count", 0) or 0) + 1
+            current["last_feedback_at"] = generated_at
+            current["last_routes"] = list(feedback.get("routes", []) or [])
+            current["last_verdict"] = str(feedback.get("verdict", "")).strip()
+            current["confidence"] = round(
+                max(
+                    0.05,
+                    min(
+                        0.98,
+                        0.5
+                        + float(current.get("score", 0.0) or 0.0) * 0.05
+                        + int(current.get("positive_count", 0) or 0) * 0.02
+                        - int(current.get("negative_count", 0) or 0) * 0.03,
+                    ),
+                ),
+                3,
+            )
+            current["state"] = self._memory_ranking_state(
+                score=float(current.get("score", 0.0) or 0.0),
+                positive_count=int(current.get("positive_count", 0) or 0),
+                negative_count=int(current.get("negative_count", 0) or 0),
+            )
+            merged[memory_id] = current
+
+        ordered_items = sorted(
+            merged.values(),
+            key=lambda item: (
+                str(item.get("state", "")) == "banned",
+                -float(item.get("score", 0.0) or 0.0),
+                -float(item.get("confidence", 0.0) or 0.0),
+                -int(item.get("usage_count", 0) or 0),
+                str(item.get("memory_id", "")),
+            ),
+        )
+        memory_rankings_path.write_text(
+            json.dumps({"generated_at": generated_at, "items": ordered_items[:400]}, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    @staticmethod
+    def _memory_ranking_state(*, score: float, positive_count: int, negative_count: int) -> str:
+        """Map aggregate score history to one compact ranking state."""
+
+        if negative_count >= 3 and score <= -3.0:
+            return "banned"
+        if score >= 3.0 or positive_count >= 3:
+            return "promoted"
+        if score < 0.0:
+            return "decayed"
+        return "active"
+
+    @staticmethod
+    def _memory_kind_from_id(memory_id: str) -> str:
+        """Infer one stable memory kind from stored identifier shape."""
+
+        raw = str(memory_id or "").strip()
+        if raw.startswith("episodic_"):
+            return "episodic"
+        if raw.startswith("improvement_strategy:"):
+            return "decision"
+        if raw.startswith("low_category:") or raw.startswith("persistent_low:") or raw.startswith("stagnant:") or raw.startswith("loop_guard:"):
+            return "failure_pattern"
+        if raw.startswith("conv_"):
+            return "convention"
+        return "unknown"
+
+    @staticmethod
+    def _package_dependency_map(package_json: Dict[str, Any]) -> Dict[str, str]:
+        """Return merged dependency map from package.json payload."""
+
+        merged: Dict[str, str] = {}
+        for section in ("dependencies", "devDependencies", "peerDependencies"):
+            payload = package_json.get(section, {}) if isinstance(package_json, dict) else {}
+            if not isinstance(payload, dict):
+                continue
+            for key, value in payload.items():
+                merged[str(key)] = str(value)
+        return merged
+
+    @staticmethod
+    def _detect_component_extension_preference(repository_path: Path) -> Dict[str, Any]:
+        """Detect preferred component file extension under conventional component dirs."""
+
+        candidate_dirs = [
+            repository_path / "app" / "components",
+            repository_path / "src" / "components",
+            repository_path / "components",
+        ]
+        counts = {"tsx": 0, "jsx": 0, "evidence_paths": []}
+        for candidate_dir in candidate_dirs:
+            if not candidate_dir.exists():
+                continue
+            for pattern, key in (("*.tsx", "tsx"), ("*.jsx", "jsx")):
+                for path in sorted(candidate_dir.rglob(pattern))[:10]:
+                    counts[key] += 1
+                    if len(counts["evidence_paths"]) < 6:
+                        counts["evidence_paths"].append(str(path.relative_to(repository_path)))
+        return counts
+
+    @staticmethod
+    def _detect_test_file_conventions(repository_path: Path) -> Dict[str, Any]:
+        """Detect conventional Python/JS test file naming patterns."""
+
+        python_paths = [str(path.relative_to(repository_path)) for path in sorted((repository_path / "tests").rglob("test_*.py"))[:6]] if (repository_path / "tests").exists() else []
+        js_patterns = ["*.test.ts", "*.test.tsx", "*.test.js", "*.test.jsx", "*.spec.ts", "*.spec.tsx", "*.spec.js", "*.spec.jsx"]
+        js_paths: List[str] = []
+        for base_dir in [repository_path / "tests", repository_path / "src", repository_path / "app", repository_path]:
+            if not base_dir.exists():
+                continue
+            for pattern in js_patterns:
+                for path in sorted(base_dir.rglob(pattern)):
+                    relative = str(path.relative_to(repository_path))
+                    if relative not in js_paths:
+                        js_paths.append(relative)
+                    if len(js_paths) >= 6:
+                        break
+                if len(js_paths) >= 6:
+                    break
+            if len(js_paths) >= 6:
+                break
+        return {
+            "python": len(python_paths),
+            "python_paths": python_paths,
+            "js": len(js_paths),
+            "js_paths": js_paths,
+        }
+
+    def _write_memory_retrieval_artifacts(
+        self,
+        *,
+        job: JobRecord,
+        repository_path: Path,
+        paths: Dict[str, Path],
+    ) -> None:
+        """Build route-specific memory selection/context files for prompt injection."""
+
+        selection_path = paths.get("memory_selection", self._docs_file(repository_path, "MEMORY_SELECTION.json"))
+        context_path = paths.get("memory_context", self._docs_file(repository_path, "MEMORY_CONTEXT.json"))
+        if not self._feature_enabled("memory_retrieval"):
+            generated_at = utc_now_iso()
+            self._write_json_artifact(
+                selection_path,
+                {
+                    "generated_at": generated_at,
+                    "job_id": job.job_id,
+                    "enabled": False,
+                    "planner_context": [],
+                    "reviewer_context": [],
+                    "coder_context": [],
+                },
+            )
+            self._write_json_artifact(
+                context_path,
+                {
+                    "generated_at": generated_at,
+                    "job_id": job.job_id,
+                    "enabled": False,
+                    "repository": self._job_execution_repository(job),
+                    "planner_context": [],
+                    "reviewer_context": [],
+                    "coder_context": [],
+                },
+            )
+            return
+
+        memory_log_entries = self._read_jsonl_entries(paths.get("memory_log"))
+        decision_entries = self._read_json_history_entries(paths.get("decision_history"))
+        failure_patterns_payload = self._read_json_file(paths.get("failure_patterns"))
+        failure_pattern_entries = failure_patterns_payload.get("items", []) if isinstance(failure_patterns_payload, dict) else []
+        if not isinstance(failure_pattern_entries, list):
+            failure_pattern_entries = []
+        conventions_payload = self._read_json_file(paths.get("conventions"))
+        convention_entries = conventions_payload.get("rules", []) if isinstance(conventions_payload, dict) else []
+        if not isinstance(convention_entries, list):
+            convention_entries = []
+        rankings_payload = self._read_json_file(paths.get("memory_rankings"))
+        ranking_entries = rankings_payload.get("items", []) if isinstance(rankings_payload, dict) else []
+        if not isinstance(ranking_entries, list):
+            ranking_entries = []
+        rankings_map = {
+            str(item.get("memory_id", "")).strip(): item
+            for item in ranking_entries
+            if isinstance(item, dict) and str(item.get("memory_id", "")).strip()
+        }
+
+        planner_context = self._build_route_memory_context(
+            route="planner",
+            memory_log_entries=memory_log_entries,
+            decision_entries=decision_entries,
+            failure_pattern_entries=failure_pattern_entries,
+            convention_entries=convention_entries,
+            rankings_map=rankings_map,
+        )
+        reviewer_context = self._build_route_memory_context(
+            route="reviewer",
+            memory_log_entries=memory_log_entries,
+            decision_entries=decision_entries,
+            failure_pattern_entries=failure_pattern_entries,
+            convention_entries=convention_entries,
+            rankings_map=rankings_map,
+        )
+        coder_context = self._build_route_memory_context(
+            route="coder",
+            memory_log_entries=memory_log_entries,
+            decision_entries=decision_entries,
+            failure_pattern_entries=failure_pattern_entries,
+            convention_entries=convention_entries,
+            rankings_map=rankings_map,
+        )
+
+        selection_payload = {
+            "generated_at": utc_now_iso(),
+            "job_id": job.job_id,
+            "corpus_counts": {
+                "episodic": len(memory_log_entries),
+                "decisions": len(decision_entries),
+                "failure_patterns": len(failure_pattern_entries),
+                "conventions": len(convention_entries),
+            },
+            "planner_context": [str(item.get("id", "")).strip() for item in planner_context],
+            "reviewer_context": [str(item.get("id", "")).strip() for item in reviewer_context],
+            "coder_context": [str(item.get("id", "")).strip() for item in coder_context],
+        }
+        context_payload = {
+            "generated_at": selection_payload["generated_at"],
+            "job_id": job.job_id,
+            "repository": self._job_execution_repository(job),
+            "planner_context": planner_context,
+            "reviewer_context": reviewer_context,
+            "coder_context": coder_context,
+        }
+
+        selection_path.write_text(json.dumps(selection_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        context_path.write_text(json.dumps(context_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    def _write_strategy_shadow_report(
+        self,
+        *,
+        job: JobRecord,
+        repository_path: Path,
+        paths: Dict[str, Path],
+        strategy_inputs: Dict[str, Any],
+        selected_strategy: str,
+        selected_focus: str,
+    ) -> None:
+        """Compute one memory-aware shadow strategy without affecting runtime behavior."""
+
+        report_path = paths.get("strategy_shadow_report", self._docs_file(repository_path, "STRATEGY_SHADOW_REPORT.json"))
+        if not self._feature_enabled("strategy_shadow"):
+            self._write_json_artifact(
+                report_path,
+                {
+                    "generated_at": utc_now_iso(),
+                    "job_id": job.job_id,
+                    "selected_strategy": selected_strategy,
+                    "selected_focus": selected_focus,
+                    "enabled": False,
+                    "shadow_strategy": "",
+                    "diverged": False,
+                    "decision_mode": "disabled",
+                    "confidence": 0.0,
+                    "scores_by_strategy": {},
+                    "evidence": [],
+                },
+            )
+            return
+
+        context_payload = self._read_json_file(paths.get("memory_context"))
+        rankings_payload = self._read_json_file(paths.get("memory_rankings"))
+        ranking_entries = rankings_payload.get("items", []) if isinstance(rankings_payload, dict) else []
+        if not isinstance(ranking_entries, list):
+            ranking_entries = []
+        rankings_map = {
+            str(item.get("memory_id", "")).strip(): item
+            for item in ranking_entries
+            if isinstance(item, dict) and str(item.get("memory_id", "")).strip()
+        }
+
+        report_payload = self._build_strategy_shadow_report_payload(
+            job=job,
+            context_payload=context_payload if isinstance(context_payload, dict) else {},
+            rankings_map=rankings_map,
+            strategy_inputs=strategy_inputs,
+            selected_strategy=selected_strategy,
+            selected_focus=selected_focus,
+        )
+        report_path.write_text(json.dumps(report_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    def _build_strategy_shadow_report_payload(
+        self,
+        *,
+        job: JobRecord,
+        context_payload: Dict[str, Any],
+        rankings_map: Dict[str, Dict[str, Any]],
+        strategy_inputs: Dict[str, Any],
+        selected_strategy: str,
+        selected_focus: str,
+    ) -> Dict[str, Any]:
+        """Build a read-only comparison between current strategy and memory-weighted shadow strategy."""
+
+        normalized_selected = str(selected_strategy or "normal_iterative_improvement").strip() or "normal_iterative_improvement"
+        normalized_focus = str(selected_focus or "balanced").strip() or "balanced"
+        protected_strategies = {"design_rebaseline", "rollback_or_stabilize", "narrow_scope_stabilization"}
+
+        score_map: Dict[str, float] = {normalized_selected: 1.0 if normalized_selected in protected_strategies else 0.35}
+        evidence_rows: List[Dict[str, Any]] = []
+        evidence_count = 0
+
+        for route_name in ("planner_context", "reviewer_context", "coder_context"):
+            route_items = context_payload.get(route_name, []) if isinstance(context_payload, dict) else []
+            if not isinstance(route_items, list):
+                continue
+            route_label = route_name.replace("_context", "")
+            for item in route_items:
+                if not isinstance(item, dict):
+                    continue
+                memory_id = str(item.get("id", "")).strip()
+                if not memory_id:
+                    continue
+                route_weight = self._strategy_shadow_route_weight(route_label)
+                recommended = self._strategy_shadow_recommendations(item)
+                if not recommended:
+                    continue
+                ranking = rankings_map.get(memory_id, {})
+                weight_multiplier = self._strategy_shadow_ranking_weight(ranking)
+                evidence_weight = round(route_weight * weight_multiplier, 3)
+                for candidate in recommended:
+                    strategy_name = str(candidate.get("strategy", "")).strip()
+                    if not strategy_name:
+                        continue
+                    score_map[strategy_name] = round(score_map.get(strategy_name, 0.0) + evidence_weight, 3)
+                    evidence_count += 1
+                    if len(evidence_rows) < 12:
+                        evidence_rows.append(
+                            {
+                                "memory_id": memory_id,
+                                "route": route_label,
+                                "kind": str(item.get("kind", "")).strip(),
+                                "recommended_strategy": strategy_name,
+                                "reason": str(candidate.get("reason", "")).strip(),
+                                "summary": str(item.get("summary", "")).strip(),
+                                "weight": evidence_weight,
+                                "ranking_state": str(ranking.get("state", "active")).strip() or "active",
+                                "ranking_score": float(ranking.get("score", 0.0) or 0.0),
+                                "ranking_confidence": float(ranking.get("confidence", 0.5) or 0.5),
+                            }
+                        )
+
+        if normalized_selected in protected_strategies:
+            shadow_strategy = normalized_selected
+            decision_mode = "locked_by_guardrail"
+            decision_reason = "현재 전략은 보호 전략이므로 memory shadow가 실행 경로를 제안해도 덮지 않습니다."
+        elif evidence_count < 2:
+            shadow_strategy = normalized_selected
+            decision_mode = "insufficient_memory_signal"
+            decision_reason = "shadow 비교를 위한 memory evidence가 충분하지 않아 기존 전략을 유지합니다."
+        else:
+            ordered_candidates = sorted(score_map.items(), key=lambda item: (-float(item[1]), item[0]))
+            top_strategy, top_score = ordered_candidates[0]
+            selected_score = float(score_map.get(normalized_selected, 0.0) or 0.0)
+            if top_strategy != normalized_selected and top_score >= selected_score + 0.6:
+                shadow_strategy = top_strategy
+                decision_mode = "memory_divergence"
+                decision_reason = "memory evidence 기준으로 다른 전략이 더 높은 점수를 받았습니다."
+            else:
+                shadow_strategy = normalized_selected
+                decision_mode = "memory_confirms_current"
+                decision_reason = "memory evidence가 현재 전략을 뒤집을 정도로 강하지 않습니다."
+
+        shadow_focus = self._strategy_focus_for_name(shadow_strategy)
+        selected_score = round(float(score_map.get(normalized_selected, 0.0) or 0.0), 3)
+        shadow_score = round(float(score_map.get(shadow_strategy, 0.0) or 0.0), 3)
+        confidence = round(
+            max(
+                0.12,
+                min(
+                    0.96,
+                    0.35
+                    + evidence_count * 0.04
+                    + max(0.0, shadow_score - selected_score) * 0.08
+                    + (0.12 if shadow_strategy == normalized_selected else 0.18),
+                ),
+            ),
+            3,
+        )
+        return {
+            "generated_at": utc_now_iso(),
+            "job_id": job.job_id,
+            "app_code": job.app_code,
+            "repository": self._job_execution_repository(job),
+            "enabled": True,
+            "selected_strategy": normalized_selected,
+            "selected_focus": normalized_focus,
+            "shadow_strategy": shadow_strategy,
+            "shadow_focus": shadow_focus,
+            "diverged": shadow_strategy != normalized_selected,
+            "decision_mode": decision_mode,
+            "decision_reason": decision_reason,
+            "confidence": confidence,
+            "selected_strategy_score": selected_score,
+            "shadow_strategy_score": shadow_score,
+            "strategy_inputs": {
+                "maturity_level": str(strategy_inputs.get("maturity_level", "")).strip(),
+                "maturity_progression": str(strategy_inputs.get("maturity_progression", "")).strip(),
+                "quality_trend_direction": str(strategy_inputs.get("quality_trend_direction", "")).strip(),
+                "quality_gate_passed": bool(strategy_inputs.get("quality_gate_passed")),
+                "persistent_low_categories": list(strategy_inputs.get("persistent_low_categories", []) or []),
+                "stagnant_categories": list(strategy_inputs.get("stagnant_categories", []) or []),
+            },
+            "scores_by_strategy": {key: round(float(value), 3) for key, value in sorted(score_map.items())},
+            "evidence_count": evidence_count,
+            "evidence": evidence_rows,
+        }
+
+    @staticmethod
+    def _strategy_shadow_route_weight(route_name: str) -> float:
+        """Return a small route bias for shadow comparisons."""
+
+        normalized = str(route_name or "").strip().lower()
+        if normalized == "planner":
+            return 1.0
+        if normalized == "reviewer":
+            return 0.95
+        if normalized == "coder":
+            return 0.9
+        return 0.75
+
+    @staticmethod
+    def _strategy_shadow_ranking_weight(ranking: Dict[str, Any]) -> float:
+        """Translate memory ranking score/confidence into one bounded multiplier."""
+
+        if not isinstance(ranking, dict):
+            return 1.0
+        if str(ranking.get("state", "")).strip() == "banned":
+            return 0.0
+        score = float(ranking.get("score", 0.0) or 0.0)
+        confidence = float(ranking.get("confidence", 0.5) or 0.5)
+        usage_count = int(ranking.get("usage_count", 0) or 0)
+        return max(0.25, min(1.8, 0.8 + score * 0.08 + confidence * 0.4 + min(usage_count, 5) * 0.03))
+
+    @staticmethod
+    def _strategy_shadow_recommendations(item: Dict[str, Any]) -> List[Dict[str, str]]:
+        """Infer one or more candidate strategies from one compact memory item."""
+
+        kind = str(item.get("kind", "")).strip()
+        if kind == "decision":
+            strategy = str(item.get("strategy", "")).strip()
+            if strategy:
+                return [{"strategy": strategy, "reason": "과거 decision memory에서 동일 전략을 선택함"}]
+            return []
+        if kind == "episodic":
+            signals = item.get("signals", {}) if isinstance(item.get("signals"), dict) else {}
+            strategy = str(signals.get("strategy", "")).strip()
+            if strategy:
+                return [{"strategy": strategy, "reason": "episodic memory의 당시 개선 전략"}]
+            return []
+        if kind != "failure_pattern":
+            return []
+
+        category = str(item.get("category", "")).strip()
+        trigger = str(item.get("summary", "")).strip().lower()
+        recommendations: List[Dict[str, str]] = []
+        if category == "test_coverage":
+            recommendations.append({"strategy": "test_hardening", "reason": "test_coverage 관련 실패 패턴"})
+        if category in {"usability", "ux_clarity", "error_state_handling", "empty_state_handling", "loading_state_handling"}:
+            recommendations.append({"strategy": "ux_clarity_improvement", "reason": f"{category} 관련 실패 패턴"})
+        if category in {"architecture_structure", "maintainability", "code_quality"}:
+            recommendations.append({"strategy": "stabilization", "reason": f"{category} 관련 엔지니어링 실패 패턴"})
+        if "quality_regression" in trigger:
+            recommendations.append({"strategy": "rollback_or_stabilize", "reason": "품질 하락 loop-guard 패턴"})
+        if "score_stagnation" in trigger or "repeated_issue" in trigger:
+            recommendations.append({"strategy": "stabilization", "reason": "반복/정체 loop-guard 패턴"})
+        return recommendations
+
+    @staticmethod
+    def _strategy_focus_for_name(strategy: str) -> str:
+        """Map strategy name to one compact focus label."""
+
+        normalized = str(strategy or "").strip()
+        if normalized == "feature_expansion":
+            return "feature"
+        if normalized == "test_hardening":
+            return "testing"
+        if normalized == "ux_clarity_improvement":
+            return "ux"
+        if normalized == "design_rebaseline":
+            return "design"
+        if normalized in {"rollback_or_stabilize", "stabilization"}:
+            return "stability"
+        if normalized == "narrow_scope_stabilization":
+            return "scope"
+        return "balanced"
+
+    def _build_route_memory_context(
+        self,
+        *,
+            route: str,
+            memory_log_entries: List[Dict[str, Any]],
+            decision_entries: List[Dict[str, Any]],
+            failure_pattern_entries: List[Dict[str, Any]],
+            convention_entries: List[Dict[str, Any]],
+            rankings_map: Dict[str, Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Select compact top-k memory items for one route."""
+
+        route_name = str(route or "").strip().lower()
+
+        def ranking_state(memory_id: str) -> str:
+            item = rankings_map.get(str(memory_id or "").strip(), {})
+            return str(item.get("state", "active")).strip() or "active"
+
+        def ranking_tuple(memory_id: str) -> Tuple[float, float, int]:
+            item = rankings_map.get(str(memory_id or "").strip(), {})
+            return (
+                float(item.get("score", 0.0) or 0.0),
+                float(item.get("confidence", 0.5) or 0.5),
+                int(item.get("usage_count", 0) or 0),
+            )
+
+        episodic_sorted = sorted(
+            [
+                item
+                for item in memory_log_entries
+                if isinstance(item, dict) and ranking_state(str(item.get("memory_id", "")).strip()) != "banned"
+            ],
+            key=lambda item: (
+                ranking_tuple(str(item.get("memory_id", "")).strip()),
+                str(item.get("generated_at", "")),
+            ),
+            reverse=True,
+        )
+        decision_sorted = sorted(
+            [
+                item
+                for item in decision_entries
+                if isinstance(item, dict) and ranking_state(str(item.get("decision_id", "")).strip()) != "banned"
+            ],
+            key=lambda item: (
+                ranking_tuple(str(item.get("decision_id", "")).strip()),
+                str(item.get("generated_at", "")),
+            ),
+            reverse=True,
+        )
+        pattern_sorted = sorted(
+            [
+                item
+                for item in failure_pattern_entries
+                if isinstance(item, dict) and ranking_state(str(item.get("pattern_id", "")).strip()) != "banned"
+            ],
+            key=lambda item: (
+                ranking_tuple(str(item.get("pattern_id", "")).strip()),
+                int(item.get("count", 0) or 0),
+                str(item.get("pattern_id", "")),
+            ),
+            reverse=True,
+        )
+        convention_sorted = sorted(
+            [
+                item
+                for item in convention_entries
+                if isinstance(item, dict) and ranking_state(str(item.get("id", "")).strip()) != "banned"
+            ],
+            key=lambda item: (
+                ranking_tuple(str(item.get("id", "")).strip()),
+                float(item.get("confidence", 0.0) or 0.0),
+                str(item.get("id", "")),
+            ),
+            reverse=True,
+        )
+
+        selected: List[Dict[str, Any]] = []
+        if route_name == "planner":
+            if episodic_sorted:
+                selected.append(self._memory_log_context_entry(episodic_sorted[0]))
+            if decision_sorted:
+                selected.append(self._decision_context_entry(decision_sorted[0]))
+            selected.extend(self._failure_pattern_context_entry(item) for item in pattern_sorted[:2])
+            selected.extend(self._convention_context_entry(item) for item in convention_sorted[:2])
+        elif route_name == "reviewer":
+            if episodic_sorted:
+                selected.append(self._memory_log_context_entry(episodic_sorted[0]))
+            selected.extend(self._failure_pattern_context_entry(item) for item in pattern_sorted[:3])
+            selected.extend(self._convention_context_entry(item) for item in convention_sorted[:2])
+        else:  # coder / fixer
+            if decision_sorted:
+                selected.append(self._decision_context_entry(decision_sorted[0]))
+            if episodic_sorted:
+                selected.append(self._memory_log_context_entry(episodic_sorted[0]))
+            selected.extend(self._failure_pattern_context_entry(item) for item in pattern_sorted[:2])
+            selected.extend(self._convention_context_entry(item) for item in convention_sorted[:3])
+
+        dedup: Dict[str, Dict[str, Any]] = {}
+        ordered_ids: List[str] = []
+        for item in selected:
+            item_id = str(item.get("id", "")).strip()
+            if not item_id:
+                continue
+            if item_id not in dedup:
+                ordered_ids.append(item_id)
+            dedup[item_id] = item
+        return [dedup[item_id] for item_id in ordered_ids[:6]]
+
+    @staticmethod
+    def _memory_log_context_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
+        signals = entry.get("signals", {}) if isinstance(entry, dict) else {}
+        if not isinstance(signals, dict):
+            signals = {}
+        return {
+            "kind": "episodic",
+            "id": str(entry.get("memory_id", "")).strip(),
+            "summary": (
+                f"strategy={signals.get('strategy', '')}, "
+                f"overall={signals.get('overall', 0)}, "
+                f"maturity={signals.get('maturity_level', '')}"
+            ),
+            "signals": {
+                "strategy": str(signals.get("strategy", "")).strip(),
+                "overall": float(signals.get("overall", 0.0) or 0.0),
+                "maturity_level": str(signals.get("maturity_level", "")).strip(),
+                "persistent_low_categories": list(signals.get("persistent_low_categories", []) or []),
+            },
+        }
+
+    @staticmethod
+    def _decision_context_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "kind": "decision",
+            "id": str(entry.get("decision_id", "")).strip(),
+            "summary": str(entry.get("chosen_strategy", "")).strip(),
+            "strategy": str(entry.get("chosen_strategy", "")).strip(),
+            "strategy_focus": str(entry.get("strategy_focus", "")).strip(),
+            "change_reasons": list(entry.get("change_reasons", []) or [])[:3],
+            "selected_task_titles": list(entry.get("selected_task_titles", []) or [])[:3],
+        }
+
+    @staticmethod
+    def _failure_pattern_context_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "kind": "failure_pattern",
+            "id": str(entry.get("pattern_id", "")).strip(),
+            "summary": str(entry.get("trigger", "")).strip(),
+            "pattern_type": str(entry.get("pattern_type", "")).strip(),
+            "category": str(entry.get("category", "")).strip(),
+            "count": int(entry.get("count", 0) or 0),
+            "recommended_actions": list(entry.get("recommended_actions", []) or [])[:3],
+        }
+
+    @staticmethod
+    def _convention_context_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "kind": "convention",
+            "id": str(entry.get("id", "")).strip(),
+            "summary": str(entry.get("rule", "")).strip(),
+            "type": str(entry.get("type", "")).strip(),
+            "confidence": float(entry.get("confidence", 0.0) or 0.0),
+            "evidence_paths": list(entry.get("evidence_paths", []) or [])[:3],
+        }
+
+    @staticmethod
+    def _read_jsonl_entries(path: Optional[Path]) -> List[Dict[str, Any]]:
+        """Read JSONL entries safely."""
+
+        if path is None or not path.exists():
+            return []
+        entries: List[Dict[str, Any]] = []
+        for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                entries.append(payload)
+        return entries
+
+    @staticmethod
+    def _read_json_history_entries(path: Optional[Path], *, root_key: str = "entries") -> List[Dict[str, Any]]:
+        """Read one JSON history file with list entries."""
+
+        payload = Orchestrator._read_json_file(path)
+        entries = payload.get(root_key, []) if isinstance(payload, dict) else []
+        if not isinstance(entries, list):
+            return []
+        return [item for item in entries if isinstance(item, dict)]
 
     @staticmethod
     def _build_improvement_strategy_inputs(
@@ -3623,6 +5232,7 @@ class Orchestrator:
         """Run original single-shot planner flow as safe fallback."""
 
         planner_prompt_path = self._docs_file(repository_path, "PLANNER_PROMPT.md")
+        self._write_memory_retrieval_artifacts(job=job, repository_path=repository_path, paths=paths)
         review_ready = paths["review"].exists() and bool(
             paths["review"].read_text(encoding="utf-8", errors="replace").strip()
         )
@@ -3634,6 +5244,8 @@ class Orchestrator:
                 improvement_plan_path=str(paths.get("improvement_plan", self._docs_file(repository_path, "IMPROVEMENT_PLAN.md"))),
                 improvement_loop_state_path=str(paths.get("improvement_loop_state", self._docs_file(repository_path, "IMPROVEMENT_LOOP_STATE.json"))),
                 next_improvement_tasks_path=str(paths.get("next_improvement_tasks", self._docs_file(repository_path, "NEXT_IMPROVEMENT_TASKS.json"))),
+                memory_selection_path=str(paths.get("memory_selection", self._docs_file(repository_path, "MEMORY_SELECTION.json"))),
+                memory_context_path=str(paths.get("memory_context", self._docs_file(repository_path, "MEMORY_CONTEXT.json"))),
                 is_long_term=self._is_long_track(self._require_job(job.job_id)),
                 is_refinement_round=review_ready,
                 planning_mode=planning_mode,
@@ -3695,6 +5307,7 @@ class Orchestrator:
     ) -> None:
         """Run planner through draft->quality-check->refine loop (graph-style MVP)."""
 
+        self._write_memory_retrieval_artifacts(job=job, repository_path=repository_path, paths=paths)
         review_ready = paths["review"].exists() and bool(
             paths["review"].read_text(encoding="utf-8", errors="replace").strip()
         )
@@ -3705,6 +5318,8 @@ class Orchestrator:
             improvement_plan_path=str(paths.get("improvement_plan", self._docs_file(repository_path, "IMPROVEMENT_PLAN.md"))),
             improvement_loop_state_path=str(paths.get("improvement_loop_state", self._docs_file(repository_path, "IMPROVEMENT_LOOP_STATE.json"))),
             next_improvement_tasks_path=str(paths.get("next_improvement_tasks", self._docs_file(repository_path, "NEXT_IMPROVEMENT_TASKS.json"))),
+            memory_selection_path=str(paths.get("memory_selection", self._docs_file(repository_path, "MEMORY_SELECTION.json"))),
+            memory_context_path=str(paths.get("memory_context", self._docs_file(repository_path, "MEMORY_CONTEXT.json"))),
             is_long_term=self._is_long_track(self._require_job(job.job_id)),
             is_refinement_round=review_ready,
             planning_mode=planning_mode,
@@ -4018,6 +5633,7 @@ class Orchestrator:
     ) -> None:
         self._set_stage(job.job_id, JobStage.IMPLEMENT_WITH_CODEX, log_path)
         self._ensure_product_definition_ready(paths, log_path)
+        self._write_memory_retrieval_artifacts(job=job, repository_path=repository_path, paths=paths)
 
         coder_prompt_path = self._docs_file(repository_path, "CODER_PROMPT_IMPLEMENT.md")
         coder_prompt_path.write_text(
@@ -4032,6 +5648,8 @@ class Orchestrator:
                 improvement_plan_path=str(paths.get("improvement_plan", self._docs_file(repository_path, "IMPROVEMENT_PLAN.md"))),
                 improvement_loop_state_path=str(paths.get("improvement_loop_state", self._docs_file(repository_path, "IMPROVEMENT_LOOP_STATE.json"))),
                 next_improvement_tasks_path=str(paths.get("next_improvement_tasks", self._docs_file(repository_path, "NEXT_IMPROVEMENT_TASKS.json"))),
+                memory_selection_path=str(paths.get("memory_selection", self._docs_file(repository_path, "MEMORY_SELECTION.json"))),
+                memory_context_path=str(paths.get("memory_context", self._docs_file(repository_path, "MEMORY_CONTEXT.json"))),
             ),
             encoding="utf-8",
         )
@@ -5686,6 +7304,7 @@ class Orchestrator:
         log_path: Path,
     ) -> None:
         self._set_stage(job.job_id, JobStage.REVIEW_WITH_GEMINI, log_path)
+        self._write_memory_retrieval_artifacts(job=job, repository_path=repository_path, paths=paths)
 
         reviewer_prompt_path = self._docs_file(repository_path, "REVIEWER_PROMPT.md")
         reviewer_prompt_path.write_text(
@@ -5693,6 +7312,8 @@ class Orchestrator:
                 spec_path=str(paths["spec"]),
                 plan_path=str(paths["plan"]),
                 review_path=str(paths["review"]),
+                memory_selection_path=str(paths.get("memory_selection", self._docs_file(repository_path, "MEMORY_SELECTION.json"))),
+                memory_context_path=str(paths.get("memory_context", self._docs_file(repository_path, "MEMORY_CONTEXT.json"))),
             ),
             encoding="utf-8",
         )
@@ -5721,6 +7342,7 @@ class Orchestrator:
         log_path: Path,
     ) -> None:
         self._set_stage(job.job_id, JobStage.FIX_WITH_CODEX, log_path)
+        self._write_memory_retrieval_artifacts(job=job, repository_path=repository_path, paths=paths)
         improvement_runtime = self._read_improvement_runtime_context(paths)
         strategy = str(improvement_runtime.get("strategy", "")).strip()
         scope_restriction = str(improvement_runtime.get("scope_restriction", "")).strip()
@@ -5761,6 +7383,8 @@ class Orchestrator:
                 improvement_plan_path=str(paths.get("improvement_plan", self._docs_file(repository_path, "IMPROVEMENT_PLAN.md"))),
                 improvement_loop_state_path=str(paths.get("improvement_loop_state", self._docs_file(repository_path, "IMPROVEMENT_LOOP_STATE.json"))),
                 next_improvement_tasks_path=str(paths.get("next_improvement_tasks", self._docs_file(repository_path, "NEXT_IMPROVEMENT_TASKS.json"))),
+                memory_selection_path=str(paths.get("memory_selection", self._docs_file(repository_path, "MEMORY_SELECTION.json"))),
+                memory_context_path=str(paths.get("memory_context", self._docs_file(repository_path, "MEMORY_CONTEXT.json"))),
             ),
             encoding="utf-8",
         )
@@ -6734,6 +8358,15 @@ class Orchestrator:
             "improvement_loop_state_path": str(paths.get("improvement_loop_state", Path("_docs/IMPROVEMENT_LOOP_STATE.json"))),
             "improvement_plan_path": str(paths.get("improvement_plan", Path("_docs/IMPROVEMENT_PLAN.md"))),
             "next_improvement_tasks_path": str(paths.get("next_improvement_tasks", Path("_docs/NEXT_IMPROVEMENT_TASKS.json"))),
+            "memory_log_path": str(paths.get("memory_log", Path("_docs/MEMORY_LOG.jsonl"))),
+            "decision_history_path": str(paths.get("decision_history", Path("_docs/DECISION_HISTORY.json"))),
+            "failure_patterns_path": str(paths.get("failure_patterns", Path("_docs/FAILURE_PATTERNS.json"))),
+            "conventions_path": str(paths.get("conventions", Path("_docs/CONVENTIONS.json"))),
+            "memory_selection_path": str(paths.get("memory_selection", Path("_docs/MEMORY_SELECTION.json"))),
+            "memory_context_path": str(paths.get("memory_context", Path("_docs/MEMORY_CONTEXT.json"))),
+            "memory_feedback_path": str(paths.get("memory_feedback", Path("_docs/MEMORY_FEEDBACK.json"))),
+            "memory_rankings_path": str(paths.get("memory_rankings", Path("_docs/MEMORY_RANKINGS.json"))),
+            "strategy_shadow_report_path": str(paths.get("strategy_shadow_report", Path("_docs/STRATEGY_SHADOW_REPORT.json"))),
             "stage_contracts_path": str(paths.get("stage_contracts", Path("_docs/STAGE_CONTRACTS.md"))),
             "stage_contracts_json_path": str(paths.get("stage_contracts_json", Path("_docs/STAGE_CONTRACTS.json"))),
             "pipeline_analysis_path": str(paths.get("pipeline_analysis", Path("_docs/PIPELINE_ANALYSIS.md"))),

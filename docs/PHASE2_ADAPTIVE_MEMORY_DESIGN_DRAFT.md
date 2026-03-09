@@ -20,17 +20,20 @@
   - convention extractor
   - memory scorer
 - 모든 adaptive 기능은 `shadow -> opt-in -> partial default -> full default` 순서로 도입한다.
+- adaptive 기능은 `feature_flags.json`으로 on/off 할 수 있어야 하며, 설정 탭과 어드민 탭에서 configured/active 상태를 구분해서 보여준다.
+- opt-in rollout의 첫 실험체로 `adaptive_quality_loop_v1` 워크플로우를 제공한다. 이 워크플로우는 UI 성격 라벨 분기와 same-attempt 품질 루프를 사용하지만 기본 워크플로우는 그대로 유지한다.
 - memory는 source of truth가 아니라 retrieval aid다.
 - 최종 정책 결정은 계속 rule / quality gate / trend / loop guard가 맡는다.
 
 ## 4. Phase 2 Main Theme
-- `Self-Evolving Memory Layer`
+- `Adaptive Memory on Top of a Safer Runtime`
 - 목표:
   - 같은 실패 반복 감소
   - repo convention 위반 감소
   - strategy precision 향상
   - 불필요한 full rerun 감소
   - 프로젝트별 개인화된 계획/리뷰/수정 흐름 축적
+  - memory layer가 올라가도 실행기 자체의 추적 가능성과 복구 가능성을 잃지 않음
 
 ## 5. Architecture Overview
 
@@ -42,7 +45,12 @@
 - hard gate
 - repo maturity / quality trend
 
-### 5.2 New Memory Layer (Additive)
+### 5.2 Phase 2 Foundation Layer (Additive)
+- `workflow result context`
+- `node atomicity / interrupted cleanup`
+- `read-first workflow ops UI`
+
+### 5.3 New Memory Layer (Additive)
 - `memory_writer`
 - `memory_retriever`
 - `convention_extractor`
@@ -107,7 +115,53 @@
 
 ## 7. Phase 2 Incremental Delivery
 
-### Phase 2-A. Structured Memory MVP
+### Phase 2-A. Foundation Hardening
+- 목표:
+  - memory layer를 올리기 전에 실행 context, node lifecycle, 운영 UI를 표준화한다.
+
+#### Phase 2-A1. Workflow Result Context Contract
+- 목표:
+  - 모든 workflow node가 `context["results"][node_id]`에 정규화된 결과를 남긴다.
+- Standard payload:
+  - `node_id`
+  - `node_type`
+  - `node_title`
+  - `event`
+  - `status`
+  - `error_message`
+  - `attempt`
+  - `started_at`
+  - `finished_at`
+  - `agent_profile`
+  - `artifact_keys`
+  - `artifacts`
+- Why it matters:
+  - 다음 node가 이전 node 결과를 직접 참조할 수 있다.
+  - planner / reviewer / memory_writer가 같은 실행 결과 규약을 공유한다.
+
+#### Phase 2-A2. Node Atomicity / Interrupted Cleanup
+- 목표:
+  - `started` 상태로 영구 정체되는 node run을 없앤다.
+- Deliverables:
+  - `node_runs.status = running|success|failed|interrupted`
+  - node heartbeat 또는 lease
+  - worker boot cleanup
+  - interrupted reason 기록
+- Why it matters:
+  - memory와 recovery가 오염된 실행 기록에 의존하지 않게 만든다.
+
+#### Phase 2-A3. Read-First Workflow Operations UI
+- 목표:
+  - 편집보다 조회/복제/차이 확인을 먼저 강화한다.
+- Deliverables:
+  - workflow viewer
+  - workflow clone
+  - diff/preview
+  - node run timeline read view
+- Why it matters:
+  - 운영자가 adaptive 기능 도입 전후를 안전하게 비교할 수 있다.
+
+### Phase 2-B. Structured Memory MVP
 - 목표:
   - vector DB 없이 memory schema를 먼저 만든다.
   - 현재 JSON 산출물을 memory entry로 정규화한다.
@@ -122,7 +176,7 @@
 - Success criteria:
   - 각 job 종료 후 최소 1개 episodic memory와 1개 decision memory가 저장된다.
 
-### Phase 2-B. Controlled Retrieval
+### Phase 2-C. Controlled Retrieval
 - 목표:
   - planner / reviewer / fixer 전에 유사 memory를 회수해 prompt에 주입한다.
 - Insert points:
@@ -141,7 +195,7 @@
 - Success criteria:
   - retrieval 결과가 prompt에 구조화되어 들어가고, 길이 상한을 넘지 않는다.
 
-### Phase 2-C. Convention Extraction
+### Phase 2-D. Convention Extraction
 - 목표:
   - repo 성공 라운드와 안정 코드에서 convention을 추출한다.
 - Sources:
@@ -157,7 +211,7 @@
 - Success criteria:
   - coder/reviewer가 convention summary를 직접 참고한다.
 
-### Phase 2-D. Memory Quality Scoring
+### Phase 2-E. Memory Quality Scoring
 - 목표:
   - 저장된 memory를 승격/감쇠/보관/차단한다.
 - Rules:
@@ -170,7 +224,7 @@
 - Success criteria:
   - 도움이 된 memory와 오염된 memory가 분리 관리된다.
 
-### Phase 2-E. Adaptive Strategy Shadow Mode
+### Phase 2-F. Adaptive Strategy Shadow Mode
 - 목표:
   - 기존 strategy engine을 유지한 상태에서 memory-augmented strategy를 shadow로 비교한다.
 - Rules:
@@ -182,14 +236,32 @@
 - Success criteria:
   - new strategy precision을 실제 실행 영향 없이 비교 가능
 
-## 8. Data Model Draft
+## 8. Current Implementation Start Point
+- `Phase 2-A1`부터 시작한다.
+- 현재 코드 베이스에는 이미 job-level heartbeat/recovery, node run persistence, workflow diff/preview의 일부가 있다.
+- 이번 Phase 2 시작점은:
+  - workflow result context 표준화
+  - 이후 node atomicity/interrupted cleanup 추가
+  - 그 다음 structured memory write-only 도입
+- Current status:
+  - `Phase 2-A1`: implemented
+  - `Phase 2-A2`: initial implementation done (`running -> interrupted` cleanup on recovery/worker boot)
+  - `Phase 2-A3`: partial (`diff/preview`, node-run timeline, detail visibility)
+  - `Phase 2-B`: initial write-only implementation done (`MEMORY_LOG.jsonl`, `DECISION_HISTORY.json`, `FAILURE_PATTERNS.json`, `CONVENTIONS.json`)
+  - `Phase 2-C`: initial read-only implementation done (`MEMORY_SELECTION.json`, `MEMORY_CONTEXT.json`, planner/reviewer/coder prompt injection)
+  - `Phase 2-D`: initial implementation done (manifest/dir/test-pattern-based convention extraction into `CONVENTIONS.json`)
+  - `Phase 2-E`: initial implementation done (`MEMORY_FEEDBACK.json`, `MEMORY_RANKINGS.json`, banned-memory avoidance in retrieval)
+- `Phase 2-F`: initial implementation done (`STRATEGY_SHADOW_REPORT.json`, memory-aware strategy comparison without runtime impact)
+- rollout control: initial implementation done (`config/feature_flags.json`, settings API/UI, configured vs active admin visibility)
 
-### 8.1 MEMORY_LOG.jsonl
+## 9. Data Model Draft
+
+### 9.1 MEMORY_LOG.jsonl
 ```json
 {"memory_type":"episodic","job_id":"...","app_code":"...","workflow_id":"...","issue_signature":"...","signals":{"strategy":"test_hardening","quality_delta":0.4},"outcome":{"success":true}}
 ```
 
-### 8.2 CONVENTIONS.json
+### 9.2 CONVENTIONS.json
 ```json
 {
   "repo": "owner/repo",
@@ -206,7 +278,7 @@
 }
 ```
 
-### 8.3 MEMORY_SELECTION.json
+### 9.3 MEMORY_SELECTION.json
 ```json
 {
   "job_id": "...",
@@ -216,7 +288,7 @@
 }
 ```
 
-## 9. Vector DB Positioning
+## 10. Vector DB Positioning
 - vector DB는 Phase 2-B 이후의 `retrieval backend`로 도입한다.
 - 역할:
   - 유사 과거 작업 찾기
@@ -228,9 +300,9 @@
   - hard gate replacement
   - loop guard replacement
 
-## 10. Runtime Integration Points
+## 11. Runtime Integration Points
 
-### 10.1 Planner
+### 11.1 Planner
 - 입력:
   - PRODUCT_BRIEF / USER_FLOWS / MVP_SCOPE / ARCHITECTURE_PLAN
   - IMPROVEMENT_LOOP_STATE / NEXT_IMPROVEMENT_TASKS
@@ -238,7 +310,7 @@
 - 기대 효과:
   - 과거 유사 성공 설계를 빠르게 재사용
 
-### 10.2 Reviewer
+### 11.2 Reviewer
 - 입력:
   - PRODUCT_REVIEW evidence
   - CONVENTIONS
@@ -246,7 +318,7 @@
 - 기대 효과:
   - repo 맞춤형 품질 평가
 
-### 10.3 Coder / Fixer
+### 11.3 Coder / Fixer
 - 입력:
   - PLAN / REVIEW / IMPROVEMENT artifacts
   - CONVENTIONS
@@ -254,7 +326,7 @@
 - 기대 효과:
   - 반복되는 repo 스타일 위반 감소
 
-## 11. Risk Controls
+## 12. Risk Controls
 - 모든 memory feature는 flag 뒤에 둔다.
 - 기본값은 `off` 또는 `shadow`다.
 - 기존 strategy / hard gate / recovery를 유지한다.

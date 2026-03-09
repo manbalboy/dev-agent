@@ -21,8 +21,8 @@ def _write_roles(path: Path) -> None:
                     {"code": "designer", "name": "디자이너", "cli": "codex", "template_key": "coder", "enabled": True},
                     {"code": "publisher", "name": "퍼블리셔", "cli": "codex", "template_key": "coder", "enabled": True},
                     {"code": "copywriter", "name": "카피라이터", "cli": "codex", "template_key": "coder", "enabled": True},
-                    {"code": "tech-writer", "name": "기술 문서 작성가", "cli": "claude", "template_key": "documentation_writer", "enabled": True},
-                    {"code": "escalation-helper", "name": "에스컬레이션", "cli": "claude", "template_key": "escalation", "enabled": True},
+                    {"code": "tech-writer", "name": "기술 문서 작성가", "cli": "copilot", "template_key": "documentation_writer", "enabled": True},
+                    {"code": "escalation-helper", "name": "에스컬레이션", "cli": "copilot", "template_key": "escalation", "enabled": True},
                     {"code": "orchestration-helper", "name": "오케스트레이션", "cli": "copilot", "template_key": "copilot", "enabled": True},
                     {"code": "research-agent", "name": "리서치", "cli": "python3", "template_key": "research_search", "enabled": True},
                     {"code": "refactor-specialist", "name": "리팩토링", "cli": "codex", "template_key": "coder", "enabled": True},
@@ -61,7 +61,7 @@ def test_default_ai_role_router_matches_primary_strategy(tmp_path: Path) -> None
     assert coder.template_keys == ("coder",)
 
     assert documentation.role_code == "tech-writer"
-    assert documentation.cli == "claude"
+    assert documentation.cli == "copilot"
     assert documentation.template_keys[0] == "documentation_writer"
 
 

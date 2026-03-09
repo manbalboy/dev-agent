@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from app.models import JobRecord, JobStage, JobStatus, utc_now_iso
-from app.worker_main import _recover_stale_running_jobs
+from app.models import JobRecord, JobStage, JobStatus, NodeRunRecord, utc_now_iso
+from app.worker_main import _cleanup_orphan_running_node_runs, _recover_stale_running_jobs
 
 
 def _make_running_job(job_id: str, *, heartbeat_at: str, recovery_count: int = 0) -> JobRecord:
@@ -35,6 +35,19 @@ def test_stale_running_job_is_auto_requeued(app_components):
     settings, store, _ = app_components
     job = _make_running_job("job-stale-recover", heartbeat_at="2026-03-08T00:00:00+00:00")
     store.create_job(job)
+    store.upsert_node_run(
+        NodeRunRecord(
+            node_run_id="nr-stale-1",
+            job_id=job.job_id,
+            workflow_id="wf-default",
+            node_id="n12",
+            node_type="implement_with_codex",
+            node_title="구현",
+            status="running",
+            attempt=1,
+            started_at="2026-03-08T00:00:10+00:00",
+        )
+    )
 
     recovered = _recover_stale_running_jobs(store, settings)
 
@@ -48,6 +61,11 @@ def test_stale_running_job_is_auto_requeued(app_components):
     assert "running heartbeat stale detected" in (stored.recovery_reason or "")
     assert store.queue_size() == 1
     assert store.dequeue_job() == job.job_id
+    node_runs = store.list_node_runs(job.job_id)
+    assert len(node_runs) == 1
+    assert node_runs[0].status == "interrupted"
+    assert "running heartbeat stale detected" in (node_runs[0].error_message or "")
+    assert node_runs[0].finished_at is not None
 
 
 def test_stale_running_job_stops_after_recovery_limit(app_components):
@@ -69,3 +87,33 @@ def test_stale_running_job_stops_after_recovery_limit(app_components):
     assert stored.recovery_status == "needs_human"
     assert stored.recovery_count == settings.worker_max_auto_recoveries + 1
     assert store.queue_size() == 0
+
+
+def test_cleanup_orphan_running_node_runs_interrupts_non_running_jobs(app_components):
+    _, store, _ = app_components
+    job = _make_running_job("job-node-orphan", heartbeat_at="2026-03-08T00:00:00+00:00")
+    job.status = JobStatus.FAILED.value
+    job.stage = JobStage.FAILED.value
+    store.create_job(job)
+    store.upsert_node_run(
+        NodeRunRecord(
+            node_run_id="nr-orphan-1",
+            job_id=job.job_id,
+            workflow_id="wf-default",
+            node_id="n9",
+            node_type="tester_task",
+            node_title="테스트",
+            status="running",
+            attempt=1,
+            started_at="2026-03-08T00:00:10+00:00",
+        )
+    )
+
+    cleaned = _cleanup_orphan_running_node_runs(store)
+
+    assert cleaned == 1
+    node_runs = store.list_node_runs(job.job_id)
+    assert len(node_runs) == 1
+    assert node_runs[0].status == "interrupted"
+    assert "job status is failed" in (node_runs[0].error_message or "")
+    assert node_runs[0].finished_at is not None

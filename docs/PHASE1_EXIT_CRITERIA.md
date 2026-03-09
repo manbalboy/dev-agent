@@ -10,6 +10,7 @@
 - Notes:
   - 제품 개발형 파이프라인, 품질 평가 체계, 반복 개선 루프, workflow 기반 실행, recovery/resume, control-flow node 실행까지 연결되었다.
   - 남은 항목은 Phase 1 미완이 아니라 Phase 2의 적응형 메모리/운영 고도화 성격이다.
+  - 현재 코드 기준으로는 `Phase 1 closed`, `Phase 2-A1 started` 상태로 본다.
 
 ## Exit Criteria
 
@@ -168,4 +169,4 @@
 ## Exit Recommendation
 - Phase 1은 종료 처리한다.
 - 다음 단계는 `Phase 2: Adaptive Memory Layer`로 정의한다.
-- Phase 2는 엔진 재작성보다 `memory/retrieval/convention/scoring` 계층을 현재 엔진 위에 점진적으로 추가하는 방향으로 진행한다.
+- Phase 2는 엔진 재작성보다 `foundation hardening -> memory/retrieval/convention/scoring` 계층을 현재 엔진 위에 점진적으로 추가하는 방향으로 진행한다.

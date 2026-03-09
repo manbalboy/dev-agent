@@ -490,6 +490,191 @@ code {
   box-shadow: 0 10px 30px rgba(15, 23, 42, 0.05);
 }
 
+.admin-panel {
+  padding: 18px 18px 16px;
+  border-radius: 18px;
+  background: var(--surface);
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.05);
+}
+
+.admin-stats .stat-card p {
+  font-size: 2.7rem;
+}
+
+.admin-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.admin-grid-lists {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.admin-metric-card,
+.admin-list-card {
+  border: 1px solid var(--line-strong);
+  border-radius: 18px;
+  background: var(--surface-soft);
+  padding: 18px 20px;
+}
+
+.admin-metric-card h3,
+.admin-list-card h3 {
+  margin: 0 0 14px;
+  font-size: 1rem;
+}
+
+.admin-metric-list {
+  display: grid;
+  gap: 12px;
+  margin: 0;
+}
+
+.admin-metric-list div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.admin-metric-list dt {
+  color: var(--muted-text);
+}
+
+.admin-metric-list dd {
+  margin: 0;
+  font-size: 1.15rem;
+  font-weight: 700;
+}
+
+.admin-list-body {
+  min-height: 120px;
+}
+
+.admin-timeline {
+  display: grid;
+  gap: 12px;
+}
+
+.admin-timeline-row {
+  display: grid;
+  gap: 8px;
+}
+
+.admin-timeline-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.admin-timeline-meta {
+  color: var(--muted-text);
+  font-size: 12px;
+}
+
+.admin-timeline-bars {
+  display: flex;
+  gap: 6px;
+  min-height: 10px;
+}
+
+.admin-timeline-bar {
+  display: block;
+  min-width: 0;
+  height: 10px;
+  border-radius: 999px;
+}
+
+.admin-timeline-bar-default {
+  background: rgba(45, 127, 249, 0.8);
+}
+
+.admin-timeline-bar-adaptive {
+  background: rgba(255, 138, 0, 0.9);
+}
+
+.admin-timeline-bar-other {
+  background: rgba(124, 124, 124, 0.45);
+}
+
+.admin-count-list {
+  display: grid;
+  gap: 10px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.admin-count-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line-color);
+}
+
+.admin-count-list li:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.admin-count-label {
+  color: var(--text);
+  font-size: 0.95rem;
+}
+
+.admin-drilldown-button {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.admin-drilldown-button:hover {
+  color: var(--accent);
+}
+
+.admin-count-label-wide {
+  word-break: break-all;
+}
+
+.admin-count-value {
+  font-size: 0.95rem;
+  font-weight: 700;
+}
+
+.admin-status-list {
+  display: grid;
+  gap: 12px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.admin-status-list li {
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line-color);
+}
+
+.admin-status-list li:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.admin-status-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
 .assistant-form-grid {
   display: grid;
   grid-template-columns: 1fr;
@@ -822,6 +1007,18 @@ code {
   min-width: 520px;
 }
 
+.app-repo-fallback {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface-soft);
+  color: var(--muted-text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
 .app-table th:last-child,
 .app-table td:last-child {
   width: 72px;
@@ -868,6 +1065,51 @@ code {
   border-radius: 12px;
   background: var(--surface-soft);
   padding: 12px;
+}
+
+.feature-flags-form {
+  gap: 16px;
+}
+
+.feature-flags-list {
+  display: grid;
+  gap: 12px;
+}
+
+.feature-flag-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  padding: 14px 16px;
+}
+
+.feature-flag-copy {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.feature-flag-copy strong {
+  font-size: 14px;
+}
+
+.feature-flag-copy code {
+  display: inline-flex;
+  width: fit-content;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--surface-soft);
+  border: 1px solid var(--line);
+}
+
+.feature-flag-input {
+  width: 18px;
+  height: 18px;
+  margin-top: 2px;
 }
 
 .workflow-default-row {
@@ -1100,9 +1342,24 @@ code {
   text-align: center;
 }
 
+.workflow-table th:nth-child(5),
+.workflow-table td:nth-child(5) {
+  width: 180px;
+}
+
 .workflow-table th:last-child,
 .workflow-table td:last-child {
-  width: 110px;
+  text-align: left;
+}
+
+.workflow-map-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.workflow-map-actions .action-button {
+  min-width: 72px;
 }
 
 .stat-card {
@@ -1372,6 +1629,12 @@ tbody tr:hover {
   border: 1px solid rgba(214, 61, 61, 0.16);
 }
 
+.status-interrupted {
+  color: #8b5d00;
+  background: rgba(255, 196, 61, 0.18);
+  border: 1px solid rgba(196, 134, 0, 0.18);
+}
+
 .status-done {
   color: var(--success);
   background: var(--success-soft);
@@ -1394,6 +1657,12 @@ tbody tr:hover {
   color: var(--danger);
   background: var(--danger-soft);
   border: 1px solid rgba(214, 61, 61, 0.14);
+}
+
+[data-theme="light"] .status-interrupted {
+  color: #7a4d00;
+  background: rgba(255, 196, 61, 0.22);
+  border: 1px solid rgba(196, 134, 0, 0.18);
 }
 
 [data-theme="light"] .status-done {
@@ -1805,12 +2074,42 @@ tbody tr:hover {
   padding: 10px;
 }
 
+.user-log-role-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.user-log-role-card {
+  min-height: 116px;
+}
+
+.user-log-current-card {
+  border-color: rgba(34, 197, 94, 0.28);
+}
+
+.user-log-timeline {
+  display: grid;
+  gap: 10px;
+}
+
+.user-log-timeline-board {
+  max-height: none;
+}
+
 .task-log-head {
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 8px;
   margin-bottom: 8px;
+}
+
+.task-log-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .task-log-title {
@@ -2370,6 +2669,15 @@ tbody tr:hover {
 
   .assistant-panel {
     padding: 18px 16px 14px;
+  }
+
+  .admin-panel {
+    padding: 18px 16px 14px;
+  }
+
+  .admin-grid,
+  .admin-grid-lists {
+    grid-template-columns: 1fr;
   }
 
   .jobs-filter-form {
