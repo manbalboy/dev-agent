@@ -675,6 +675,10 @@ def build_planner_prompt(
         - IMPROVEMENT_PLAN.md / NEXT_IMPROVEMENT_TASKS.json 이 있으면 strategy와 우선순위를 계획에 직접 반영.
         - improvement strategy가 `design_rebaseline` 또는 scope_restriction이 `MVP_redefinition`이면,
           구현 확대가 아니라 제품 정의/범위/설계 문서 재정렬 계획을 우선 작성.
+        - improvement strategy가 `feature_expansion`이면 품질 게이트를 깨지 않는 범위에서 사용자 가치가 높은 기능 1개만 확장.
+        - improvement strategy가 `test_hardening`이면 신규 기능보다 회귀 테스트/테스트 전략 보강을 우선.
+        - improvement strategy가 `ux_clarity_improvement`이면 error/empty/loading 상태와 안내 문구, 사용자 흐름 명확화부터 정리.
+        - improvement strategy가 `stabilization`, `rollback_or_stabilize`, `narrow_scope_stabilization`이면 기능 확대 없이 저점 카테고리 안정화에 집중.
         - 실행 가이드에 포트가 필요하면 3000번대 포트만 사용.
         - markdown 본문만 출력하고, 작업 과정 설명은 금지.
         - 도구/터미널/파일 조작 과정 언급 금지.
@@ -815,8 +819,11 @@ def build_coder_prompt(
         - api 구현이 필요하면 FastAPI를 사용.
         - DESIGN_SYSTEM.md에 명시된 WOW Point 1개를 반드시 구현.
         - NEXT_IMPROVEMENT_TASKS.json의 `scope_restriction`이 `P1_only`이면 P0/P1 작업만 수행.
-        - improvement strategy가 `quality_hardening`이면 안정성/테스트/에러/빈/로딩 상태 보강을 우선.
-        - improvement strategy가 `narrow_scope_stabilization`이면 신규 기능 추가보다 기존 품질 안정화 우선.
+        - improvement strategy가 `feature_expansion`이면 사용자 가치가 높은 기능 1개만 제한적으로 추가하고 테스트를 함께 보강.
+        - improvement strategy가 `test_hardening`이면 신규 기능보다 테스트/회귀 방지 보강을 우선.
+        - improvement strategy가 `ux_clarity_improvement`이면 error/empty/loading 상태와 사용자 안내 문구 개선을 우선.
+        - improvement strategy가 `stabilization`, `rollback_or_stabilize`, `narrow_scope_stabilization`이면 신규 기능 추가보다 기존 품질 안정화 우선.
+        - improvement strategy가 `quality_hardening`이면 레거시 전략으로 간주하고 안정성/테스트/에러/빈/로딩 상태 보강을 우선.
         - 회귀(regression) 유발 금지.
         - 보안 민감정보 하드코딩 금지.
         - 실패 시 우회가 아닌 원인 기반 수정 우선.

@@ -164,56 +164,9 @@
                 </tr>
               </thead>
               <tbody id="jobs-table-body">
-                {% for job in jobs %}
                 <tr>
-                  <td><a class="job-id-pill" href="/jobs/{{ job.job_id }}">{{ job.job_id[:8] }}</a></td>
-                  <td>
-                    <div class="job-template-cell">
-                      <span class="job-template-app">{{ job.app_code or "default" }}</span>
-                      <span class="job-template-sep">/</span>
-                      <span class="job-template-track">{{ job.track or "enhance" }}</span>
-                    </div>
-                  </td>
-                  <td>
-                    <span class="badge status-{{ job.status }}">{{ job.status }}</span>
-                    {% if job.recovery_status %}
-                    <div class="table-cell-hint">{{ job.recovery_status }}</div>
-                    {% endif %}
-                    {% if job.resume_mode and job.resume_mode != "none" %}
-                    <div class="table-cell-hint">resume · {{ job.resume_mode }}</div>
-                    {% endif %}
-                    {% if job.strategy %}
-                    <div class="table-cell-hint">strategy · {{ job.strategy }}</div>
-                    {% endif %}
-                    {% if job.review_overall is not none %}
-                    <div class="table-cell-hint">review · {{ job.review_overall }}/5</div>
-                    {% endif %}
-                    {% if job.runtime_signals and job.runtime_signals.maturity_level %}
-                    <div class="table-cell-hint">maturity · {{ job.runtime_signals.maturity_level }}</div>
-                    {% endif %}
-                    {% if job.runtime_signals and job.runtime_signals.quality_trend_direction %}
-                    <div class="table-cell-hint">trend · {{ job.runtime_signals.quality_trend_direction }}</div>
-                    {% endif %}
-                  </td>
-                  <td>{{ job.stage }}</td>
-                  <td><a class="job-issue-link" href="{{ job.issue_url }}" target="_blank" rel="noreferrer">#{{ job.issue_number }}</a></td>
-                  <td>
-                    {% if job.pr_url %}
-                    <a class="table-pill-link" href="{{ job.pr_url }}" target="_blank" rel="noreferrer">PR</a>
-                    {% else %}
-                    -
-                    {% endif %}
-                  </td>
-                  <td>
-                    {% if job.status == "failed" %}
-                    <button type="button" class="action-button table-action-button job-requeue" data-job-id="{{ job.job_id }}">재실행</button>
-                    {% else %}
-                    -
-                    {% endif %}
-                  </td>
-                  <td class="js-time" data-utc="{{ job.created_at or job.updated_at }}">{{ job.created_at or job.updated_at }}</td>
+                  <td colspan="8" class="table-empty-state">작업 목록을 불러오는 중...</td>
                 </tr>
-                {% endfor %}
               </tbody>
             </table>
           </div>
@@ -267,9 +220,7 @@
           <form id="issue-form" class="issue-form">
             <label for="issue-app-code">대상 앱</label>
             <select id="issue-app-code" name="app_code">
-              {% for app in apps %}
-              <option value="{{ app.code }}">{{ app.name }} ({{ app.code }})</option>
-              {% endfor %}
+              <option value="">앱 목록 불러오는 중...</option>
             </select>
 
             <label for="issue-track">작업 유형</label>
@@ -324,6 +275,9 @@
 
             <label for="app-name">앱 표시명</label>
             <input id="app-name" type="text" maxlength="80" placeholder="예: MVP A" />
+
+            <label for="app-source-repository">실행 소스 저장소</label>
+            <input id="app-source-repository" type="text" maxlength="200" placeholder="예: manbalboy/Food 또는 https://github.com/manbalboy/Food.git" />
 
             <div class="issue-form-actions">
               <button type="submit" id="app-config-submit" class="action-button">앱 등록/수정</button>
@@ -774,6 +728,21 @@
                   ? (node?.planning_mode || "auto")
                   : "auto"
               ).trim() || "auto",
+              match_labels: String(
+                String(node?.type || "gh_read_issue").trim() === "if_label_match"
+                  ? (node?.match_labels || "")
+                  : ""
+              ).trim(),
+              match_mode: String(
+                String(node?.type || "gh_read_issue").trim() === "if_label_match"
+                  ? (node?.match_mode || "any")
+                  : "any"
+              ).trim() || "any",
+              loop_max_iterations: Number(
+                String(node?.type || "gh_read_issue").trim() === "loop_until_pass"
+                  ? (node?.loop_max_iterations || 3)
+                  : 3
+              ) || 3,
               notes: String(node?.notes || "").trim(),
             }))
           : cloneWorkflowDefinition(base).nodes;
@@ -815,6 +784,9 @@
           title: String(row.querySelector(".workflow-editor-node-title")?.value || "").trim(),
           agent_profile: String(row.querySelector(".workflow-editor-node-agent-profile")?.value || "auto").trim() || "auto",
           planning_mode: String(row.querySelector(".workflow-editor-node-planning-mode")?.value || "auto").trim() || "auto",
+          match_labels: String(row.querySelector(".workflow-editor-node-match-labels")?.value || "").trim(),
+          match_mode: String(row.querySelector(".workflow-editor-node-match-mode")?.value || "any").trim() || "any",
+          loop_max_iterations: Number(row.querySelector(".workflow-editor-node-loop-max")?.value || 3) || 3,
           notes: String(row.querySelector(".workflow-editor-node-notes")?.value || "").trim(),
         }));
         const nodeIdRemap = new Map();
@@ -830,6 +802,9 @@
               title: node.title,
               agent_profile: node.agent_profile || "auto",
               planning_mode: node.type === "gemini_plan" ? (node.planning_mode || "auto") : "auto",
+              match_labels: node.type === "if_label_match" ? node.match_labels : "",
+              match_mode: node.type === "if_label_match" ? (node.match_mode || "any") : "any",
+              loop_max_iterations: node.type === "loop_until_pass" ? (node.loop_max_iterations || 3) : 3,
               notes: node.notes,
             };
           })
@@ -1315,6 +1290,7 @@
         const nodeTypes = schema.node_types || {};
         const agentProfiles = Array.isArray(schema.node_agent_profiles) ? schema.node_agent_profiles : ["auto", "primary", "fallback"];
         const planningModes = Array.isArray(schema.node_planning_modes) ? schema.node_planning_modes : ["auto", "general", "big_picture", "dev_planning"];
+        const matchModes = Array.isArray(schema.node_match_modes) ? schema.node_match_modes : ["any", "all", "none"];
         const supportedEdgeEvents = Array.isArray(schema.supported_edge_events)
           ? schema.supported_edge_events
           : ["success", "failure", "always"];
@@ -1350,6 +1326,13 @@
                   ${planningModes.map((mode) => `<option value="${esc(mode)}"${mode === (node.type === "gemini_plan" ? (node.planning_mode || "auto") : "auto") ? " selected" : ""}>${esc(mode)}</option>`).join("")}
                 </select>
               </td>
+              <td><input class="workflow-editor-node-match-labels" type="text" value="${esc(node.type === "if_label_match" ? (node.match_labels || "") : "")}" maxlength="160" placeholder="예: ultra,mobile" ${node.type === "if_label_match" ? "" : "disabled"} /></td>
+              <td>
+                <select class="workflow-editor-node-match-mode"${node.type === "if_label_match" ? "" : " disabled"}>
+                  ${matchModes.map((mode) => `<option value="${esc(mode)}"${mode === (node.type === "if_label_match" ? (node.match_mode || "any") : "any") ? " selected" : ""}>${esc(mode)}</option>`).join("")}
+                </select>
+              </td>
+              <td><input class="workflow-editor-node-loop-max" type="number" min="1" max="10" step="1" value="${esc(String(node.type === "loop_until_pass" ? (node.loop_max_iterations || 3) : 3))}" ${node.type === "loop_until_pass" ? "" : "disabled"} /></td>
               <td><input class="workflow-editor-node-notes" type="text" value="${esc(node.notes || "")}" maxlength="240" placeholder="운영 메모" /></td>
               <td><button type="button" class="action-button workflow-editor-delete" data-target="node" data-index="${index}">삭제</button></td>
             </tr>
@@ -1383,6 +1366,8 @@
         const metadataChips = [
           ...agentProfiles.map((profile) => `<span class="workflow-editor-chip">agent_profile · ${esc(profile)}</span>`),
           ...planningModes.map((mode) => `<span class="workflow-editor-chip">planning_mode · ${esc(mode)}</span>`),
+          ...matchModes.map((mode) => `<span class="workflow-editor-chip">match_mode · ${esc(mode)}</span>`),
+          `<span class="workflow-editor-chip">loop_max_iterations · 1-10</span>`,
         ].join("");
 
         box.innerHTML = `
@@ -1427,14 +1412,14 @@
               <div class="workflow-settings-head">
                 <div>
                   <h3>Nodes</h3>
-                  <p class="hint">ID, 타입, 표시명과 실행 메타데이터를 편집합니다. write_spec 이후 노드만 수동 resume 후보가 됩니다.</p>
+                  <p class="hint">ID, 타입, 표시명과 실행 메타데이터를 편집합니다. control node는 라벨 분기와 같은 attempt 내 루프 제어에 사용합니다.</p>
                 </div>
                 <button type="button" id="workflow-editor-add-node" class="action-button">노드 추가</button>
               </div>
               <div class="app-table-wrap">
                 <table class="app-table workflow-editor-table">
-                  <thead><tr><th>ID</th><th>Type</th><th>Title</th><th>AI</th><th>Plan</th><th>메모</th><th>삭제</th></tr></thead>
-                  <tbody>${nodeRows || `<tr><td colspan="7" class="jobs-empty">노드 없음</td></tr>`}</tbody>
+                  <thead><tr><th>ID</th><th>Type</th><th>Title</th><th>AI</th><th>Plan</th><th>라벨 조건</th><th>Match</th><th>Loop Max</th><th>메모</th><th>삭제</th></tr></thead>
+                  <tbody>${nodeRows || `<tr><td colspan="10" class="jobs-empty">노드 없음</td></tr>`}</tbody>
                 </table>
               </div>
             </div>
@@ -1442,7 +1427,7 @@
               <div class="workflow-settings-head">
                 <div>
                   <h3>Edges</h3>
-                  <p class="hint">phase-2는 선형/준선형 실행 중심이라 success/always 위주로 사용하세요.</p>
+                  <p class="hint">실행기는 success/failure/always edge를 따라 이동합니다. loop_until_pass는 failure edge로 재시도 경로를 구성하세요.</p>
                 </div>
                 <button type="button" id="workflow-editor-add-edge" class="action-button">엣지 추가</button>
               </div>
@@ -1678,6 +1663,9 @@
               title: "",
               agent_profile: "auto",
               planning_mode: "auto",
+              match_labels: "",
+              match_mode: "any",
+              loop_max_iterations: 3,
               notes: "",
             });
             if (!workflow.entry_node_id) {
@@ -1820,7 +1808,7 @@
             return `<tr>
               <td>${esc(app.name)}</td>
               <td><code>${esc(app.code)}</code></td>
-              <td>${esc(app.repository || "-")}</td>
+              <td>${esc(app.source_repository || app.repository || "-")}</td>
               <td>${deleteButton}</td>
             </tr>`;
           })
@@ -1831,7 +1819,7 @@
               <tr>
                 <th>앱명</th>
                 <th>코드</th>
-                <th>저장소</th>
+                <th>실행 저장소</th>
                 <th>삭제</th>
               </tr>
             </thead>
@@ -2177,6 +2165,7 @@
           event.preventDefault();
           const code = document.getElementById("app-code").value.trim();
           const name = document.getElementById("app-name").value.trim();
+          const sourceRepository = document.getElementById("app-source-repository").value.trim();
           if (!code || !name) {
             setAppConfigResult("앱 코드와 표시명을 모두 입력해주세요.", true);
             return;
@@ -2187,7 +2176,7 @@
             const response = await fetch("/api/apps", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ code, name }),
+              body: JSON.stringify({ code, name, source_repository: sourceRepository }),
             });
             const payload = await response.json();
             if (!response.ok || !payload.saved) {
@@ -2199,6 +2188,7 @@
             renderAppList(payload.apps || []);
             document.getElementById("app-code").value = "";
             document.getElementById("app-name").value = "";
+            document.getElementById("app-source-repository").value = "";
           } catch {
             setAppConfigResult("네트워크 오류로 저장 실패", true);
           } finally {

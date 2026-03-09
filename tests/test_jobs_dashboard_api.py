@@ -306,6 +306,9 @@ def test_jobs_api_supports_recovery_and_strategy_filters(app_components):
                 "trend_direction": "improving",
                 "delta_from_previous": 0.35,
                 "review_round_count": 4,
+                "persistent_low_categories": ["test_coverage"],
+                "stagnant_categories": ["test_coverage"],
+                "category_deltas": {"test_coverage": 0},
             },
             ensure_ascii=False,
             indent=2,
@@ -329,7 +332,25 @@ def test_jobs_api_supports_recovery_and_strategy_filters(app_components):
     assert payload["jobs"][0]["runtime_signals"]["review_overall"] == 2.8
     assert payload["jobs"][0]["runtime_signals"]["maturity_level"] == "mvp"
     assert payload["jobs"][0]["runtime_signals"]["quality_trend_direction"] == "improving"
+    assert payload["jobs"][0]["runtime_signals"]["persistent_low_categories"] == ["test_coverage"]
+    assert payload["jobs"][0]["runtime_signals"]["category_deltas"]["test_coverage"] == 0
     assert payload["filters"]["recovery_status"] == "auto_recovered"
     assert payload["filters"]["strategy"] == "quality_hardening"
     assert "auto_recovered" in payload["filter_options"]["recovery_statuses"]
     assert "quality_hardening" in payload["filter_options"]["strategies"]
+
+
+def test_dashboard_root_renders_shell_without_preloading_jobs(app_components):
+    _, store, app = app_components
+    client = TestClient(app)
+
+    def fail_list_jobs():
+        raise AssertionError("job list should not be loaded during initial shell render")
+
+    store.list_jobs = fail_list_jobs  # type: ignore[assignment]
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert "작업 목록을 불러오는 중..." in response.text
+    assert "앱 목록 불러오는 중..." in response.text

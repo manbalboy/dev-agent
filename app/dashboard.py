@@ -78,6 +78,7 @@ class AppConfigRequest(BaseModel):
 
     code: str = Field(min_length=1, max_length=32)
     name: str = Field(min_length=1, max_length=80)
+    source_repository: str = Field(default="", max_length=200)
 
 
 class AppWorkflowMappingRequest(BaseModel):
@@ -182,7 +183,7 @@ def _build_job_runtime_signals(
 ) -> Dict[str, Any]:
     """Collect runtime review/resume/recovery signals for dashboard rendering."""
 
-    workspace_path = settings.repository_workspace_path(job.repository, job.app_code)
+    workspace_path = _job_workspace_path(job, settings)
     docs_dir = workspace_path / "_docs"
     review_payload = _read_dashboard_json(docs_dir / "PRODUCT_REVIEW.json")
     maturity_payload = _read_dashboard_json(docs_dir / "REPO_MATURITY.json")
@@ -217,6 +218,10 @@ def _build_job_runtime_signals(
         "quality_trend_direction": str(trend_payload.get("trend_direction", "")).strip(),
         "quality_delta_from_previous": trend_payload.get("delta_from_previous"),
         "quality_review_rounds": trend_payload.get("review_round_count"),
+        "persistent_low_categories": trend_payload.get("persistent_low_categories", []),
+        "stagnant_categories": trend_payload.get("stagnant_categories", []),
+        "category_deltas": trend_payload.get("category_deltas", {}),
+        "execution_repository": _job_execution_repository(job),
     }
 
 
@@ -234,6 +239,19 @@ def _list_dashboard_jobs(store: JobStore, settings: AppSettings) -> List[Dict[st
         jobs.append(payload)
     jobs.sort(key=lambda item: item.get("updated_at") or item.get("created_at") or "", reverse=True)
     return jobs
+
+
+def _job_execution_repository(job: JobRecord) -> str:
+    """Return the repo used for clone/build/push for one job."""
+
+    source_repository = str(job.source_repository or "").strip()
+    return source_repository or str(job.repository or "").strip()
+
+
+def _job_workspace_path(job: JobRecord, settings: AppSettings) -> Path:
+    """Resolve workspace path using execution repository, not issue hub repository."""
+
+    return settings.repository_workspace_path(_job_execution_repository(job), job.app_code)
 
 
 def _build_job_summary(jobs: List[Dict[str, Any]]) -> Dict[str, int]:
@@ -383,18 +401,18 @@ def _dashboard_filter_options(jobs: List[Dict[str, Any]]) -> Dict[str, List[str]
 @router.get("/", response_class=HTMLResponse)
 def job_list_page(
     request: Request,
-    store: JobStore = Depends(get_store),
-    settings: AppSettings = Depends(get_settings),
 ) -> HTMLResponse:
-    """Render a simple dashboard table with all jobs."""
+    """Render dashboard shell.
 
-    jobs = _list_dashboard_jobs(store, settings)[:_DEFAULT_DASHBOARD_PAGE_SIZE]
+    The first page load must stay fast even when job/runtime signal collection gets
+    expensive. Jobs, apps, workflows, and other dashboard data are loaded
+    asynchronously by the existing client-side bootstrap calls.
+    """
+
     return _templates.TemplateResponse(
+        request,
         "index.html",
         {
-            "request": request,
-            "jobs": jobs,
-            "apps": _read_registered_apps(_APPS_CONFIG_PATH, settings.allowed_repository),
             "title": "AgentHub Jobs",
         },
     )
@@ -537,6 +555,12 @@ def upsert_app(
     name = payload.name.strip()
     if not name:
         raise HTTPException(status_code=400, detail="앱 표시명을 입력해주세요.")
+    source_repository = _normalize_repository_ref(payload.source_repository)
+    if payload.source_repository.strip() and not source_repository:
+        raise HTTPException(
+            status_code=400,
+            detail="source_repository는 GitHub owner/repo 또는 https://github.com/owner/repo(.git) 형식이어야 합니다.",
+        )
 
     default_workflow_id = _read_default_workflow_id(_WORKFLOWS_CONFIG_PATH)
     apps = _read_registered_apps(
@@ -557,6 +581,7 @@ def upsert_app(
                     "name": name,
                     "repository": settings.allowed_repository,
                     "workflow_id": app.get("workflow_id", default_workflow_id),
+                    "source_repository": source_repository,
                 }
             )
             replaced = True
@@ -569,6 +594,7 @@ def upsert_app(
                 "name": name,
                 "repository": settings.allowed_repository,
                 "workflow_id": default_workflow_id,
+                "source_repository": source_repository,
             }
         )
 
@@ -1223,14 +1249,14 @@ def register_issue_and_trigger(
     if title_track:
         track = title_track
     repository = settings.allowed_repository
-    registered_codes = {
-        item["code"] for item in _read_registered_apps(_APPS_CONFIG_PATH, repository)
-    }
-    if app_code not in registered_codes:
+    registered_apps = _read_registered_apps(_APPS_CONFIG_PATH, repository)
+    app_entry = next((item for item in registered_apps if item.get("code") == app_code), None)
+    if app_entry is None:
         raise HTTPException(
             status_code=400,
             detail=f"등록되지 않은 앱 코드입니다: {app_code}. 설정 메뉴에서 먼저 등록해주세요.",
         )
+    source_repository = str(app_entry.get("source_repository", "")).strip()
     if requested_workflow_id:
         known_workflow_ids = list_known_workflow_ids(_WORKFLOWS_CONFIG_PATH)
         if requested_workflow_id not in known_workflow_ids:
@@ -1347,6 +1373,7 @@ def register_issue_and_trigger(
         app_code=app_code,
         track=track,
         workflow_id=workflow_selection.workflow_id,
+        source_repository=source_repository,
     )
 
     store.create_job(job)
@@ -1364,6 +1391,7 @@ def register_issue_and_trigger(
             "track": track,
             "workflow_id": workflow_selection.workflow_id,
             "workflow_source": workflow_selection.source,
+            "source_repository": source_repository,
             "keep_branch": keep_branch,
             "role_preset_id": role_preset_id,
         }
@@ -1407,7 +1435,7 @@ def job_detail_api(
     log_path = _resolve_channel_log_path(settings, job.log_file, channel="debug")
     events = _parse_log_events(log_path) if log_path.exists() else []
     
-    workspace_path = settings.repository_workspace_path(job.repository, job.app_code)
+    workspace_path = _job_workspace_path(job, settings)
     md_files = _read_agent_md_files(workspace_path)
     stage_md_snapshots = _read_stage_md_snapshots(settings.data_dir, job_id)
     node_runs = store.list_node_runs(job_id)
@@ -1518,7 +1546,7 @@ def _compute_job_resume_state(
             "skipped_nodes": [],
         }
 
-    workspace_path = settings.repository_workspace_path(job.repository, job.app_code)
+    workspace_path = _job_workspace_path(job, settings)
     improvement_runtime = read_improvement_runtime_context(
         build_workflow_artifact_paths(workspace_path)
     )
@@ -2436,7 +2464,10 @@ def _run_log_analyzer(
     if assistant == "claude":
         return _run_claude_log_analysis(prompt, templates)
     if assistant == "copilot":
-        return _run_copilot_log_analysis(prompt, templates)
+        # Keep the public "copilot" option for compatibility, but route the
+        # heavy log-analysis workload through Codex to reduce token waste and
+        # keep remediation suggestions aligned with the coding path.
+        return _run_codex_log_analysis(prompt, templates)
     raise HTTPException(status_code=400, detail=f"지원하지 않는 assistant: {assistant}")
 
 
@@ -2842,6 +2873,24 @@ def _normalize_app_code(value: str) -> str:
     if not _APP_CODE_PATTERN.match(lowered):
         return ""
     return lowered
+
+
+def _normalize_repository_ref(value: str) -> str:
+    """Normalize GitHub repository input to owner/repo form."""
+
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+    https_match = re.match(r"^https://github\.com/([^/\s]+)/([^/\s]+?)(?:\.git)?/?$", raw, re.IGNORECASE)
+    if https_match:
+        return f"{https_match.group(1)}/{https_match.group(2)}"
+    ssh_match = re.match(r"^git@github\.com:([^/\s]+)/([^/\s]+?)(?:\.git)?$", raw, re.IGNORECASE)
+    if ssh_match:
+        return f"{ssh_match.group(1)}/{ssh_match.group(2)}"
+    plain_match = re.match(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", raw)
+    if plain_match:
+        return raw
+    return ""
 
 
 def _normalize_track(value: str) -> str:

@@ -75,6 +75,7 @@ class JobRecord:
     app_code: str = "default"
     track: str = "enhance"
     workflow_id: str = ""
+    source_repository: str = ""
     heartbeat_at: Optional[str] = None
     recovery_status: str = ""
     recovery_reason: str = ""

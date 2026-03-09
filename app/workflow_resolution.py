@@ -67,6 +67,7 @@ def read_registered_apps(
             "name": "Default",
             "repository": repository,
             "workflow_id": resolved_default_workflow_id,
+            "source_repository": "",
         }
     ]
     if not apps_path.exists():
@@ -91,12 +92,14 @@ def read_registered_apps(
         name = str(item.get("name", code)).strip() or code
         app_repository = str(item.get("repository", repository)).strip() or repository
         workflow_id = str(item.get("workflow_id", resolved_default_workflow_id)).strip() or resolved_default_workflow_id
+        source_repository = str(item.get("source_repository", "")).strip()
         collected.append(
             {
                 "code": code,
                 "name": name,
                 "repository": app_repository,
                 "workflow_id": workflow_id,
+                "source_repository": source_repository,
             }
         )
         if code == "default":
@@ -119,11 +122,13 @@ def write_registered_apps(apps_path: Path, apps: List[Dict[str, str]]) -> None:
         name = str(app.get("name", code)).strip() or code
         repository = str(app.get("repository", "")).strip()
         workflow_id = str(app.get("workflow_id", "")).strip() or default_workflow_template()["workflow_id"]
+        source_repository = str(app.get("source_repository", "")).strip()
         dedup[code] = {
             "code": code,
             "name": name,
             "repository": repository,
             "workflow_id": workflow_id,
+            "source_repository": source_repository,
         }
 
     if "default" not in dedup:
@@ -132,6 +137,7 @@ def write_registered_apps(apps_path: Path, apps: List[Dict[str, str]]) -> None:
             "name": "Default",
             "repository": "",
             "workflow_id": default_workflow_template()["workflow_id"],
+            "source_repository": "",
         }
 
     ordered = [dedup[key] for key in sorted(dedup)]

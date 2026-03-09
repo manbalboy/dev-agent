@@ -5,9 +5,11 @@ from __future__ import annotations
 from dataclasses import replace
 import json
 from pathlib import Path
+import pytest
 import shlex
 
 from app.command_runner import CommandResult
+from app.command_runner import CommandExecutionError
 from app.models import JobRecord, JobStage, JobStatus, NodeRunRecord, utc_now_iso
 from app.orchestrator import Orchestrator
 
@@ -84,6 +86,103 @@ def _make_job(job_id: str = "job-1") -> JobRecord:
         started_at=None,
         finished_at=None,
     )
+
+
+def _improvement_paths(repository_path: Path) -> dict[str, Path]:
+    return {
+        "product_review": Orchestrator._docs_file(repository_path, "PRODUCT_REVIEW.json"),
+        "review_history": Orchestrator._docs_file(repository_path, "REVIEW_HISTORY.json"),
+        "improvement_backlog": Orchestrator._docs_file(repository_path, "IMPROVEMENT_BACKLOG.json"),
+        "improvement_loop_state": Orchestrator._docs_file(repository_path, "IMPROVEMENT_LOOP_STATE.json"),
+        "improvement_plan": Orchestrator._docs_file(repository_path, "IMPROVEMENT_PLAN.md"),
+        "next_improvement_tasks": Orchestrator._docs_file(repository_path, "NEXT_IMPROVEMENT_TASKS.json"),
+        "repo_maturity": Orchestrator._docs_file(repository_path, "REPO_MATURITY.json"),
+        "quality_trend": Orchestrator._docs_file(repository_path, "QUALITY_TREND.json"),
+    }
+
+
+def _base_review_payload(job_id: str, *, overall: float = 3.4) -> dict:
+    return {
+        "schema_version": "1.1",
+        "generated_at": utc_now_iso(),
+        "job_id": job_id,
+        "scores": {
+            "code_quality": 4,
+            "architecture_structure": 4,
+            "maintainability": 4,
+            "usability": 4,
+            "ux_clarity": 4,
+            "test_coverage": 4,
+            "error_state_handling": 4,
+            "empty_state_handling": 4,
+            "loading_state_handling": 4,
+            "overall": overall,
+        },
+        "score_reasons": {
+            "code_quality": "ok",
+            "architecture_structure": "ok",
+            "maintainability": "ok",
+            "usability": "ok",
+            "ux_clarity": "ok",
+            "test_coverage": "ok",
+            "error_state_handling": "ok",
+            "empty_state_handling": "ok",
+            "loading_state_handling": "ok",
+        },
+        "findings": [],
+        "improvement_candidates": [],
+        "priority_summary": {"P0": 0, "P1": 1, "P2": 1, "P3": 0},
+        "recommended_next_tasks": [],
+        "artifact_health": {
+            "tests": {"test_file_count": 2, "report_count": 1},
+        },
+        "quality_signals": {
+            "todo_items_count": 0,
+            "critical_issue_keywords_detected": False,
+            "test_report_count": 1,
+            "test_failures_count": 0,
+            "test_passes_count": 5,
+            "has_product_brief": True,
+            "has_user_flows": True,
+            "has_mvp_scope": True,
+            "has_architecture_plan": True,
+            "has_ux_review": True,
+        },
+        "principle_alignment": {},
+        "operating_policy": {
+            "blocked_principles": [],
+            "warning_principles": [],
+            "runtime_principles": ["principle_6_no_repeat_same_fix"],
+            "requires_design_reset": False,
+            "requires_scope_reset": False,
+            "requires_quality_focus": False,
+        },
+        "validation": {"passed": True, "errors": [], "checked_at": utc_now_iso()},
+        "quality_gate": {"passed": True, "categories_below_threshold": []},
+    }
+
+
+def _write_improvement_stage_inputs(
+    *,
+    repository_path: Path,
+    paths: dict[str, Path],
+    review_payload: dict,
+    history_entries: list[dict],
+    backlog_items: list[dict],
+    maturity_payload: dict,
+    trend_payload: dict,
+) -> None:
+    paths["product_review"].write_text(json.dumps(review_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    paths["review_history"].write_text(
+        json.dumps({"entries": history_entries}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    paths["improvement_backlog"].write_text(
+        json.dumps({"generated_at": utc_now_iso(), "items": backlog_items}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    paths["repo_maturity"].write_text(json.dumps(maturity_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    paths["quality_trend"].write_text(json.dumps(trend_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 
@@ -274,11 +373,20 @@ def test_orchestrator_runs_stages_in_fixed_order(app_components):
     )
     assert repo_maturity_payload["level"] in {"bootstrap", "mvp", "usable", "stable", "product_grade"}
     assert isinstance(repo_maturity_payload["score"], int)
+    review_history_payload = json.loads(
+        (repo_path / "_docs" / "REVIEW_HISTORY.json").read_text(encoding="utf-8")
+    )
+    assert isinstance(review_history_payload.get("entries"), list)
+    assert isinstance(review_history_payload["entries"][-1].get("scores"), dict)
+    assert "test_coverage" in review_history_payload["entries"][-1]["scores"]
     quality_trend_payload = json.loads(
         (repo_path / "_docs" / "QUALITY_TREND.json").read_text(encoding="utf-8")
     )
     assert "trend_direction" in quality_trend_payload
     assert "maturity_level" in quality_trend_payload
+    assert "category_deltas" in quality_trend_payload
+    assert "persistent_low_categories" in quality_trend_payload
+    assert "stagnant_categories" in quality_trend_payload
 
     log_text = (settings.logs_debug_dir / stored.log_file).read_text(encoding="utf-8")
     stage_lines = [
@@ -408,6 +516,93 @@ def test_stage_specific_tester_commands_are_used(app_components):
     assert any("echo implement secondary" in cmd for cmd in executed_commands)
     assert any("echo fix" in cmd for cmd in executed_commands)
     assert any("echo fix secondary" in cmd for cmd in executed_commands)
+
+
+def test_orchestrator_uses_source_repository_for_clone_and_pr(app_components):
+    settings, store, _ = app_components
+    job = _make_job("job-source-repo")
+    job.source_repository = "manbalboy/Food"
+    store.create_job(job)
+    store.enqueue_job(job.job_id)
+
+    executed_commands: list[str] = []
+
+    def fake_shell(command, cwd, log_writer, check, command_purpose):
+        executed_commands.append(str(command))
+        log_writer(f"[FAKE_SHELL] {command_purpose}: {command}")
+
+        if command.startswith("gh repo clone"):
+            parts = shlex.split(command)
+            target = Path(parts[-1])
+            target.mkdir(parents=True, exist_ok=True)
+
+        if command.startswith("gh issue view"):
+            payload = {
+                "title": "Fetched issue title",
+                "body": "Issue body from fake gh",
+                "url": "https://github.com/owner/repo/issues/55",
+            }
+            return CommandResult(
+                command=command,
+                exit_code=0,
+                stdout=json.dumps(payload),
+                stderr="",
+                duration_seconds=0.0,
+            )
+
+        if command.startswith("gh pr create"):
+            return CommandResult(
+                command=command,
+                exit_code=0,
+                stdout="https://github.com/manbalboy/Food/pull/999\n",
+                stderr="",
+                duration_seconds=0.0,
+            )
+
+        if command.startswith("gh pr view"):
+            return CommandResult(
+                command=command,
+                exit_code=0,
+                stdout="https://github.com/manbalboy/Food/pull/999\n",
+                stderr="",
+                duration_seconds=0.0,
+            )
+
+        if "status --porcelain" in command:
+            return CommandResult(
+                command=command,
+                exit_code=0,
+                stdout="",
+                stderr="",
+                duration_seconds=0.0,
+            )
+
+        return CommandResult(
+            command=command,
+            exit_code=0,
+            stdout="",
+            stderr="",
+            duration_seconds=0.0,
+        )
+
+    fake_runner = FakeTemplateRunner()
+    orchestrator = Orchestrator(
+        settings=settings,
+        store=store,
+        command_templates=fake_runner,
+        shell_executor=fake_shell,
+    )
+    orchestrator._load_active_workflow = lambda _job, _log_path: None  # type: ignore[method-assign]
+
+    processed = orchestrator.process_next_job()
+
+    assert processed is True
+    assert any(cmd.startswith("gh repo clone manbalboy/Food ") for cmd in executed_commands)
+    assert any("gh issue view 55 --repo owner/repo" in cmd for cmd in executed_commands)
+    assert any("gh pr create --repo manbalboy/Food " in cmd for cmd in executed_commands)
+    repo_path = settings.repository_workspace_path(job.source_repository, job.app_code)
+    pr_body = (repo_path / "_docs" / "PR_BODY.md").read_text(encoding="utf-8")
+    assert "Tracking issue: https://github.com/owner/repo/issues/55" in pr_body
 
 
 def test_workflow_tester_task_node_runs_test_stage(app_components):
@@ -722,6 +917,422 @@ def test_improvement_stage_uses_operating_policy_for_design_rebaseline(app_compo
     assert next_tasks_payload["tasks"][0]["priority"] == "P0"
 
 
+def test_improvement_stage_selects_feature_expansion_from_maturity_and_trend(app_components):
+    settings, store, _ = app_components
+    job = _make_job("job-improvement-feature-expansion")
+    store.create_job(job)
+
+    repository_path = settings.repository_workspace_path(job.repository, job.app_code)
+    repository_path.mkdir(parents=True, exist_ok=True)
+    log_path = settings.logs_debug_dir / job.log_file
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text("", encoding="utf-8")
+
+    review_payload = _base_review_payload(job.job_id, overall=4.1)
+    paths = _improvement_paths(repository_path)
+    _write_improvement_stage_inputs(
+        repository_path=repository_path,
+        paths=paths,
+        review_payload=review_payload,
+        history_entries=[
+            {"generated_at": utc_now_iso(), "job_id": job.job_id, "overall": 3.75},
+            {"generated_at": utc_now_iso(), "job_id": job.job_id, "overall": 4.1},
+        ],
+        backlog_items=[
+            {
+                "id": "feature_quick_filter",
+                "title": "추천 결과 빠른 필터 추가",
+                "priority": "P1",
+                "reason": "추천 정확도를 높이는 사용자 가치 확장",
+                "action": "카테고리/기분 기준 빠른 필터를 추가하고 핵심 흐름 테스트를 보강",
+            }
+        ],
+        maturity_payload={
+            "level": "stable",
+            "previous_level": "usable",
+            "progression": "up",
+            "score": 88,
+            "quality_gate_passed": True,
+        },
+        trend_payload={
+            "trend_direction": "improving",
+            "delta_from_previous": 0.35,
+            "review_round_count": 4,
+            "maturity_progression": "up",
+        },
+    )
+
+    orchestrator = Orchestrator(settings, store, FakeTemplateRunner())
+    orchestrator._stage_improvement_stage(job, repository_path, paths, log_path)
+
+    loop_state_payload = json.loads(paths["improvement_loop_state"].read_text(encoding="utf-8"))
+    assert loop_state_payload["strategy"] == "feature_expansion"
+    assert loop_state_payload["strategy_focus"] == "feature"
+    assert loop_state_payload["next_scope_restriction"] == "normal"
+
+    next_tasks_payload = json.loads(paths["next_improvement_tasks"].read_text(encoding="utf-8"))
+    assert next_tasks_payload["strategy"] == "feature_expansion"
+    assert next_tasks_payload["tasks"][0]["title"] == "추천 결과 빠른 필터 추가"
+    assert next_tasks_payload["tasks"][0]["selected_by_strategy"] == "feature_expansion"
+
+
+def test_improvement_stage_selects_test_hardening_for_test_gap(app_components):
+    settings, store, _ = app_components
+    job = _make_job("job-improvement-test-hardening")
+    store.create_job(job)
+
+    repository_path = settings.repository_workspace_path(job.repository, job.app_code)
+    repository_path.mkdir(parents=True, exist_ok=True)
+    log_path = settings.logs_debug_dir / job.log_file
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text("", encoding="utf-8")
+
+    review_payload = _base_review_payload(job.job_id, overall=3.3)
+    review_payload["scores"]["test_coverage"] = 2
+    review_payload["quality_gate"] = {"passed": False, "categories_below_threshold": ["test_coverage"]}
+    review_payload["artifact_health"] = {"tests": {"test_file_count": 0, "report_count": 0}}
+
+    paths = _improvement_paths(repository_path)
+    _write_improvement_stage_inputs(
+        repository_path=repository_path,
+        paths=paths,
+        review_payload=review_payload,
+        history_entries=[
+            {"generated_at": utc_now_iso(), "job_id": job.job_id, "overall": 3.25},
+            {"generated_at": utc_now_iso(), "job_id": job.job_id, "overall": 3.3},
+        ],
+        backlog_items=[
+            {
+                "id": "tests_playwright",
+                "title": "Playwright 회귀 테스트 추가",
+                "priority": "P1",
+                "reason": "핵심 추천 흐름을 보호하는 자동 테스트가 부족함",
+                "action": "메뉴 추천 완료 흐름 기준 E2E 테스트를 추가",
+            }
+        ],
+        maturity_payload={
+            "level": "mvp",
+            "previous_level": "mvp",
+            "progression": "unchanged",
+            "score": 58,
+            "quality_gate_passed": False,
+        },
+        trend_payload={
+            "trend_direction": "stable",
+            "delta_from_previous": 0.05,
+            "review_round_count": 3,
+            "maturity_progression": "unchanged",
+        },
+    )
+
+    orchestrator = Orchestrator(settings, store, FakeTemplateRunner())
+    orchestrator._stage_improvement_stage(job, repository_path, paths, log_path)
+
+    loop_state_payload = json.loads(paths["improvement_loop_state"].read_text(encoding="utf-8"))
+    assert loop_state_payload["strategy"] == "test_hardening"
+    assert loop_state_payload["strategy_focus"] == "testing"
+    assert loop_state_payload["next_scope_restriction"] == "P1_only"
+
+    next_tasks_payload = json.loads(paths["next_improvement_tasks"].read_text(encoding="utf-8"))
+    assert next_tasks_payload["strategy"] == "test_hardening"
+    assert next_tasks_payload["tasks"][0]["title"] == "Playwright 회귀 테스트 추가"
+    assert next_tasks_payload["tasks"][0]["selected_by_strategy"] == "test_hardening"
+
+
+def test_improvement_stage_selects_ux_clarity_improvement_for_state_handling_gap(app_components):
+    settings, store, _ = app_components
+    job = _make_job("job-improvement-ux")
+    store.create_job(job)
+
+    repository_path = settings.repository_workspace_path(job.repository, job.app_code)
+    repository_path.mkdir(parents=True, exist_ok=True)
+    log_path = settings.logs_debug_dir / job.log_file
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text("", encoding="utf-8")
+
+    review_payload = _base_review_payload(job.job_id, overall=3.45)
+    review_payload["scores"]["ux_clarity"] = 2
+    review_payload["scores"]["empty_state_handling"] = 2
+    review_payload["quality_gate"] = {
+        "passed": False,
+        "categories_below_threshold": ["ux_clarity", "empty_state_handling"],
+    }
+
+    paths = _improvement_paths(repository_path)
+    _write_improvement_stage_inputs(
+        repository_path=repository_path,
+        paths=paths,
+        review_payload=review_payload,
+        history_entries=[
+            {"generated_at": utc_now_iso(), "job_id": job.job_id, "overall": 3.3},
+            {"generated_at": utc_now_iso(), "job_id": job.job_id, "overall": 3.45},
+        ],
+        backlog_items=[
+            {
+                "id": "ux_empty_copy",
+                "title": "빈 상태 안내 문구와 CTA 개선",
+                "priority": "P1",
+                "reason": "추천 결과가 없을 때 다음 행동이 불명확함",
+                "action": "empty/loading/error 상태 메시지와 CTA를 정리",
+            }
+        ],
+        maturity_payload={
+            "level": "usable",
+            "previous_level": "mvp",
+            "progression": "up",
+            "score": 72,
+            "quality_gate_passed": False,
+        },
+        trend_payload={
+            "trend_direction": "improving",
+            "delta_from_previous": 0.15,
+            "review_round_count": 2,
+            "maturity_progression": "up",
+        },
+    )
+
+    orchestrator = Orchestrator(settings, store, FakeTemplateRunner())
+    orchestrator._stage_improvement_stage(job, repository_path, paths, log_path)
+
+    loop_state_payload = json.loads(paths["improvement_loop_state"].read_text(encoding="utf-8"))
+    assert loop_state_payload["strategy"] == "ux_clarity_improvement"
+    assert loop_state_payload["strategy_focus"] == "ux"
+    assert loop_state_payload["next_scope_restriction"] == "P1_only"
+
+    next_tasks_payload = json.loads(paths["next_improvement_tasks"].read_text(encoding="utf-8"))
+    assert next_tasks_payload["strategy"] == "ux_clarity_improvement"
+    assert next_tasks_payload["tasks"][0]["title"] == "빈 상태 안내 문구와 CTA 개선"
+    assert next_tasks_payload["tasks"][0]["selected_by_strategy"] == "ux_clarity_improvement"
+
+
+def test_improvement_stage_uses_persistent_low_category_trend_for_strategy(app_components):
+    settings, store, _ = app_components
+    job = _make_job("job-improvement-persistent-low")
+    store.create_job(job)
+
+    repository_path = settings.repository_workspace_path(job.repository, job.app_code)
+    repository_path.mkdir(parents=True, exist_ok=True)
+    log_path = settings.logs_debug_dir / job.log_file
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text("", encoding="utf-8")
+
+    review_payload = _base_review_payload(job.job_id, overall=3.6)
+    review_payload["scores"]["test_coverage"] = 3
+    review_payload["quality_gate"] = {"passed": True, "categories_below_threshold": []}
+    review_payload["artifact_health"] = {"tests": {"test_file_count": 1, "report_count": 1}}
+
+    paths = _improvement_paths(repository_path)
+    _write_improvement_stage_inputs(
+        repository_path=repository_path,
+        paths=paths,
+        review_payload=review_payload,
+        history_entries=[
+            {
+                "generated_at": utc_now_iso(),
+                "job_id": job.job_id,
+                "overall": 3.2,
+                "scores": {"test_coverage": 1, "ux_clarity": 3},
+            },
+            {
+                "generated_at": utc_now_iso(),
+                "job_id": job.job_id,
+                "overall": 3.4,
+                "scores": {"test_coverage": 1, "ux_clarity": 3},
+            },
+            {
+                "generated_at": utc_now_iso(),
+                "job_id": job.job_id,
+                "overall": 3.6,
+                "scores": {"test_coverage": 1, "ux_clarity": 4},
+            },
+        ],
+        backlog_items=[
+            {
+                "id": "tests_regression",
+                "title": "추천 플로우 회귀 테스트 보강",
+                "priority": "P1",
+                "reason": "테스트 저점이 장기 지속됨",
+                "action": "핵심 추천 흐름을 보호하는 회귀 테스트를 추가",
+            }
+        ],
+        maturity_payload={
+            "level": "usable",
+            "previous_level": "usable",
+            "progression": "unchanged",
+            "score": 74,
+            "quality_gate_passed": True,
+        },
+        trend_payload={
+            "trend_direction": "improving",
+            "delta_from_previous": 0.2,
+            "review_round_count": 3,
+            "maturity_progression": "unchanged",
+            "persistent_low_categories": ["test_coverage"],
+            "stagnant_categories": ["test_coverage"],
+            "category_deltas": {"test_coverage": 0},
+        },
+    )
+
+    orchestrator = Orchestrator(settings, store, FakeTemplateRunner())
+    orchestrator._stage_improvement_stage(job, repository_path, paths, log_path)
+
+    loop_state_payload = json.loads(paths["improvement_loop_state"].read_text(encoding="utf-8"))
+    assert loop_state_payload["strategy"] == "test_hardening"
+    assert loop_state_payload["strategy_inputs"]["persistent_low_categories"] == ["test_coverage"]
+    assert loop_state_payload["strategy_inputs"]["stagnant_categories"] == ["test_coverage"]
+
+
+def test_quality_trend_snapshot_tracks_category_level_history():
+    maturity_snapshot = {
+        "level": "usable",
+        "previous_level": "mvp",
+        "progression": "up",
+    }
+    history_entries = [
+        {
+            "generated_at": utc_now_iso(),
+            "job_id": "job-trend",
+            "overall": 3.0,
+            "scores": {"test_coverage": 1, "ux_clarity": 2, "code_quality": 3},
+        },
+        {
+            "generated_at": utc_now_iso(),
+            "job_id": "job-trend",
+            "overall": 3.2,
+            "scores": {"test_coverage": 1, "ux_clarity": 2, "code_quality": 3},
+        },
+        {
+            "generated_at": utc_now_iso(),
+            "job_id": "job-trend",
+            "overall": 3.4,
+            "scores": {"test_coverage": 1, "ux_clarity": 3, "code_quality": 4},
+        },
+    ]
+
+    snapshot = Orchestrator._build_quality_trend_snapshot(
+        job_id="job-trend",
+        history_entries=history_entries,
+        maturity_snapshot=maturity_snapshot,
+    )
+
+    assert snapshot["trend_direction"] == "improving"
+    assert snapshot["category_latest_scores"]["test_coverage"] == 1
+    assert snapshot["category_deltas"]["test_coverage"] == 0
+    assert snapshot["category_deltas"]["ux_clarity"] == 1
+    assert snapshot["category_trend_direction"]["ux_clarity"] == "improving"
+    assert "test_coverage" in snapshot["persistent_low_categories"]
+    assert "test_coverage" in snapshot["stagnant_categories"]
+    assert "ux_clarity" not in snapshot["persistent_low_categories"]
+
+
+def test_repo_maturity_snapshot_calculates_levels_from_evidence():
+    base_scores = {
+        "code_quality": 4,
+        "architecture_structure": 4,
+        "maintainability": 4,
+        "usability": 4,
+        "ux_clarity": 4,
+        "test_coverage": 4,
+        "error_state_handling": 4,
+        "empty_state_handling": 4,
+        "loading_state_handling": 4,
+    }
+
+    bootstrap = Orchestrator._build_repo_maturity_snapshot(
+        job_id="job-maturity-bootstrap",
+        scores=base_scores,
+        overall=2.1,
+        artifact_health={
+            "docs": {"generated_count": 2},
+            "repo": {"source_file_count": 0},
+            "tests": {"test_file_count": 0, "report_count": 0},
+        },
+        quality_gate={"passed": False, "categories_below_threshold": ["test_coverage"]},
+        principle_alignment={},
+        previous_level="bootstrap",
+    )
+    assert bootstrap["level"] == "bootstrap"
+    assert bootstrap["progression"] == "unchanged"
+
+    stable = Orchestrator._build_repo_maturity_snapshot(
+        job_id="job-maturity-stable",
+        scores=base_scores,
+        overall=3.9,
+        artifact_health={
+            "docs": {"generated_count": 7},
+            "repo": {"source_file_count": 8},
+            "tests": {"test_file_count": 2, "report_count": 1},
+        },
+        quality_gate={"passed": True, "categories_below_threshold": []},
+        principle_alignment={},
+        previous_level="usable",
+    )
+    assert stable["level"] == "stable"
+    assert stable["progression"] == "up"
+
+    product_grade = Orchestrator._build_repo_maturity_snapshot(
+        job_id="job-maturity-product",
+        scores=base_scores,
+        overall=4.6,
+        artifact_health={
+            "docs": {"generated_count": 8},
+            "repo": {"source_file_count": 12},
+            "tests": {"test_file_count": 3, "report_count": 2},
+        },
+        quality_gate={"passed": True, "categories_below_threshold": []},
+        principle_alignment={},
+        previous_level="stable",
+    )
+    assert product_grade["level"] == "product_grade"
+    assert product_grade["progression"] == "up"
+
+
+def test_product_definition_hard_gate_isolates_only_missing_artifact_sections(app_components, tmp_path: Path):
+    settings, store, _ = app_components
+    orchestrator = Orchestrator(settings, store, FakeTemplateRunner())
+    log_path = tmp_path / "hard-gate.log"
+    log_path.write_text("", encoding="utf-8")
+
+    paths = {
+        "product_brief": tmp_path / "PRODUCT_BRIEF.md",
+        "user_flows": tmp_path / "USER_FLOWS.md",
+        "mvp_scope": tmp_path / "MVP_SCOPE.md",
+        "architecture_plan": tmp_path / "ARCHITECTURE_PLAN.md",
+        "scaffold_plan": tmp_path / "SCAFFOLD_PLAN.md",
+    }
+    paths["product_brief"].write_text(
+        "# PRODUCT BRIEF\n## Product Goal\n- goal\n## Target Users\n- users\n## Success Metrics\n- metrics\n",
+        encoding="utf-8",
+    )
+    paths["user_flows"].write_text(
+        "# USER FLOWS\n## Primary Flow\n- step 1\n",
+        encoding="utf-8",
+    )
+    paths["mvp_scope"].write_text(
+        "# MVP SCOPE\n## In Scope\n- a\n## Out of Scope\n- b\n## Acceptance Gates\n- gate\n",
+        encoding="utf-8",
+    )
+    paths["architecture_plan"].write_text(
+        "# ARCHITECTURE PLAN\n## Component Boundaries\n- boundary\n## Quality Gates\n- gate\n## Loop Safety Rules\n- stagnation\n",
+        encoding="utf-8",
+    )
+    paths["scaffold_plan"].write_text(
+        "# SCAFFOLD PLAN\n## Repository State\n- greenfield\n## Bootstrap Mode\n- create\n## Verification Checklist\n- check\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CommandExecutionError) as exc:
+        orchestrator._ensure_product_definition_ready(paths, log_path)
+
+    message = str(exc.value)
+    assert "USER_FLOWS.md" in message
+    assert "ux_state_checklist" in message
+    assert "PRODUCT_BRIEF.md" not in message
+    assert "MVP_SCOPE.md" not in message
+    assert "ARCHITECTURE_PLAN.md" not in message
+    assert "SCAFFOLD_PLAN.md" not in message
+
+
 def test_fix_stage_routes_to_planner_when_strategy_requires_rebaseline(app_components):
     settings, store, _ = app_components
     job = _make_job("job-fix-rebaseline")
@@ -846,6 +1457,227 @@ def test_workflow_node_metadata_controls_planning_mode_and_agent_profile(app_com
     log_text = log_path.read_text(encoding="utf-8")
     assert "Workflow node note: fallback planner note" in log_text
     assert "Workflow node agent profile override: primary -> fallback" in log_text
+
+
+def test_workflow_failure_edge_routes_without_new_attempt(app_components):
+    settings, store, _ = app_components
+    job = _make_job("job-workflow-failure-edge")
+    store.create_job(job)
+    store.enqueue_job(job.job_id)
+
+    def fake_shell(command, cwd, log_writer, check, command_purpose):
+        log_writer(f"[FAKE_SHELL] {command_purpose}: {command}")
+        if command.startswith("gh repo clone"):
+            Path(shlex.split(command)[-1]).mkdir(parents=True, exist_ok=True)
+        if command.startswith("gh issue view"):
+            payload = {
+                "title": "Fetched issue title",
+                "body": "Issue body from fake gh",
+                "url": "https://github.com/owner/repo/issues/55",
+                "labels": [],
+            }
+            return CommandResult(command=command, exit_code=0, stdout=json.dumps(payload), stderr="", duration_seconds=0.0)
+        if "status --porcelain" in command:
+            return CommandResult(command=command, exit_code=0, stdout="", stderr="", duration_seconds=0.0)
+        return CommandResult(command=command, exit_code=0, stdout="", stderr="", duration_seconds=0.0)
+
+    orchestrator = Orchestrator(
+        settings=settings,
+        store=store,
+        command_templates=FakeTemplateRunner(),
+        shell_executor=fake_shell,
+    )
+
+    called = {"documentation": 0}
+
+    def fake_ux_stage(job_obj, repo_path, paths, passed_log_path):
+        raise RuntimeError("ux review failed")
+
+    def fake_documentation(job_obj, repo_path, paths, passed_log_path):
+        called["documentation"] += 1
+        (repo_path / "README.md").write_text("# docs\n", encoding="utf-8")
+
+    orchestrator._stage_ux_e2e_review = fake_ux_stage  # type: ignore[method-assign]
+    orchestrator._stage_documentation_with_claude = fake_documentation  # type: ignore[method-assign]
+    workflow = {
+        "workflow_id": "wf-failure-edge",
+        "entry_node_id": "n1",
+        "nodes": [
+            {"id": "n1", "type": "gh_read_issue"},
+            {"id": "n2", "type": "write_spec"},
+            {"id": "n3", "type": "ux_e2e_review"},
+            {"id": "n4", "type": "documentation_task"},
+        ],
+        "edges": [
+            {"from": "n1", "to": "n2", "on": "success"},
+            {"from": "n2", "to": "n3", "on": "success"},
+            {"from": "n3", "to": "n4", "on": "failure"},
+        ],
+    }
+    orchestrator._load_active_workflow = lambda _job, _log_path: workflow  # type: ignore[method-assign]
+
+    processed = orchestrator.process_next_job()
+    assert processed is True
+    assert called["documentation"] == 1
+
+    stored = store.get_job(job.job_id)
+    assert stored is not None
+    assert stored.status == JobStatus.DONE.value
+    assert stored.attempt == 1
+
+    node_runs = store.list_node_runs(job.job_id)
+    assert [(item.node_type, item.status) for item in node_runs] == [
+        ("gh_read_issue", "success"),
+        ("write_spec", "success"),
+        ("ux_e2e_review", "failed"),
+        ("documentation_task", "success"),
+    ]
+
+
+def test_workflow_if_label_match_branches_on_issue_labels(app_components):
+    settings, store, _ = app_components
+    job = _make_job("job-workflow-if-label")
+    store.create_job(job)
+    store.enqueue_job(job.job_id)
+
+    def fake_shell(command, cwd, log_writer, check, command_purpose):
+        log_writer(f"[FAKE_SHELL] {command_purpose}: {command}")
+        if command.startswith("gh repo clone"):
+            Path(shlex.split(command)[-1]).mkdir(parents=True, exist_ok=True)
+        if command.startswith("gh issue view"):
+            payload = {
+                "title": "Fetched issue title",
+                "body": "Issue body from fake gh",
+                "url": "https://github.com/owner/repo/issues/55",
+                "labels": [{"name": "mobile"}, {"name": "food"}],
+            }
+            return CommandResult(command=command, exit_code=0, stdout=json.dumps(payload), stderr="", duration_seconds=0.0)
+        if "status --porcelain" in command:
+            return CommandResult(command=command, exit_code=0, stdout="", stderr="", duration_seconds=0.0)
+        return CommandResult(command=command, exit_code=0, stdout="", stderr="", duration_seconds=0.0)
+
+    orchestrator = Orchestrator(
+        settings=settings,
+        store=store,
+        command_templates=FakeTemplateRunner(),
+        shell_executor=fake_shell,
+    )
+
+    observed = {"planner": 0, "documentation": 0}
+
+    def fake_plan_stage(job_obj, repo_path, paths, passed_log_path, planning_mode="general"):
+        observed["planner"] += 1
+
+    def fake_documentation(job_obj, repo_path, paths, passed_log_path):
+        observed["documentation"] += 1
+
+    orchestrator._stage_plan_with_gemini = fake_plan_stage  # type: ignore[method-assign]
+    orchestrator._stage_documentation_with_claude = fake_documentation  # type: ignore[method-assign]
+    workflow = {
+        "workflow_id": "wf-if-label",
+        "entry_node_id": "n1",
+        "nodes": [
+            {"id": "n1", "type": "gh_read_issue"},
+            {"id": "n2", "type": "write_spec"},
+            {"id": "n3", "type": "if_label_match", "match_labels": "mobile,web", "match_mode": "any"},
+            {"id": "n4", "type": "gemini_plan", "title": "큰틀 플랜"},
+            {"id": "n5", "type": "documentation_task"},
+        ],
+        "edges": [
+            {"from": "n1", "to": "n2", "on": "success"},
+            {"from": "n2", "to": "n3", "on": "success"},
+            {"from": "n3", "to": "n4", "on": "success"},
+            {"from": "n3", "to": "n5", "on": "failure"},
+        ],
+    }
+    orchestrator._load_active_workflow = lambda _job, _log_path: workflow  # type: ignore[method-assign]
+
+    processed = orchestrator.process_next_job()
+    assert processed is True
+    assert observed["planner"] == 1
+    assert observed["documentation"] == 0
+
+    log_text = (settings.logs_debug_dir / job.log_file).read_text(encoding="utf-8")
+    assert "if_label_match evaluated" in log_text
+    assert "Workflow edge selected: n3 --success--> n4" in log_text
+
+
+def test_workflow_loop_until_pass_retries_within_same_attempt(app_components):
+    settings, store, _ = app_components
+    job = _make_job("job-workflow-loop")
+    store.create_job(job)
+    store.enqueue_job(job.job_id)
+
+    def fake_shell(command, cwd, log_writer, check, command_purpose):
+        log_writer(f"[FAKE_SHELL] {command_purpose}: {command}")
+        if command.startswith("gh repo clone"):
+            Path(shlex.split(command)[-1]).mkdir(parents=True, exist_ok=True)
+        if command.startswith("gh issue view"):
+            payload = {
+                "title": "Fetched issue title",
+                "body": "Issue body from fake gh",
+                "url": "https://github.com/owner/repo/issues/55",
+                "labels": [],
+            }
+            return CommandResult(command=command, exit_code=0, stdout=json.dumps(payload), stderr="", duration_seconds=0.0)
+        if "status --porcelain" in command:
+            return CommandResult(command=command, exit_code=0, stdout="", stderr="", duration_seconds=0.0)
+        return CommandResult(command=command, exit_code=0, stdout="", stderr="", duration_seconds=0.0)
+
+    orchestrator = Orchestrator(
+        settings=settings,
+        store=store,
+        command_templates=FakeTemplateRunner(),
+        shell_executor=fake_shell,
+    )
+
+    calls = {"ux": 0, "documentation": 0}
+
+    def fake_ux_stage(job_obj, repo_path, paths, passed_log_path):
+        calls["ux"] += 1
+        if calls["ux"] < 3:
+            raise RuntimeError("ux review failed")
+
+    def fake_documentation(job_obj, repo_path, paths, passed_log_path):
+        calls["documentation"] += 1
+
+    orchestrator._stage_ux_e2e_review = fake_ux_stage  # type: ignore[method-assign]
+    orchestrator._stage_documentation_with_claude = fake_documentation  # type: ignore[method-assign]
+    workflow = {
+        "workflow_id": "wf-loop-until-pass",
+        "entry_node_id": "n1",
+        "nodes": [
+            {"id": "n1", "type": "gh_read_issue"},
+            {"id": "n2", "type": "write_spec"},
+            {"id": "n3", "type": "ux_e2e_review"},
+            {"id": "n4", "type": "loop_until_pass", "loop_max_iterations": 2},
+            {"id": "n5", "type": "documentation_task"},
+        ],
+        "edges": [
+            {"from": "n1", "to": "n2", "on": "success"},
+            {"from": "n2", "to": "n3", "on": "success"},
+            {"from": "n3", "to": "n4", "on": "success"},
+            {"from": "n3", "to": "n4", "on": "failure"},
+            {"from": "n4", "to": "n3", "on": "failure"},
+            {"from": "n4", "to": "n5", "on": "success"},
+        ],
+    }
+    orchestrator._load_active_workflow = lambda _job, _log_path: workflow  # type: ignore[method-assign]
+
+    processed = orchestrator.process_next_job()
+    assert processed is True
+    assert calls["ux"] == 3
+    assert calls["documentation"] == 1
+
+    stored = store.get_job(job.job_id)
+    assert stored is not None
+    assert stored.status == JobStatus.DONE.value
+    assert stored.attempt == 1
+
+    log_text = (settings.logs_debug_dir / job.log_file).read_text(encoding="utf-8")
+    assert "loop_until_pass retry 1/2" in log_text
+    assert "loop_until_pass retry 2/2" in log_text
+    assert "loop_until_pass exit: previous node succeeded" in log_text
 
 
 def test_fix_prompt_uses_next_improvement_tasks_context(app_components):

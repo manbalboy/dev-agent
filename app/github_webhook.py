@@ -14,7 +14,11 @@ from app.config import AppSettings
 from app.dependencies import get_settings, get_store
 from app.models import JobRecord, JobStage, JobStatus, utc_now_iso
 from app.store import JobStore
-from app.workflow_resolution import list_known_workflow_ids, resolve_workflow_selection
+from app.workflow_resolution import (
+    list_known_workflow_ids,
+    read_registered_apps,
+    resolve_workflow_selection,
+)
 
 
 router = APIRouter(tags=["webhook"])
@@ -115,6 +119,9 @@ async def receive_github_issue_webhook(
         apps_path=_APPS_CONFIG_PATH,
         workflows_path=_WORKFLOWS_CONFIG_PATH,
     )
+    registered_apps = read_registered_apps(_APPS_CONFIG_PATH, repository_name)
+    app_entry = next((item for item in registered_apps if item.get("code") == app_code), None)
+    source_repository = str((app_entry or {}).get("source_repository", "")).strip()
 
     job = JobRecord(
         job_id=job_id,
@@ -137,6 +144,7 @@ async def receive_github_issue_webhook(
         app_code=app_code,
         track=track,
         workflow_id=workflow_selection.workflow_id,
+        source_repository=source_repository,
     )
 
     store.create_job(job)
@@ -151,6 +159,7 @@ async def receive_github_issue_webhook(
         "track": track,
         "workflow_id": workflow_selection.workflow_id,
         "workflow_source": workflow_selection.source,
+        "source_repository": source_repository,
     }
 
 

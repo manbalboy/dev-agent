@@ -953,7 +953,7 @@ code {
 }
 
 .workflow-editor-table {
-  min-width: 1120px;
+  min-width: 1560px;
 }
 
 .workflow-editor-table input,
@@ -982,6 +982,21 @@ code {
 
 .workflow-editor-table th:nth-child(6),
 .workflow-editor-table td:nth-child(6) {
+  min-width: 180px;
+}
+
+.workflow-editor-table th:nth-child(7),
+.workflow-editor-table td:nth-child(7) {
+  min-width: 120px;
+}
+
+.workflow-editor-table th:nth-child(8),
+.workflow-editor-table td:nth-child(8) {
+  min-width: 120px;
+}
+
+.workflow-editor-table th:nth-child(9),
+.workflow-editor-table td:nth-child(9) {
   min-width: 220px;
 }
 
@@ -1152,6 +1167,12 @@ code {
 
 .jobs-table tbody tr:last-child td {
   border-bottom: none;
+}
+
+.table-empty-state {
+  padding: 24px 18px;
+  color: var(--muted);
+  text-align: center;
 }
 
 .jobs-table-footer {

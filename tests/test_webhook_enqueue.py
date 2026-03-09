@@ -59,12 +59,14 @@ def _write_workflow_files(tmp_path: Path) -> tuple[Path, Path]:
                     "name": "Default",
                     "repository": "owner/repo",
                     "workflow_id": "wf-default",
+                    "source_repository": "",
                 },
                 {
                     "code": "web",
                     "name": "Web",
                     "repository": "owner/repo",
                     "workflow_id": "wf-web",
+                    "source_repository": "manbalboy/Food",
                 },
             ],
             ensure_ascii=False,
@@ -230,3 +232,31 @@ def test_webhook_rejects_unknown_requested_workflow_id(app_components, monkeypat
     assert data["accepted"] is False
     assert data["reason"] == "invalid_workflow_id"
     assert store.queue_size() == 0
+
+
+def test_webhook_enqueues_job_with_app_source_repository(app_components, monkeypatch, tmp_path: Path):
+    settings, store, app = app_components
+    client = TestClient(app)
+    apps_path, workflows_path = _write_workflow_files(tmp_path)
+    monkeypatch.setattr(github_webhook, "_APPS_CONFIG_PATH", apps_path)
+    monkeypatch.setattr(github_webhook, "_WORKFLOWS_CONFIG_PATH", workflows_path)
+
+    payload = _issue_payload()
+    payload["issue"]["labels"] = [{"name": "app:web"}]
+    body = json.dumps(payload).encode("utf-8")
+    response = client.post(
+        "/webhooks/github",
+        data=body,
+        headers={
+            "X-GitHub-Event": "issues",
+            "X-Hub-Signature-256": _sign(settings.webhook_secret, body),
+            "Content-Type": "application/json",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    stored = store.get_job(data["job_id"])
+    assert stored is not None
+    assert stored.source_repository == "manbalboy/Food"
+    assert data["source_repository"] == "manbalboy/Food"

@@ -212,7 +212,7 @@ def test_job_detail_api_includes_runtime_signals(app_components):
         encoding="utf-8",
     )
     (docs_dir / "QUALITY_TREND.json").write_text(
-        '{\n  "trend_direction": "stable",\n  "delta_from_previous": 0.1,\n  "review_round_count": 3\n}\n',
+        '{\n  "trend_direction": "stable",\n  "delta_from_previous": 0.1,\n  "review_round_count": 3,\n  "persistent_low_categories": ["test_coverage"],\n  "stagnant_categories": ["test_coverage"],\n  "category_deltas": {"test_coverage": 0}\n}\n',
         encoding="utf-8",
     )
 
@@ -226,6 +226,9 @@ def test_job_detail_api_includes_runtime_signals(app_components):
     assert payload["runtime_signals"]["next_task_title"] == "에러 상태 보강"
     assert payload["runtime_signals"]["maturity_level"] == "usable"
     assert payload["runtime_signals"]["quality_trend_direction"] == "stable"
+    assert payload["runtime_signals"]["persistent_low_categories"] == ["test_coverage"]
+    assert payload["runtime_signals"]["stagnant_categories"] == ["test_coverage"]
+    assert payload["runtime_signals"]["category_deltas"]["test_coverage"] == 0
 
 
 def test_job_detail_api_includes_manual_retry_options(app_components):

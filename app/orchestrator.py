@@ -83,6 +83,7 @@ class IssueDetails:
     title: str
     body: str
     url: str
+    labels: tuple[str, ...] = ()
 
 
 class Orchestrator:
@@ -587,15 +588,20 @@ class Orchestrator:
         *,
         resume_state: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Run phase-1 workflow by linearized node order."""
+        """Run workflow via edge-driven execution with success/failure/always transitions."""
 
         context: Dict[str, Any] = {
             "issue": None,
             "paths": None,
+            "last_node_result": None,
+            "loop_counters": {},
         }
-        start_index = 0
+        current_node_id = str(workflow.get("entry_node_id", "")).strip()
+        if not current_node_id:
+            current_node_id = str(ordered_nodes[0].get("id", "")).strip() if ordered_nodes else ""
+
         if isinstance(resume_state, dict) and resume_state.get("enabled"):
-            start_index = int(resume_state.get("resume_from_index", 0) or 0)
+            current_node_id = str(resume_state.get("resume_from_node_id", "")).strip() or current_node_id
             context["paths"] = build_workflow_artifact_paths(repository_path)
             skipped_nodes = resume_state.get("skipped_nodes", [])
             if isinstance(skipped_nodes, list) and skipped_nodes:
@@ -610,7 +616,24 @@ class Orchestrator:
                     f"Workflow resume reuses completed nodes: {skipped_labels}",
                 )
 
-        for node in ordered_nodes[start_index:]:
+        nodes_by_id, edges_by_source = self._build_workflow_runtime_maps(workflow, ordered_nodes)
+        if not current_node_id:
+            raise CommandExecutionError("Workflow has no entry node to execute.")
+
+        step_limit = max(64, len(nodes_by_id) * 8)
+        step_count = 0
+        while current_node_id:
+            step_count += 1
+            if step_count > step_limit:
+                raise CommandExecutionError(
+                    f"Workflow exceeded step limit ({step_limit}). "
+                    "Next action: inspect loop edges and loop_until_pass settings."
+                )
+
+            node = nodes_by_id.get(current_node_id)
+            if not isinstance(node, dict):
+                raise CommandExecutionError(f"Workflow node not found during execution: {current_node_id}")
+
             node_id = str(node.get("id", ""))
             node_type = str(node.get("type", ""))
             node_notes = str(node.get("notes", "")).strip()
@@ -640,30 +663,76 @@ class Orchestrator:
                 self._agent_profile = previous_agent_profile
                 raise CommandExecutionError(f"Unsupported workflow node type: {node_type}")
             node_run: NodeRunRecord | None = None
+            node_event = "success"
+            node_status = "success"
+            node_error_message: str | None = None
+            node_message = ""
+            node_exception: Exception | None = None
             try:
                 node_run = self._start_node_run(job, workflow, node)
-                executor(
+                result = executor(
                     job=job,
                     repository_path=repository_path,
                     node=node,
                     context=context,
                     log_path=log_path,
                 )
+                normalized_result = self._normalize_workflow_node_result(result)
+                node_event = normalized_result["event"]
+                node_status = normalized_result["status"]
+                node_error_message = normalized_result.get("error_message")
+                node_message = normalized_result.get("message", "")
             except Exception as error:
-                if node_run is not None:
-                    self._finish_node_run(
-                        node_run,
-                        status="failed",
-                        error_message=str(error),
-                    )
-                raise
+                node_event = "failure"
+                node_status = "failed"
+                node_error_message = str(error)
+                node_exception = error
             finally:
                 self._agent_profile = previous_agent_profile
             if node_run is not None:
-                self._finish_node_run(node_run, status="success")
+                self._finish_node_run(
+                    node_run,
+                    status=node_status,
+                    error_message=node_error_message,
+                )
 
-            if node_type not in WORKFLOW_NODE_SKIP_AUTO_COMMIT:
+            if node_message:
+                self._append_actor_log(log_path, "ORCHESTRATOR", node_message)
+
+            context["last_node_result"] = {
+                "node_id": node_id,
+                "node_type": node_type,
+                "node_title": str(node.get("title", "")).strip(),
+                "event": node_event,
+                "status": node_status,
+                "error_message": node_error_message or "",
+            }
+
+            if node_status == "success" and node_type not in WORKFLOW_NODE_SKIP_AUTO_COMMIT:
                 self._commit_markdown_changes_after_stage(job, repository_path, node_type, log_path)
+
+            next_node_id = self._resolve_next_workflow_node_id(
+                edges_by_source=edges_by_source,
+                node_id=node_id,
+                event=node_event,
+            )
+            if next_node_id:
+                self._append_actor_log(
+                    log_path,
+                    "ORCHESTRATOR",
+                    f"Workflow edge selected: {node_id} --{node_event}--> {next_node_id}",
+                )
+                current_node_id = next_node_id
+                continue
+
+            if node_event == "failure":
+                if node_exception is not None:
+                    raise node_exception
+                raise CommandExecutionError(
+                    f"Workflow node {node_id} produced failure event without failure edge."
+                )
+
+            current_node_id = ""
 
         self._set_stage(job.job_id, JobStage.FINALIZE, log_path)
 
@@ -761,6 +830,79 @@ class Orchestrator:
         )
         self.store.upsert_node_run(updated)
 
+    @staticmethod
+    def _build_workflow_runtime_maps(
+        workflow: Dict[str, Any],
+        ordered_nodes: List[Dict[str, Any]],
+    ) -> tuple[Dict[str, Dict[str, Any]], Dict[str, List[Dict[str, str]]]]:
+        """Build runtime node/edge maps while preserving declared edge order."""
+
+        raw_nodes = workflow.get("nodes", [])
+        nodes_by_id: Dict[str, Dict[str, Any]] = {}
+        source_nodes = raw_nodes if isinstance(raw_nodes, list) and raw_nodes else ordered_nodes
+        for node in source_nodes:
+            if not isinstance(node, dict):
+                continue
+            node_id = str(node.get("id", "")).strip()
+            if node_id:
+                nodes_by_id[node_id] = node
+
+        edges_by_source: Dict[str, List[Dict[str, str]]] = {}
+        raw_edges = workflow.get("edges", [])
+        if isinstance(raw_edges, list):
+            for edge in raw_edges:
+                if not isinstance(edge, dict):
+                    continue
+                src = str(edge.get("from", "")).strip()
+                dst = str(edge.get("to", "")).strip()
+                event = str(edge.get("on", "success")).strip().lower() or "success"
+                if not src or not dst:
+                    continue
+                edges_by_source.setdefault(src, []).append({"to": dst, "on": event})
+
+        return nodes_by_id, edges_by_source
+
+    @staticmethod
+    def _normalize_workflow_node_result(result: Any) -> Dict[str, str]:
+        """Normalize handler return into one workflow event/status payload."""
+
+        if result is None:
+            return {"event": "success", "status": "success", "message": "", "error_message": ""}
+        if isinstance(result, str):
+            event = result.strip().lower() or "success"
+            return {"event": event, "status": "success", "message": "", "error_message": ""}
+        if isinstance(result, dict):
+            event = str(result.get("event", "success")).strip().lower() or "success"
+            status = str(result.get("status", "success")).strip().lower() or "success"
+            message = str(result.get("message", "")).strip()
+            error_message = str(result.get("error_message", "")).strip()
+            return {
+                "event": event,
+                "status": status,
+                "message": message,
+                "error_message": error_message,
+            }
+        return {"event": "success", "status": "success", "message": "", "error_message": ""}
+
+    @staticmethod
+    def _resolve_next_workflow_node_id(
+        *,
+        edges_by_source: Dict[str, List[Dict[str, str]]],
+        node_id: str,
+        event: str,
+    ) -> str:
+        """Return the next node id for one outcome event with always-edge fallback."""
+
+        outgoing = edges_by_source.get(node_id, [])
+        normalized_event = str(event or "success").strip().lower() or "success"
+        for edge in outgoing:
+            if str(edge.get("on", "")).strip().lower() == normalized_event:
+                return str(edge.get("to", "")).strip()
+        for edge in outgoing:
+            if str(edge.get("on", "")).strip().lower() == "always":
+                return str(edge.get("to", "")).strip()
+        return ""
+
     def _workflow_context_issue(self, context: Dict[str, Any]) -> IssueDetails:
         issue = context.get("issue")
         if not isinstance(issue, IssueDetails):
@@ -783,6 +925,89 @@ class Orchestrator:
         log_path: Path,
     ) -> None:
         context["issue"] = self._stage_read_issue(job, repository_path, log_path)
+
+    def _workflow_node_if_label_match(
+        self,
+        *,
+        job: JobRecord,
+        repository_path: Path,
+        node: Dict[str, Any],
+        context: Dict[str, Any],
+        log_path: Path,
+    ) -> Dict[str, str]:
+        issue = self._workflow_context_issue(context)
+        raw_match_labels = str(node.get("match_labels", "")).strip()
+        requested_labels = [item.strip().lower() for item in raw_match_labels.split(",") if item.strip()]
+        if not requested_labels:
+            raise CommandExecutionError("if_label_match requires match_labels metadata.")
+
+        match_mode = str(node.get("match_mode", "any")).strip().lower() or "any"
+        issue_labels = {label.strip().lower() for label in issue.labels if str(label).strip()}
+        matched = False
+        if match_mode == "all":
+            matched = all(label in issue_labels for label in requested_labels)
+        elif match_mode == "none":
+            matched = all(label not in issue_labels for label in requested_labels)
+        else:
+            matched = any(label in issue_labels for label in requested_labels)
+
+        result_event = "success" if matched else "failure"
+        return {
+            "event": result_event,
+            "status": "success",
+            "message": (
+                f"if_label_match evaluated labels={sorted(issue_labels)} "
+                f"against required={requested_labels} mode={match_mode} -> {result_event}"
+            ),
+        }
+
+    def _workflow_node_loop_until_pass(
+        self,
+        *,
+        job: JobRecord,
+        repository_path: Path,
+        node: Dict[str, Any],
+        context: Dict[str, Any],
+        log_path: Path,
+    ) -> Dict[str, str]:
+        last_result = context.get("last_node_result")
+        if not isinstance(last_result, dict):
+            raise CommandExecutionError("loop_until_pass requires previous node result context.")
+
+        last_event = str(last_result.get("event", "success")).strip().lower() or "success"
+        loop_key = str(node.get("id", "")).strip() or str(node.get("title", "")).strip() or "loop"
+        raw_limit = node.get("loop_max_iterations", 3)
+        try:
+            max_iterations = int(raw_limit or 3)
+        except (TypeError, ValueError) as error:
+            raise CommandExecutionError("loop_until_pass requires integer loop_max_iterations.") from error
+        max_iterations = max(1, min(10, max_iterations))
+
+        loop_counters = context.setdefault("loop_counters", {})
+        if not isinstance(loop_counters, dict):
+            loop_counters = {}
+            context["loop_counters"] = loop_counters
+
+        if last_event == "success":
+            loop_counters[loop_key] = 0
+            return {
+                "event": "success",
+                "status": "success",
+                "message": f"loop_until_pass exit: previous node succeeded, loop={loop_key}",
+            }
+
+        current_count = int(loop_counters.get(loop_key, 0) or 0) + 1
+        loop_counters[loop_key] = current_count
+        if current_count <= max_iterations:
+            return {
+                "event": "failure",
+                "status": "success",
+                "message": f"loop_until_pass retry {current_count}/{max_iterations} for loop={loop_key}",
+            }
+
+        raise CommandExecutionError(
+            f"loop_until_pass exceeded max iterations ({max_iterations}) for loop={loop_key}"
+        )
 
     def _workflow_node_write_spec(
         self,
@@ -1069,13 +1294,38 @@ class Orchestrator:
         """Return linear execution order from entry node over success/always edges."""
         return linearize_workflow_nodes(workflow)
 
+    @staticmethod
+    def _job_execution_repository(job: JobRecord) -> str:
+        """Return repository used for clone/build/push for one job."""
+
+        source_repository = str(job.source_repository or "").strip()
+        return source_repository or str(job.repository or "").strip()
+
+    def _job_workspace_path(self, job: JobRecord) -> Path:
+        """Resolve workspace path using execution repository."""
+
+        return self.settings.repository_workspace_path(self._job_execution_repository(job), job.app_code)
+
+    def _issue_reference_line(self, job: JobRecord) -> str:
+        """Return PR-safe issue reference text.
+
+        If execution repository differs from the issue hub repository, using
+        `Closes #<n>` would target the wrong repository issue. In that case we
+        keep a full tracking URL instead.
+        """
+
+        if self._job_execution_repository(job) != str(job.repository or "").strip():
+            return f"Tracking issue: {job.issue_url}"
+        return f"Closes #{job.issue_number}"
+
     def _stage_prepare_repo(self, job: JobRecord, log_path: Path) -> Path:
         self._set_stage(job.job_id, JobStage.PREPARE_REPO, log_path)
-        repository_path = self.settings.repository_workspace_path(job.repository, job.app_code)
+        repository_path = self._job_workspace_path(job)
+        execution_repository = self._job_execution_repository(job)
 
         if not repository_path.exists():
             self._run_shell(
-                command=f"gh repo clone {shlex.quote(job.repository)} {shlex.quote(str(repository_path))}",
+                command=f"gh repo clone {shlex.quote(execution_repository)} {shlex.quote(str(repository_path))}",
                 cwd=self.settings.workspace_dir,
                 log_path=log_path,
                 purpose="repository clone",
@@ -1192,7 +1442,7 @@ class Orchestrator:
         result = self._run_shell(
             command=(
                 f"gh issue view {job.issue_number} --repo {shlex.quote(job.repository)} "
-                "--json title,body,url"
+                "--json title,body,url,labels"
             ),
             cwd=repository_path,
             log_path=log_path,
@@ -1207,10 +1457,22 @@ class Orchestrator:
                 "Next action: run the same command manually and verify gh CLI auth."
             ) from error
 
+        labels_payload = payload.get("labels", [])
+        labels: List[str] = []
+        if isinstance(labels_payload, list):
+            for item in labels_payload:
+                if isinstance(item, dict):
+                    name = str(item.get("name", "")).strip()
+                else:
+                    name = str(item).strip()
+                if name:
+                    labels.append(name)
+
         return IssueDetails(
             title=str(payload.get("title", job.issue_title)),
             body=str(payload.get("body", "")),
             url=str(payload.get("url", job.issue_url)),
+            labels=tuple(labels),
         )
 
     def _stage_write_spec(
@@ -2634,6 +2896,7 @@ class Orchestrator:
                 "generated_at": payload["generated_at"],
                 "job_id": job.job_id,
                 "overall": overall,
+                "scores": dict(scores),
                 "maturity_level": maturity_snapshot["level"],
                 "maturity_score": maturity_snapshot["score"],
                 "top_issue_ids": [item["id"] for item in ordered_candidates[:3]],
@@ -2695,6 +2958,8 @@ class Orchestrator:
         backlog_items = backlog_payload.get("items", []) if isinstance(backlog_payload, dict) else []
         if not isinstance(backlog_items, list):
             backlog_items = []
+        maturity_payload = self._read_json_file(paths.get("repo_maturity"))
+        trend_payload = self._read_json_file(paths.get("quality_trend"))
         operating_policy = review_payload.get("operating_policy", {}) if isinstance(review_payload, dict) else {}
         if not isinstance(operating_policy, dict):
             operating_policy = {}
@@ -2759,38 +3024,53 @@ class Orchestrator:
         )
 
         overall_score = float(review_payload.get("scores", {}).get("overall", 0.0)) if isinstance(review_payload, dict) else 0.0
+        scores_payload = review_payload.get("scores", {}) if isinstance(review_payload, dict) else {}
+        if not isinstance(scores_payload, dict):
+            scores_payload = {}
+        artifact_health = review_payload.get("artifact_health", {}) if isinstance(review_payload, dict) else {}
+        if not isinstance(artifact_health, dict):
+            artifact_health = {}
         categories_below = (
             review_payload.get("quality_gate", {}).get("categories_below_threshold", [])
             if isinstance(review_payload, dict)
             else []
         )
+        if not isinstance(categories_below, list):
+            categories_below = []
+        quality_gate_payload = review_payload.get("quality_gate", {}) if isinstance(review_payload, dict) else {}
+        if not isinstance(quality_gate_payload, dict):
+            quality_gate_payload = {}
 
-        # ── 전략 변경 시 실행 범위 제한 ──────────────────────────────────
-        # strategy_change_required = True일 때:
-        # - P1 항목만 처리하도록 next_scope_restriction 활성화
-        # - 품질 하락이면 rollback_recommended 활성화
-        if design_reset_required:
-            strategy = "design_rebaseline"
-            next_scope_restriction = "MVP_redefinition"
-        elif quality_regression_detected:
-            strategy = "rollback_or_stabilize"
-            next_scope_restriction = "P1_only"
-        elif strategy_change_required:
-            strategy = "narrow_scope_stabilization"
-            next_scope_restriction = "P1_only"
-        elif quality_focus_required or overall_score < 3.0:
-            strategy = "quality_hardening"
-            next_scope_restriction = "P1_only"
-        else:
-            strategy = "normal_iterative_improvement"
-            next_scope_restriction = "normal"
+        strategy_inputs = self._build_improvement_strategy_inputs(
+            review_payload=review_payload,
+            maturity_payload=maturity_payload,
+            trend_payload=trend_payload,
+            categories_below=categories_below,
+        )
+        strategy_decision = self._select_improvement_strategy(
+            overall_score=overall_score,
+            strategy_inputs=strategy_inputs,
+            repeated_issue_limit_hit=repeated_issue_limit_hit,
+            score_stagnation_detected=score_stagnation_detected,
+            quality_regression_detected=quality_regression_detected,
+            design_reset_required=design_reset_required,
+            scope_reset_required=scope_reset_required,
+            quality_focus_required=quality_focus_required,
+        )
+
+        strategy = str(strategy_decision.get("strategy", "normal_iterative_improvement")).strip() or "normal_iterative_improvement"
+        next_scope_restriction = str(strategy_decision.get("next_scope_restriction", "normal")).strip() or "normal"
+        strategy_focus = str(strategy_decision.get("focus", "balanced")).strip() or "balanced"
+        strategy_mode_shift = strategy != "normal_iterative_improvement"
 
         loop_state["strategy"] = strategy
+        loop_state["strategy_focus"] = strategy_focus
         rollback_recommended = quality_regression_detected and bool(git_head)
         loop_state["next_scope_restriction"] = next_scope_restriction
         loop_state["rollback_recommended"] = rollback_recommended
         loop_state["categories_below_threshold"] = categories_below
         loop_state["overall_score"] = overall_score
+        loop_state["strategy_inputs"] = strategy_inputs
         # 전략 변경 이유를 명시적으로 기록
         change_reasons: List[str] = []
         if repeated_issue_limit_hit:
@@ -2808,6 +3088,9 @@ class Orchestrator:
             change_reasons.append("MVP 우선/작은 단위 개발 원칙 위반: 범위 축소 또는 재정의 필요")
         if quality_focus_required:
             change_reasons.append("평가 우선/안정성 보호 원칙 기준에서 품질 근거가 부족함")
+        for reason in strategy_decision.get("reasons", []):
+            if reason not in change_reasons:
+                change_reasons.append(reason)
         loop_state["strategy_change_reasons"] = change_reasons
 
         loop_state_path = paths.get("improvement_loop_state", self._docs_file(repository_path, "IMPROVEMENT_LOOP_STATE.json"))
@@ -2827,16 +3110,21 @@ class Orchestrator:
                     "action": "PRODUCT_BRIEF/USER_FLOWS/MVP_SCOPE/ARCHITECTURE_PLAN을 재정리한 뒤 다시 계획 수립",
                 }
             ]
-        elif strategy_change_required:
-            next_items = [item for item in backlog_items if item.get("priority") == "P1"][:3]
-        elif quality_focus_required:
-            next_items = [item for item in backlog_items if item.get("priority") in {"P0", "P1"}][:3]
         else:
-            next_items = backlog_items[:5]
+            next_items = self._select_next_improvement_items(
+                strategy=strategy,
+                backlog_items=backlog_items,
+                categories_below=categories_below,
+                scores=scores_payload,
+                artifact_health=artifact_health,
+                quality_gate=quality_gate_payload,
+            )
         next_tasks_payload = {
             "generated_at": utc_now_iso(),
             "strategy": loop_state.get("strategy", "normal_iterative_improvement"),
+            "strategy_focus": strategy_focus,
             "scope_restriction": next_scope_restriction,
+            "strategy_inputs": strategy_inputs,
             "tasks": [
                 {
                     "task_id": f"next_{index + 1}",
@@ -2845,6 +3133,7 @@ class Orchestrator:
                     "priority": str(item.get("priority", "P2")),
                     "reason": str(item.get("reason", "")),
                     "action": str(item.get("action", "")),
+                    "selected_by_strategy": strategy,
                     "recommended_node_type": (
                         "gemini_plan"
                         if design_reset_required or scope_reset_required
@@ -2879,14 +3168,26 @@ class Orchestrator:
             f"- quality_regression_detected: `{quality_regression_detected}`",
             f"- strategy_change_required: `{strategy_change_required}`",
             f"- rollback_recommended: `{rollback_recommended}`",
+            f"- strategy_focus: `{strategy_focus}`",
         ]
+        plan_lines.extend([
+            "",
+            "## Strategy Inputs",
+            f"- maturity_level: `{strategy_inputs.get('maturity_level', '')}`",
+            f"- maturity_progression: `{strategy_inputs.get('maturity_progression', '')}`",
+            f"- quality_trend_direction: `{strategy_inputs.get('quality_trend_direction', '')}`",
+            f"- review_round_count: `{strategy_inputs.get('review_round_count', 0)}`",
+            f"- quality_gate_passed: `{strategy_inputs.get('quality_gate_passed', False)}`",
+            f"- persistent_low_categories: `{', '.join(strategy_inputs.get('persistent_low_categories', [])) or '-'}`",
+            f"- stagnant_categories: `{', '.join(strategy_inputs.get('stagnant_categories', [])) or '-'}`",
+        ])
         if change_reasons:
             plan_lines.extend(["", "## Strategy Change Reasons"])
             for reason in change_reasons:
                 plan_lines.append(f"- {reason}")
 
         plan_lines.extend(["", "## Next Improvements"])
-        if strategy_change_required:
+        if strategy_change_required or strategy_mode_shift:
             plan_lines.append("> **전략 변경 모드**: P1 항목만 처리합니다. 범위를 축소하고 안정화 작업을 우선 수행하세요.")
         for item in next_items:
             action = str(item.get("action", "")).strip()
@@ -2924,6 +3225,363 @@ class Orchestrator:
             f"IMPROVEMENT_PLAN.md 생성 완료 — strategy={loop_state['strategy']}, "
             f"next_scope={next_scope_restriction}, rollback={rollback_recommended}",
         )
+
+    @staticmethod
+    def _build_improvement_strategy_inputs(
+        *,
+        review_payload: Dict[str, Any],
+        maturity_payload: Dict[str, Any],
+        trend_payload: Dict[str, Any],
+        categories_below: List[str],
+    ) -> Dict[str, Any]:
+        """Collect strategy-selection inputs in one explicit structure."""
+
+        scores = review_payload.get("scores", {}) if isinstance(review_payload, dict) else {}
+        if not isinstance(scores, dict):
+            scores = {}
+        artifact_health = review_payload.get("artifact_health", {}) if isinstance(review_payload, dict) else {}
+        if not isinstance(artifact_health, dict):
+            artifact_health = {}
+        tests_info = artifact_health.get("tests", {}) if isinstance(artifact_health, dict) else {}
+        if not isinstance(tests_info, dict):
+            tests_info = {}
+        quality_gate = review_payload.get("quality_gate", {}) if isinstance(review_payload, dict) else {}
+        if not isinstance(quality_gate, dict):
+            quality_gate = {}
+        persistent_low_categories = trend_payload.get("persistent_low_categories", []) if isinstance(trend_payload, dict) else []
+        if not isinstance(persistent_low_categories, list):
+            persistent_low_categories = []
+        stagnant_categories = trend_payload.get("stagnant_categories", []) if isinstance(trend_payload, dict) else []
+        if not isinstance(stagnant_categories, list):
+            stagnant_categories = []
+
+        ux_categories = {
+            "usability",
+            "ux_clarity",
+            "error_state_handling",
+            "empty_state_handling",
+            "loading_state_handling",
+        }
+        engineering_categories = {"architecture_structure", "maintainability", "code_quality"}
+
+        return {
+            "maturity_level": str(maturity_payload.get("level", "bootstrap") or "bootstrap"),
+            "maturity_progression": str(
+                trend_payload.get("maturity_progression", maturity_payload.get("progression", "unchanged")) or "unchanged"
+            ),
+            "quality_trend_direction": str(trend_payload.get("trend_direction", "stable") or "stable"),
+            "review_round_count": int(
+                trend_payload.get("review_round_count", 0)
+                or 0
+            ),
+            "quality_gate_passed": bool(quality_gate.get("passed")),
+            "categories_below": list(categories_below),
+            "persistent_low_categories": list(persistent_low_categories),
+            "stagnant_categories": list(stagnant_categories),
+            "has_test_gap": (
+                "test_coverage" in categories_below
+                or "test_coverage" in persistent_low_categories
+                or "test_coverage" in stagnant_categories
+                or int(tests_info.get("test_file_count", 0) or 0) == 0
+                or int(tests_info.get("report_count", 0) or 0) == 0
+            ),
+            "has_ux_gap": any(
+                category in ux_categories
+                for category in [*categories_below, *persistent_low_categories, *stagnant_categories]
+            ),
+            "has_engineering_gap": any(
+                category in engineering_categories
+                for category in [*categories_below, *persistent_low_categories, *stagnant_categories]
+            ),
+            "overall_score": float(scores.get("overall", 0.0) or 0.0),
+            "test_score": int(scores.get("test_coverage", 0) or 0),
+            "ux_score_floor": min(
+                int(scores.get("usability", 0) or 0),
+                int(scores.get("ux_clarity", 0) or 0),
+                int(scores.get("error_state_handling", 0) or 0),
+                int(scores.get("empty_state_handling", 0) or 0),
+                int(scores.get("loading_state_handling", 0) or 0),
+            ),
+        }
+
+    @staticmethod
+    def _select_improvement_strategy(
+        *,
+        overall_score: float,
+        strategy_inputs: Dict[str, Any],
+        repeated_issue_limit_hit: bool,
+        score_stagnation_detected: bool,
+        quality_regression_detected: bool,
+        design_reset_required: bool,
+        scope_reset_required: bool,
+        quality_focus_required: bool,
+    ) -> Dict[str, Any]:
+        """Choose next-loop strategy from maturity/trend/policy signals."""
+
+        maturity_level = str(strategy_inputs.get("maturity_level", "bootstrap") or "bootstrap")
+        maturity_progression = str(strategy_inputs.get("maturity_progression", "unchanged") or "unchanged")
+        trend_direction = str(strategy_inputs.get("quality_trend_direction", "stable") or "stable")
+        review_round_count = int(strategy_inputs.get("review_round_count", 0) or 0)
+        quality_gate_passed = bool(strategy_inputs.get("quality_gate_passed"))
+        has_test_gap = bool(strategy_inputs.get("has_test_gap"))
+        has_ux_gap = bool(strategy_inputs.get("has_ux_gap"))
+        has_engineering_gap = bool(strategy_inputs.get("has_engineering_gap"))
+        categories_below = strategy_inputs.get("categories_below", [])
+        if not isinstance(categories_below, list):
+            categories_below = []
+        persistent_low_categories = strategy_inputs.get("persistent_low_categories", [])
+        if not isinstance(persistent_low_categories, list):
+            persistent_low_categories = []
+        stagnant_categories = strategy_inputs.get("stagnant_categories", [])
+        if not isinstance(stagnant_categories, list):
+            stagnant_categories = []
+
+        reasons: List[str] = []
+
+        if design_reset_required:
+            return {
+                "strategy": "design_rebaseline",
+                "next_scope_restriction": "MVP_redefinition",
+                "focus": "design",
+                "reasons": ["제품 정의/설계 문서 재정렬이 우선입니다."],
+            }
+        if quality_regression_detected:
+            return {
+                "strategy": "rollback_or_stabilize",
+                "next_scope_restriction": "P1_only",
+                "focus": "stability",
+                "reasons": ["품질이 하락해 기능 확장보다 안정화와 복구가 우선입니다."],
+            }
+        if scope_reset_required:
+            return {
+                "strategy": "narrow_scope_stabilization",
+                "next_scope_restriction": "P1_only",
+                "focus": "scope",
+                "reasons": ["범위가 커졌기 때문에 MVP 범위 재정렬과 안정화가 필요합니다."],
+            }
+
+        if repeated_issue_limit_hit or score_stagnation_detected:
+            if has_test_gap:
+                reasons.append(
+                    "반복/정체 구간에서 테스트 격차가 보입니다."
+                    + (f" persistent_low={persistent_low_categories}" if "test_coverage" in persistent_low_categories else "")
+                )
+                return {
+                    "strategy": "test_hardening",
+                    "next_scope_restriction": "P1_only",
+                    "focus": "testing",
+                    "reasons": reasons,
+                }
+            if has_ux_gap:
+                reasons.append("반복/정체 구간에서 UX 상태 처리 격차가 보여 화면 명확성 개선이 우선입니다.")
+                return {
+                    "strategy": "ux_clarity_improvement",
+                    "next_scope_restriction": "P1_only",
+                    "focus": "ux",
+                    "reasons": reasons,
+                }
+            reasons.append("반복/정체 구간이므로 기능 확대보다 구조 안정화가 우선입니다.")
+            return {
+                "strategy": "stabilization",
+                "next_scope_restriction": "P1_only",
+                "focus": "stability",
+                "reasons": reasons,
+            }
+
+        if "test_coverage" in persistent_low_categories:
+            return {
+                "strategy": "test_hardening",
+                "next_scope_restriction": "P1_only",
+                "focus": "testing",
+                "reasons": ["test_coverage가 최근 3라운드 연속 저점이라 테스트 강화가 우선입니다."],
+            }
+
+        if any(
+            category in persistent_low_categories
+            for category in {"ux_clarity", "usability", "error_state_handling", "empty_state_handling", "loading_state_handling"}
+        ):
+            return {
+                "strategy": "ux_clarity_improvement",
+                "next_scope_restriction": "P1_only",
+                "focus": "ux",
+                "reasons": [f"UX 관련 카테고리 저점이 지속됨: {', '.join(persistent_low_categories)}"],
+            }
+
+        if has_test_gap and (quality_focus_required or trend_direction in {"stable", "declining"} or review_round_count >= 2):
+            return {
+                "strategy": "test_hardening",
+                "next_scope_restriction": "P1_only",
+                "focus": "testing",
+                "reasons": ["테스트/리포트 증거가 부족해 회귀 방지와 커버리지 보강이 우선입니다."],
+            }
+
+        if has_ux_gap:
+            return {
+                "strategy": "ux_clarity_improvement",
+                "next_scope_restriction": "P1_only",
+                "focus": "ux",
+                "reasons": [f"UX 관련 저점 카테고리({', '.join(categories_below)})가 존재해 사용 흐름 명확화가 우선입니다."],
+            }
+
+        if quality_focus_required or overall_score < 3.0 or (maturity_level in {"bootstrap", "mvp"} and not quality_gate_passed):
+            return {
+                "strategy": "stabilization",
+                "next_scope_restriction": "P1_only",
+                "focus": "stability",
+                "reasons": ["현재 성숙도/품질 상태에서는 기능 확장보다 안정화가 우선입니다."],
+            }
+
+        if any(
+            category in stagnant_categories
+            for category in {"code_quality", "architecture_structure", "maintainability"}
+        ) and trend_direction in {"stable", "declining"}:
+            return {
+                "strategy": "stabilization",
+                "next_scope_restriction": "P1_only",
+                "focus": "stability",
+                "reasons": [f"엔지니어링 카테고리 정체가 지속됨: {', '.join(stagnant_categories)}"],
+            }
+
+        if (
+            quality_gate_passed
+            and overall_score >= 3.6
+            and trend_direction == "improving"
+            and maturity_level in {"usable", "stable", "product_grade"}
+            and not categories_below
+            and not has_engineering_gap
+        ):
+            return {
+                "strategy": "feature_expansion",
+                "next_scope_restriction": "normal",
+                "focus": "feature",
+                "reasons": ["품질 게이트를 통과했고 추세가 상승 중이므로 다음 핵심 사용자 가치를 확장할 수 있습니다."],
+            }
+
+        return {
+            "strategy": "normal_iterative_improvement",
+            "next_scope_restriction": "normal",
+            "focus": "balanced",
+            "reasons": [
+                f"성숙도={maturity_level}, 추세={trend_direction}, progression={maturity_progression} 기준에서 균형 개선을 유지합니다."
+            ],
+        }
+
+    @staticmethod
+    def _select_next_improvement_items(
+        *,
+        strategy: str,
+        backlog_items: List[Dict[str, Any]],
+        categories_below: List[str],
+        scores: Dict[str, Any],
+        artifact_health: Dict[str, Any],
+        quality_gate: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        """Choose strategy-aligned next tasks from backlog, with synthetic fallback."""
+
+        if not isinstance(backlog_items, list):
+            backlog_items = []
+        if not isinstance(categories_below, list):
+            categories_below = []
+
+        def _priority_rank(value: str) -> int:
+            return {"P0": 0, "P1": 1, "P2": 2, "P3": 3}.get(str(value or "P3"), 3)
+
+        def _candidate_text(item: Dict[str, Any]) -> str:
+            return " ".join(
+                [
+                    str(item.get("title", "")),
+                    str(item.get("reason", "")),
+                    str(item.get("action", "")),
+                    str(item.get("source", "")),
+                ]
+            ).lower()
+
+        def _pick_by_keywords(keywords: List[str], *, allowed_priorities: set[str], limit: int = 3) -> List[Dict[str, Any]]:
+            scored: List[tuple[int, int, Dict[str, Any]]] = []
+            for item in backlog_items:
+                text = _candidate_text(item)
+                match_count = sum(1 for keyword in keywords if keyword in text)
+                if match_count <= 0:
+                    continue
+                priority = str(item.get("priority", "P3"))
+                if priority not in allowed_priorities:
+                    continue
+                scored.append((-match_count, _priority_rank(priority), item))
+            scored.sort(key=lambda row: (row[0], row[1], str(row[2].get("title", ""))))
+            return [row[2] for row in scored[:limit]]
+
+        if strategy == "feature_expansion":
+            selected = [item for item in backlog_items if str(item.get("priority", "P3")) in {"P1", "P2"}][:3]
+            if selected:
+                return selected
+            return [
+                {
+                    "id": "strategy_feature_expansion",
+                    "priority": "P1",
+                    "title": "다음 핵심 사용자 가치 1개 확장",
+                    "reason": "품질 게이트 통과 및 추세 상승 상태에서 기능 확장을 진행합니다.",
+                    "action": "MVP_SCOPE 기준에서 사용자 가치가 높은 기능 1개만 추가 구현하고 테스트를 함께 보강",
+                }
+            ]
+
+        if strategy == "test_hardening":
+            selected = _pick_by_keywords(
+                ["test", "coverage", "regression", "spec", "e2e", "integration", "playwright", "pytest"],
+                allowed_priorities={"P0", "P1", "P2"},
+            )
+            if selected:
+                return selected
+            tests_info = artifact_health.get("tests", {}) if isinstance(artifact_health, dict) else {}
+            if not isinstance(tests_info, dict):
+                tests_info = {}
+            return [
+                {
+                    "id": "strategy_test_hardening",
+                    "priority": "P1",
+                    "title": "회귀 테스트 및 테스트 전략 보강",
+                    "reason": (
+                        f"test_file_count={int(tests_info.get('test_file_count', 0) or 0)}, "
+                        f"report_count={int(tests_info.get('report_count', 0) or 0)}"
+                    ),
+                    "action": "핵심 사용자 흐름 기준 회귀 테스트를 추가하고 PLAN/리뷰 문서의 테스트 전략을 구체화",
+                }
+            ]
+
+        if strategy == "ux_clarity_improvement":
+            selected = _pick_by_keywords(
+                ["ux", "usability", "empty", "loading", "error", "ui", "flow", "copy", "message", "spinner", "skeleton"],
+                allowed_priorities={"P0", "P1", "P2"},
+            )
+            if selected:
+                return selected
+            return [
+                {
+                    "id": "strategy_ux_clarity_improvement",
+                    "priority": "P1",
+                    "title": "UX 상태 처리와 화면 안내 문구 정리",
+                    "reason": f"낮은 UX 관련 카테고리: {', '.join(categories_below) or 'ux_clarity'}",
+                    "action": "error/empty/loading 상태 UI와 안내 문구를 정리하고 USER_FLOWS 기준으로 사용자 흐름을 더 명확하게 다듬기",
+                }
+            ]
+
+        if strategy in {"stabilization", "rollback_or_stabilize", "narrow_scope_stabilization"}:
+            selected = [item for item in backlog_items if str(item.get("priority", "P3")) in {"P0", "P1"}][:3]
+            if selected:
+                return selected
+            return [
+                {
+                    "id": "strategy_stabilization",
+                    "priority": "P1",
+                    "title": "구조 안정화 및 회귀 방지 작업",
+                    "reason": "품질 게이트 미통과 또는 구조적 약점이 남아 있습니다.",
+                    "action": "기능 확장 없이 현재 저점 카테고리를 보강하고 회귀 테스트를 추가",
+                }
+            ]
+
+        if strategy == "normal_iterative_improvement":
+            return backlog_items[:5]
+
+        return backlog_items[:3]
 
     def _stage_plan_with_gemini(
         self,
@@ -5137,6 +5795,7 @@ class Orchestrator:
     ) -> None:
         self._set_stage(job.job_id, JobStage.CREATE_PR, log_path)
         refreshed_job = self._require_job(job.job_id)
+        execution_repository = self._job_execution_repository(refreshed_job)
         preview_info = self._deploy_preview_and_smoke_test(refreshed_job, repository_path, log_path)
 
         pr_body_path = self._docs_file(repository_path, "PR_BODY.md")
@@ -5156,7 +5815,7 @@ class Orchestrator:
                         "## Summary\n"
                         "- Automated by AgentHub worker\n"
                         "- Generated from deterministic stage pipeline\n\n"
-                        f"Closes #{refreshed_job.issue_number}\n"
+                        f"{self._issue_reference_line(refreshed_job)}\n"
                     ),
                     encoding="utf-8",
                 )
@@ -5166,7 +5825,7 @@ class Orchestrator:
                     "## Summary\n"
                     "- Automated by AgentHub worker\n"
                     "- Generated from deterministic stage pipeline\n\n"
-                    f"Closes #{refreshed_job.issue_number}\n"
+                    f"{self._issue_reference_line(refreshed_job)}\n"
                     ),
                     encoding="utf-8",
                 )
@@ -5175,7 +5834,7 @@ class Orchestrator:
 
         title = f"AgentHub: {refreshed_job.issue_title}"
         create_command = (
-            f"gh pr create --repo {shlex.quote(job.repository)} "
+            f"gh pr create --repo {shlex.quote(execution_repository)} "
             f"--head {shlex.quote(job.branch_name)} "
             f"--base {shlex.quote(self.settings.default_branch)} "
             f"--title {shlex.quote(title)} "
@@ -5200,7 +5859,7 @@ class Orchestrator:
             )
             self._run_shell(
                 command=(
-                    f"gh pr edit --repo {shlex.quote(job.repository)} "
+                    f"gh pr edit --repo {shlex.quote(execution_repository)} "
                     f"{shlex.quote(job.branch_name)} "
                     f"--body-file {shlex.quote(str(pr_body_path))}"
                 ),
@@ -5469,7 +6128,7 @@ class Orchestrator:
 
         query_result = self._run_shell(
             command=(
-                f"gh pr view --repo {shlex.quote(job.repository)} "
+                f"gh pr view --repo {shlex.quote(self._job_execution_repository(job))} "
                 f"{shlex.quote(job.branch_name)} --json url --jq .url"
             ),
             cwd=repository_path,
@@ -5898,7 +6557,7 @@ class Orchestrator:
         """Run optional escalation template (for example Claude) after a failure."""
 
         job = self._require_job(job_id)
-        repository_path = self.settings.repository_workspace_path(job.repository, job.app_code)
+        repository_path = self._job_workspace_path(job)
         if not repository_path.exists():
             self._append_actor_log(
                 log_path,
@@ -5944,7 +6603,7 @@ class Orchestrator:
         """Best-effort cleanup when all retries are exhausted."""
 
         job = self._require_job(job_id)
-        repository_path = self.settings.repository_workspace_path(job.repository, job.app_code)
+        repository_path = self._job_workspace_path(job)
         self._set_stage(job_id, JobStage.FAILED, log_path)
 
         if repository_path.exists():
@@ -6010,11 +6669,12 @@ class Orchestrator:
             wip_body = (
                 "Automated run failed after max retries.\n\n"
                 "Please check STATUS.md and job logs for next actions.\n"
+                f"{self._issue_reference_line(job)}\n"
             )
 
             create_result = self._run_shell(
                 command=(
-                    f"gh pr create --draft --repo {shlex.quote(job.repository)} "
+                    f"gh pr create --draft --repo {shlex.quote(self._job_execution_repository(job))} "
                     f"--head {shlex.quote(job.branch_name)} "
                     f"--base {shlex.quote(self.settings.default_branch)} "
                     f"--title {shlex.quote(wip_title)} --body {shlex.quote(wip_body)}"
@@ -6045,11 +6705,12 @@ class Orchestrator:
 
         return {
             "repository": job.repository,
+            "execution_repository": self._job_execution_repository(job),
             "issue_number": str(job.issue_number),
             "issue_title": job.issue_title,
             "issue_url": job.issue_url,
             "branch_name": job.branch_name,
-            "work_dir": str(self.settings.repository_workspace_path(job.repository, job.app_code)),
+            "work_dir": str(self._job_workspace_path(job)),
             "spec_path": str(paths["spec"]),
             "plan_path": str(paths["plan"]),
             "review_path": str(paths["review"]),
@@ -6080,7 +6741,7 @@ class Orchestrator:
             "readme_path": str(paths.get("readme", Path("README.md"))),
             "copyright_path": str(paths.get("copyright", Path("COPYRIGHT.md"))),
             "development_guide_path": str(paths.get("development_guide", Path("DEVELOPMENT_GUIDE.md"))),
-            "docs_bundle_path": str(self._docs_file(self.settings.repository_workspace_path(job.repository, job.app_code), "DOCUMENTATION_BUNDLE.md")),
+            "docs_bundle_path": str(self._docs_file(self._job_workspace_path(job), "DOCUMENTATION_BUNDLE.md")),
             "status_path": str(paths.get("status", Path("_docs/STATUS.md"))),
             "prompt_file": str(prompt_file_path),
         }
@@ -6964,6 +7625,61 @@ class Orchestrator:
             if float(newer.get("overall", 0.0)) > float(older.get("overall", 0.0)):
                 improving_streak += 1
 
+        tracked_categories = [
+            "code_quality",
+            "architecture_structure",
+            "maintainability",
+            "usability",
+            "ux_clarity",
+            "test_coverage",
+            "error_state_handling",
+            "empty_state_handling",
+            "loading_state_handling",
+        ]
+        category_latest_scores: Dict[str, int] = {}
+        category_deltas: Dict[str, int] = {}
+        category_trend_direction: Dict[str, str] = {}
+        persistent_low_categories: List[str] = []
+        stagnant_categories: List[str] = []
+        declining_categories: List[str] = []
+
+        for category in tracked_categories:
+            category_history: List[int] = []
+            for entry in history_entries:
+                scores_payload = entry.get("scores", {})
+                if not isinstance(scores_payload, dict):
+                    continue
+                value = scores_payload.get(category)
+                if value is None:
+                    continue
+                try:
+                    category_history.append(int(value))
+                except (TypeError, ValueError):
+                    continue
+
+            if not category_history:
+                continue
+
+            category_latest_scores[category] = int(category_history[-1])
+            if len(category_history) >= 2:
+                delta = int(category_history[-1]) - int(category_history[-2])
+                category_deltas[category] = delta
+                if delta > 0:
+                    category_trend_direction[category] = "improving"
+                elif delta < 0:
+                    category_trend_direction[category] = "declining"
+                    declining_categories.append(category)
+                else:
+                    category_trend_direction[category] = "stable"
+            else:
+                category_trend_direction[category] = "stable"
+
+            recent_window = category_history[-3:]
+            if len(recent_window) >= 3 and all(score <= 2 for score in recent_window):
+                persistent_low_categories.append(category)
+            if len(recent_window) >= 3 and max(recent_window) == min(recent_window):
+                stagnant_categories.append(category)
+
         return {
             "generated_at": utc_now_iso(),
             "job_id": job_id,
@@ -6981,6 +7697,12 @@ class Orchestrator:
             "previous_maturity_level": str(maturity_snapshot.get("previous_level", "")).strip(),
             "maturity_progression": str(maturity_snapshot.get("progression", "unchanged")).strip(),
             "improving_streak": improving_streak,
+            "category_latest_scores": category_latest_scores,
+            "category_deltas": category_deltas,
+            "category_trend_direction": category_trend_direction,
+            "persistent_low_categories": persistent_low_categories,
+            "stagnant_categories": stagnant_categories,
+            "declining_categories": declining_categories,
         }
 
     @staticmethod

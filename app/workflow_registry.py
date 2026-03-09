@@ -7,6 +7,8 @@ from typing import Dict, Set
 
 WORKFLOW_NODE_HANDLER_NAMES: Dict[str, str] = {
     "gh_read_issue": "_workflow_node_read_issue",
+    "if_label_match": "_workflow_node_if_label_match",
+    "loop_until_pass": "_workflow_node_loop_until_pass",
     "write_spec": "_workflow_node_write_spec",
     "gemini_plan": "_workflow_node_gemini_plan",
     "idea_to_product_brief": "_workflow_node_idea_to_product_brief",
@@ -38,4 +40,4 @@ WORKFLOW_NODE_HANDLER_NAMES: Dict[str, str] = {
     "create_pr": "_workflow_node_create_pr",
 }
 
-WORKFLOW_NODE_SKIP_AUTO_COMMIT: Set[str] = {"push_branch", "create_pr"}
+WORKFLOW_NODE_SKIP_AUTO_COMMIT: Set[str] = {"push_branch", "create_pr", "if_label_match", "loop_until_pass"}

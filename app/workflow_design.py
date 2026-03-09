@@ -50,6 +50,7 @@ SUPPORTED_NODE_TYPES: Dict[str, Dict[str, Any]] = {
 
 SUPPORTED_NODE_AGENT_PROFILES = {"", "auto", "primary", "fallback"}
 SUPPORTED_NODE_PLANNING_MODES = {"", "auto", "general", "big_picture", "dev_planning"}
+SUPPORTED_NODE_MATCH_MODES = {"", "any", "all", "none"}
 
 
 def default_workflow_template() -> Dict[str, Any]:
@@ -143,12 +144,16 @@ def schema_payload() -> Dict[str, Any]:
         "node_metadata_fields": [
             {"key": "agent_profile", "label": "AI 프로필", "applies_to": ["*"]},
             {"key": "planning_mode", "label": "Planning Mode", "applies_to": ["gemini_plan"]},
+            {"key": "match_labels", "label": "라벨 조건", "applies_to": ["if_label_match"]},
+            {"key": "match_mode", "label": "Match Mode", "applies_to": ["if_label_match"]},
+            {"key": "loop_max_iterations", "label": "Loop Max", "applies_to": ["loop_until_pass"]},
             {"key": "notes", "label": "운영 메모", "applies_to": ["*"]},
         ],
+        "node_match_modes": ["any", "all", "none"],
         "notes": [
-            "phase-1은 저장/검증 중심이며, 실행엔진 전환은 다음 단계에서 연결",
+            "phase-1은 edge-driven 실행을 지원하며 success/failure/always 분기를 따른다",
             "노드 type은 사전 정의 목록만 허용",
-            "if_label_match/loop_until_pass 노드는 분기/반복 설계용",
+            "if_label_match/loop_until_pass 노드는 control-flow 분기/반복용",
         ],
     }
 
@@ -222,6 +227,25 @@ def validate_workflow(workflow: Dict[str, Any]) -> Tuple[bool, List[str]]:
             errors.append(f"unsupported node.planning_mode: {planning_mode}")
         if planning_mode and planning_mode != "auto" and node_type != "gemini_plan":
             errors.append(f"node.planning_mode is only supported for gemini_plan: {node_id}")
+        match_labels = node.get("match_labels", "")
+        if match_labels is not None and not isinstance(match_labels, str):
+            errors.append(f"node.match_labels must be string: {node_id}")
+        match_mode = str(node.get("match_mode", "")).strip().lower()
+        if match_mode not in SUPPORTED_NODE_MATCH_MODES:
+            errors.append(f"unsupported node.match_mode: {match_mode}")
+        if match_mode and node_type != "if_label_match":
+            errors.append(f"node.match_mode is only supported for if_label_match: {node_id}")
+        raw_loop_max = node.get("loop_max_iterations", "")
+        if raw_loop_max not in {"", None}:
+            try:
+                loop_max = int(raw_loop_max)
+            except (TypeError, ValueError):
+                errors.append(f"node.loop_max_iterations must be integer: {node_id}")
+            else:
+                if node_type != "loop_until_pass":
+                    errors.append(f"node.loop_max_iterations is only supported for loop_until_pass: {node_id}")
+                elif loop_max < 1 or loop_max > 10:
+                    errors.append(f"node.loop_max_iterations out of range(1-10): {node_id}")
         notes = node.get("notes", "")
         if notes is not None and not isinstance(notes, str):
             errors.append(f"node.notes must be string: {node_id}")
@@ -234,6 +258,7 @@ def validate_workflow(workflow: Dict[str, Any]) -> Tuple[bool, List[str]]:
     graph: Dict[str, List[str]] = {nid: [] for nid in node_id_set}
     indegree: Dict[str, int] = {nid: 0 for nid in node_id_set}
 
+    outgoing_events: set[tuple[str, str]] = set()
     for edge in edges:
         if not isinstance(edge, dict):
             errors.append("edge must be object")
@@ -250,6 +275,10 @@ def validate_workflow(workflow: Dict[str, Any]) -> Tuple[bool, List[str]]:
         if event not in {"success", "failure", "always"}:
             errors.append(f"unsupported edge event: {event}")
             continue
+        if (src, event) in outgoing_events:
+            errors.append(f"duplicate edge event from node: {src} on {event}")
+            continue
+        outgoing_events.add((src, event))
         graph[src].append(dst)
         indegree[dst] += 1
 
@@ -268,6 +297,11 @@ def validate_workflow(workflow: Dict[str, Any]) -> Tuple[bool, List[str]]:
                 if indegree[nxt] == 0:
                     queue.append(nxt)
         if visited != len(node_id_set):
-            errors.append("workflow graph has cycle(s)")
+            has_loop_control = any(
+                isinstance(node, dict) and str(node.get("type", "")).strip() == "loop_until_pass"
+                for node in nodes
+            )
+            if not has_loop_control:
+                errors.append("workflow graph has cycle(s) without loop_until_pass")
 
     return len(errors) == 0, errors

@@ -293,7 +293,7 @@ class SQLiteJobStore(JobStore):
                         job_id, repository, issue_number, issue_title, issue_url,
                         status, stage, attempt, max_attempts, branch_name, pr_url,
                     error_message, log_file, created_at, updated_at, started_at,
-                    finished_at, app_code, track, workflow_id, heartbeat_at,
+                    finished_at, app_code, track, workflow_id, source_repository, heartbeat_at,
                     recovery_status, recovery_reason, recovery_count, last_recovered_at,
                     manual_resume_mode, manual_resume_node_id, manual_resume_requested_at,
                     manual_resume_note
@@ -302,7 +302,7 @@ class SQLiteJobStore(JobStore):
                     :job_id, :repository, :issue_number, :issue_title, :issue_url,
                     :status, :stage, :attempt, :max_attempts, :branch_name, :pr_url,
                     :error_message, :log_file, :created_at, :updated_at, :started_at,
-                    :finished_at, :app_code, :track, :workflow_id, :heartbeat_at,
+                    :finished_at, :app_code, :track, :workflow_id, :source_repository, :heartbeat_at,
                     :recovery_status, :recovery_reason, :recovery_count, :last_recovered_at,
                     :manual_resume_mode, :manual_resume_node_id, :manual_resume_requested_at,
                     :manual_resume_note
@@ -363,6 +363,7 @@ class SQLiteJobStore(JobStore):
                     app_code=:app_code,
                     track=:track,
                     workflow_id=:workflow_id,
+                    source_repository=:source_repository,
                     heartbeat_at=:heartbeat_at,
                     recovery_status=:recovery_status,
                     recovery_reason=:recovery_reason,
@@ -470,6 +471,7 @@ class SQLiteJobStore(JobStore):
                     app_code TEXT NOT NULL DEFAULT 'default',
                     track TEXT NOT NULL DEFAULT 'enhance',
                     workflow_id TEXT NOT NULL DEFAULT '',
+                    source_repository TEXT NOT NULL DEFAULT '',
                     heartbeat_at TEXT,
                     recovery_status TEXT NOT NULL DEFAULT '',
                     recovery_reason TEXT NOT NULL DEFAULT '',
@@ -489,6 +491,10 @@ class SQLiteJobStore(JobStore):
             if "workflow_id" not in columns:
                 conn.execute(
                     "ALTER TABLE jobs ADD COLUMN workflow_id TEXT NOT NULL DEFAULT ''"
+                )
+            if "source_repository" not in columns:
+                conn.execute(
+                    "ALTER TABLE jobs ADD COLUMN source_repository TEXT NOT NULL DEFAULT ''"
                 )
             if "heartbeat_at" not in columns:
                 conn.execute("ALTER TABLE jobs ADD COLUMN heartbeat_at TEXT")
@@ -576,6 +582,7 @@ class SQLiteJobStore(JobStore):
             app_code=str(row["app_code"]),
             track=str(row["track"]),
             workflow_id=str(row["workflow_id"] or ""),
+            source_repository=str(row["source_repository"] or ""),
             heartbeat_at=row["heartbeat_at"],
             recovery_status=str(row["recovery_status"] or ""),
             recovery_reason=str(row["recovery_reason"] or ""),
