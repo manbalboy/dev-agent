@@ -1014,6 +1014,56 @@ code {
   gap: 8px;
 }
 
+.workflow-diff-box {
+  border: 1px solid var(--panel-border);
+  border-radius: 16px;
+  background: var(--panel-bg);
+  padding: 16px 18px;
+}
+
+.workflow-diff-empty strong {
+  display: block;
+  margin-bottom: 6px;
+}
+
+.workflow-diff-summary {
+  display: grid;
+  gap: 12px;
+}
+
+.workflow-diff-group {
+  border: 1px solid var(--panel-border);
+  border-radius: 14px;
+  background: var(--panel-muted-bg);
+  padding: 12px 14px;
+}
+
+.workflow-diff-group h4 {
+  margin: 0 0 8px;
+  font-size: 0.95rem;
+}
+
+.workflow-diff-group ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.workflow-diff-group li + li {
+  margin-top: 6px;
+}
+
+.workflow-diff-positive {
+  border-color: rgba(35, 140, 64, 0.28);
+}
+
+.workflow-diff-negative {
+  border-color: rgba(198, 40, 40, 0.28);
+}
+
+.workflow-diff-warning {
+  border-color: rgba(176, 108, 0, 0.28);
+}
+
 .workflow-editor-chip {
   display: inline-flex;
   align-items: center;

@@ -683,6 +683,7 @@
         schema: null,
         selectedWorkflowId: "",
         currentWorkflow: null,
+        baselineWorkflow: null,
         resultMessage: "",
         resultIsError: false,
       };
@@ -757,6 +758,140 @@
           workflow.entry_node_id = String(workflow.nodes[0].id || "").trim();
         }
         return workflow;
+      }
+
+      function workflowNodeSummary(node) {
+        if (!node || typeof node !== "object") return "(unknown node)";
+        const title = String(node.title || "").trim();
+        return `${node.id || "?"} · ${title || node.type || "unknown"}`;
+      }
+
+      function workflowEdgeKey(edge) {
+        return `${String(edge?.from || "").trim()}|${String(edge?.to || "").trim()}|${String(edge?.on || "success").trim() || "success"}`;
+      }
+
+      function buildWorkflowDiff(baseInput, currentInput) {
+        const base = normalizeWorkflowDefinition(baseInput || workflowEditorBaseTemplate());
+        const current = normalizeWorkflowDefinition(currentInput || workflowEditorBaseTemplate());
+        const metaChanges = [];
+        const warnings = [];
+        const additions = [];
+        const removals = [];
+        const updates = [];
+
+        const scalarFields = [
+          ["workflow_id", "Workflow ID"],
+          ["name", "이름"],
+          ["description", "설명"],
+          ["version", "버전"],
+          ["entry_node_id", "Entry Node"],
+        ];
+        scalarFields.forEach(([key, label]) => {
+          const beforeValue = String(base[key] ?? "").trim();
+          const afterValue = String(current[key] ?? "").trim();
+          if (beforeValue !== afterValue) {
+            metaChanges.push(`${label}: ${beforeValue || "(empty)"} -> ${afterValue || "(empty)"}`);
+          }
+        });
+        if (base.entry_node_id !== current.entry_node_id && current.entry_node_id) {
+          warnings.push(`Entry node가 ${base.entry_node_id || "(empty)"}에서 ${current.entry_node_id}로 변경되었습니다.`);
+        }
+
+        const baseNodes = new Map((base.nodes || []).map((node) => [node.id, node]));
+        const currentNodes = new Map((current.nodes || []).map((node) => [node.id, node]));
+        current.nodes.forEach((node) => {
+          if (!baseNodes.has(node.id)) {
+            additions.push(`노드 추가: ${workflowNodeSummary(node)}`);
+            return;
+          }
+          const beforeNode = baseNodes.get(node.id);
+          const nodeChanges = [];
+          [
+            ["type", "type"],
+            ["title", "title"],
+            ["agent_profile", "agent_profile"],
+            ["planning_mode", "planning_mode"],
+            ["match_labels", "match_labels"],
+            ["match_mode", "match_mode"],
+            ["loop_max_iterations", "loop_max_iterations"],
+            ["notes", "notes"],
+          ].forEach(([key, label]) => {
+            const beforeValue = String(beforeNode?.[key] ?? "").trim();
+            const afterValue = String(node?.[key] ?? "").trim();
+            if (beforeValue !== afterValue) {
+              nodeChanges.push(`${label}: ${beforeValue || "(empty)"} -> ${afterValue || "(empty)"}`);
+            }
+          });
+          if (nodeChanges.length) {
+            updates.push(`노드 변경: ${workflowNodeSummary(node)} | ${nodeChanges.join(", ")}`);
+          }
+        });
+        base.nodes.forEach((node) => {
+          if (!currentNodes.has(node.id)) {
+            removals.push(`노드 삭제: ${workflowNodeSummary(node)}`);
+            warnings.push(`노드 삭제 감지: ${workflowNodeSummary(node)}`);
+          }
+        });
+
+        const baseEdges = new Map((base.edges || []).map((edge) => [workflowEdgeKey(edge), edge]));
+        const currentEdges = new Map((current.edges || []).map((edge) => [workflowEdgeKey(edge), edge]));
+        current.edges.forEach((edge) => {
+          if (!baseEdges.has(workflowEdgeKey(edge))) {
+            additions.push(`엣지 추가: ${edge.from} -[${edge.on}]-> ${edge.to}`);
+          }
+        });
+        base.edges.forEach((edge) => {
+          if (!currentEdges.has(workflowEdgeKey(edge))) {
+            removals.push(`엣지 삭제: ${edge.from} -[${edge.on}]-> ${edge.to}`);
+            warnings.push(`엣지 제거 감지: ${edge.from} -[${edge.on}]-> ${edge.to}`);
+          }
+        });
+
+        return {
+          metaChanges,
+          additions,
+          removals,
+          updates,
+          warnings,
+          changed:
+            metaChanges.length > 0
+            || additions.length > 0
+            || removals.length > 0
+            || updates.length > 0,
+        };
+      }
+
+      function renderWorkflowDiffPreview(currentWorkflow) {
+        const container = document.getElementById("workflow-editor-diff");
+        if (!container) return;
+        const diff = buildWorkflowDiff(workflowEditorState.baselineWorkflow, currentWorkflow);
+        if (!diff.changed) {
+          container.innerHTML = `
+            <div class="workflow-diff-empty">
+              <strong>변경 없음</strong>
+              <p class="hint">현재 편집본이 마지막 불러오기/저장 기준과 동일합니다.</p>
+            </div>
+          `;
+          return;
+        }
+        const renderList = (title, items, tone = "") => {
+          if (!Array.isArray(items) || items.length === 0) return "";
+          return `
+            <div class="workflow-diff-group ${tone}">
+              <h4>${esc(title)}</h4>
+              <ul>${items.map((item) => `<li>${esc(item)}</li>`).join("")}</ul>
+            </div>
+          `;
+        };
+        container.innerHTML = `
+          <div class="workflow-diff-summary">
+            ${renderList("메타데이터 변경", diff.metaChanges)}
+            ${renderList("추가", diff.additions, "workflow-diff-positive")}
+            ${renderList("수정", diff.updates)}
+            ${renderList("삭제", diff.removals, "workflow-diff-negative")}
+            ${renderList("주의", diff.warnings, "workflow-diff-warning")}
+          </div>
+        `;
       }
 
       function nextWorkflowNodeId(nodes) {
@@ -1280,12 +1415,15 @@
         node.classList.toggle("text-error", isError);
       }
 
-      function renderWorkflowEditor(workflowInput) {
+      function renderWorkflowEditor(workflowInput, options = {}) {
         const box = document.getElementById("workflow-editor-box");
         if (!box) return;
         const workflow = normalizeWorkflowDefinition(workflowInput);
         workflowEditorState.currentWorkflow = cloneWorkflowDefinition(workflow);
         workflowEditorState.selectedWorkflowId = workflow.workflow_id || "";
+        if (options.resetBaseline || !workflowEditorState.baselineWorkflow) {
+          workflowEditorState.baselineWorkflow = cloneWorkflowDefinition(workflow);
+        }
         const schema = workflowEditorState.schema || { node_types: {}, supported_edge_events: ["success", "failure", "always"] };
         const nodeTypes = schema.node_types || {};
         const agentProfiles = Array.isArray(schema.node_agent_profiles) ? schema.node_agent_profiles : ["auto", "primary", "fallback"];
@@ -1449,6 +1587,15 @@
               </div>
             </div>
             <div id="workflow-editor-result" class="hint workflow-config-result${workflowEditorState.resultIsError ? " text-error" : ""}">${esc(workflowEditorState.resultMessage || "")}</div>
+            <div class="workflow-editor-section">
+              <div class="workflow-settings-head">
+                <div>
+                  <h3>Diff / Preview</h3>
+                  <p class="hint">마지막 불러오기 또는 저장 기준으로 변경점을 요약합니다.</p>
+                </div>
+              </div>
+              <div id="workflow-editor-diff" class="workflow-diff-box"></div>
+            </div>
             <div class="workflow-editor-schema">${nodeTypeChips}${metadataChips}</div>
           </div>
         `;
@@ -1459,6 +1606,7 @@
             ? workflow.entry_node_id
             : String(workflow.nodes[0]?.id || "");
         }
+        renderWorkflowDiffPreview(workflow);
       }
 
       async function loadWorkflowSchema() {
@@ -1476,7 +1624,8 @@
               || workflowCatalogState.workflows.find((item) => item.workflow_id === workflowEditorState.selectedWorkflowId)
                 || workflowCatalogState.workflows.find((item) => item.workflow_id === workflowCatalogState.defaultWorkflowId)
                 || workflowCatalogState.workflows[0]
-                || workflowEditorBaseTemplate()
+                || workflowEditorBaseTemplate(),
+            { resetBaseline: true }
           );
         } catch {
           setWorkflowConfigResult("workflow schema를 불러오지 못했습니다.", true);
@@ -1502,7 +1651,8 @@
             workflowCatalogState.workflows.find((item) => item.workflow_id === targetWorkflowId)
             || workflowCatalogState.workflows.find((item) => item.workflow_id === workflowCatalogState.defaultWorkflowId)
             || workflowCatalogState.workflows[0]
-            || workflowEditorBaseTemplate()
+            || workflowEditorBaseTemplate(),
+            { resetBaseline: true }
           );
           setWorkflowConfigResult(`기본 workflow: ${workflowCatalogState.defaultWorkflowId || "-"}`);
         } catch {
@@ -1629,7 +1779,7 @@
               setWorkflowEditorResult("선택한 workflow를 찾지 못했습니다.", true);
               return;
             }
-            renderWorkflowEditor(selected);
+            renderWorkflowEditor(selected, { resetBaseline: true });
             setWorkflowEditorResult(`workflow 불러오기 완료: ${selected.workflow_id}`);
             return;
           }
@@ -1642,14 +1792,14 @@
             const copied = cloneWorkflowDefinition(base);
             copied.workflow_id = "";
             copied.name = copied.name ? `${copied.name} Copy` : "";
-            renderWorkflowEditor(copied);
+            renderWorkflowEditor(copied, { resetBaseline: true });
             setWorkflowEditorResult("기본 workflow를 편집용 초안으로 복사했습니다.");
             return;
           }
 
           const newButton = target.closest("#workflow-editor-new");
           if (newButton instanceof HTMLButtonElement) {
-            renderWorkflowEditor(workflowEditorBaseTemplate());
+            renderWorkflowEditor(workflowEditorBaseTemplate(), { resetBaseline: true });
             setWorkflowEditorResult("새 workflow 초안을 만들었습니다.");
             return;
           }
@@ -1786,7 +1936,16 @@
             const workflow = readWorkflowEditorDom();
             renderWorkflowEditor(workflow);
             setWorkflowEditorResult("노드 메타데이터 변경을 반영했습니다.");
+            return;
           }
+          renderWorkflowDiffPreview(readWorkflowEditorDom());
+        });
+
+        editorBox?.addEventListener("input", (event) => {
+          const target = event.target;
+          if (!(target instanceof Element)) return;
+          if (!target.closest("#workflow-editor-box")) return;
+          renderWorkflowDiffPreview(readWorkflowEditorDom());
         });
       }
 
