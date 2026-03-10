@@ -60,6 +60,7 @@ def build_workflow_artifact_paths(repository_path: Path) -> Dict[str, Path]:
         "conventions": docs_dir / "CONVENTIONS.json",
         "memory_selection": docs_dir / "MEMORY_SELECTION.json",
         "memory_context": docs_dir / "MEMORY_CONTEXT.json",
+        "memory_trace": docs_dir / "MEMORY_TRACE.json",
         "memory_feedback": docs_dir / "MEMORY_FEEDBACK.json",
         "memory_rankings": docs_dir / "MEMORY_RANKINGS.json",
         "strategy_shadow_report": docs_dir / "STRATEGY_SHADOW_REPORT.json",

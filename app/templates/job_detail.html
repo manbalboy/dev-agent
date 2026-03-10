@@ -40,6 +40,8 @@
         <dt>단계</dt><dd id="job-stage">{{ job.stage }}</dd>
         <dt>앱</dt><dd id="job-app">{{ job.app_code or "default" }}</dd>
         <dt>트랙</dt><dd id="job-track">{{ job.track or "enhance" }}</dd>
+        <dt>워크플로우</dt><dd id="job-workflow-id">{{ job.workflow_id or "-" }}</dd>
+        <dt>선택 소스</dt><dd id="job-workflow-source">-</dd>
         <dt>시도 횟수</dt><dd id="job-attempt">{{ job.attempt }} / {{ job.max_attempts }}</dd>
         <dt>저장소</dt><dd id="job-repo">{{ job.repository }}</dd>
         <dt>이슈</dt><dd id="job-issue"><a href="{{ job.issue_url }}" target="_blank" rel="noreferrer">#{{ job.issue_number }} - {{ job.issue_title }}</a></dd>
@@ -97,7 +99,10 @@
           </div>
         </section>
         <section id="detail-tab-workflow" class="detail-tab-panel">
+          <div id="workflow-config-board" class="failure-summary"></div>
+          <div id="workflow-fallback-board" class="failure-summary"></div>
           <div id="workflow-resume-board" class="failure-summary"></div>
+          <div id="workflow-memory-board" class="failure-summary"></div>
           <section id="workflow-manual-panel" class="workflow-manual-panel">
             <div class="panel-head">
               <h3>수동 재개</h3>
@@ -157,7 +162,9 @@
       let workspaceMdSignature = "";
       let nodeRunsCache = [];
       let resumeStateCache = null;
+      let workflowRuntimeCache = null;
       let runtimeSignalsCache = null;
+      let memoryTraceCache = null;
       let manualRetryOptionsCache = null;
       let currentJobAttempt = 1;
       let currentStageCode = "queued";
@@ -240,6 +247,8 @@
         document.getElementById("job-track").textContent = job.track || "enhance";
         document.getElementById("job-attempt").textContent = `${job.attempt} / ${job.max_attempts}`;
         currentWorkflowId = String(job.workflow_id || "");
+        const workflowIdNode = document.getElementById("job-workflow-id");
+        if (workflowIdNode) workflowIdNode.textContent = currentWorkflowId || "-";
         document.getElementById("job-repo").textContent = job.repository;
         document.getElementById("job-branch").textContent = job.branch_name;
         document.getElementById("job-error").textContent = job.error_message || "-";
@@ -264,6 +273,24 @@
         if (stopButton) {
           stopButton.disabled = !(job.status === "queued" || job.status === "running");
         }
+      }
+
+      function workflowResolutionSourceLabel(source) {
+        const value = String(source || "").trim().toLowerCase();
+        if (value === "job") return "job override";
+        if (value === "app") return "app mapping";
+        if (value === "default") return "default";
+        return value || "-";
+      }
+
+      function renderWorkflowMeta(workflowRuntime) {
+        const runtime = workflowRuntime && typeof workflowRuntime === "object" ? workflowRuntime : {};
+        const resolvedWorkflowId = String(runtime.resolved_workflow_id || currentWorkflowId || "").trim();
+        currentWorkflowId = resolvedWorkflowId;
+        const workflowIdNode = document.getElementById("job-workflow-id");
+        if (workflowIdNode) workflowIdNode.textContent = resolvedWorkflowId || "-";
+        const workflowSourceNode = document.getElementById("job-workflow-source");
+        if (workflowSourceNode) workflowSourceNode.textContent = workflowResolutionSourceLabel(runtime.resolution_source);
       }
 
       function renderRuntimeHealth(runtimeSignals) {
@@ -307,6 +334,21 @@
           : "none";
         const recommendedNodeType = runtime.recommended_node_type || "-";
         const resumeReason = runtime.resume_reason || "-";
+        const retrievalEnabled = runtime.retrieval_enabled === true;
+        const retrievalSource = runtime.retrieval_source || (retrievalEnabled ? "-" : "disabled");
+        const retrievalFallback = runtime.retrieval_fallback_used === true;
+        const retrievalSelectedTotal = runtime.retrieval_selected_total !== undefined && runtime.retrieval_selected_total !== null
+          ? String(runtime.retrieval_selected_total)
+          : "0";
+        const retrievalGeneratedAt = runtime.retrieval_generated_at
+          ? formatKstDateTime(runtime.retrieval_generated_at)
+          : "-";
+        const retrievalRouteCounts = runtime.retrieval_route_counts && typeof runtime.retrieval_route_counts === "object"
+          ? runtime.retrieval_route_counts
+          : {};
+        const retrievalRouteSummary = Object.entries(retrievalRouteCounts)
+          .map(([route, count]) => `${route} ${count}`)
+          .join(" · ") || "-";
 
         node.innerHTML = `
           <article class="runtime-health-card">
@@ -354,6 +396,17 @@
               <dt>품질 추세</dt><dd>${esc(qualityTrend)}</dd>
               <dt>직전 대비</dt><dd>${esc(qualityDelta)}</dd>
               <dt>리뷰 라운드</dt><dd>${esc(reviewRounds)}</dd>
+            </dl>
+          </article>
+          <article class="runtime-health-card">
+            <h3>Memory Retrieval</h3>
+            <dl class="runtime-health-list">
+              <dt>활성</dt><dd>${retrievalEnabled ? `<span class="badge status-done">enabled</span>` : `<span class="badge status-queued">disabled</span>`}</dd>
+              <dt>소스</dt><dd>${esc(retrievalSource)}</dd>
+              <dt>fallback</dt><dd>${retrievalFallback ? `<span class="badge status-running">yes</span>` : `<span class="badge status-done">no</span>`}</dd>
+              <dt>선택 수</dt><dd>${esc(retrievalSelectedTotal)}</dd>
+              <dt>route</dt><dd>${esc(retrievalRouteSummary)}</dd>
+              <dt>갱신</dt><dd>${esc(retrievalGeneratedAt)}</dd>
             </dl>
           </article>
         `;
@@ -980,6 +1033,12 @@
         return workflowNodeLabel(nodeRun?.node_type);
       }
 
+      function workflowNodeDefinitionLabel(node) {
+        const title = String(node?.title || "").trim();
+        if (title) return title;
+        return workflowNodeLabel(node?.type);
+      }
+
       function workflowResumeNodeLabel(node) {
         const title = String(node?.title || node?.node_title || "").trim();
         if (title) return title;
@@ -1019,6 +1078,69 @@
         return "실행 중";
       }
 
+      function renderWorkflowConfigBoard(workflowRuntime) {
+        const board = document.getElementById("workflow-config-board");
+        if (!board) return;
+        const runtime = workflowRuntime && typeof workflowRuntime === "object" ? workflowRuntime : null;
+        if (!runtime) {
+          board.innerHTML = `<p class="failure-empty">workflow 메타데이터를 준비 중...</p>`;
+          return;
+        }
+
+        const requested = String(runtime.requested_workflow_id || "").trim();
+        const resolved = String(runtime.resolved_workflow_id || "").trim();
+        const nodeCount = Array.isArray(runtime.nodes) ? runtime.nodes.length : 0;
+        const warning = String(runtime.selection_warning || "").trim();
+        const executionBadge = runtime.uses_fixed_pipeline
+          ? `<span class="badge status-failed">fixed pipeline</span>`
+          : `<span class="badge status-done">workflow</span>`;
+        board.innerHTML = `
+          <h3>실행 Workflow</h3>
+          <ul class="failure-list">
+            <li class="failure-item">
+              <span class="failure-type">현재 실행</span>
+              <span class="failure-text">${esc(resolved || "-")} ${executionBadge}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">선택 소스</span>
+              <span class="failure-text">${esc(workflowResolutionSourceLabel(runtime.resolution_source))}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">job override</span>
+              <span class="failure-text">${esc(requested || "-")}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">노드 수</span>
+              <span class="failure-text">${esc(String(nodeCount))}</span>
+            </li>
+            ${warning ? `<li class="failure-item type-warn"><span class="failure-type">선택 경고</span><span class="failure-text">${esc(warning)}</span></li>` : ""}
+          </ul>
+        `;
+      }
+
+      function renderWorkflowFallbackBoard(workflowRuntime) {
+        const board = document.getElementById("workflow-fallback-board");
+        if (!board) return;
+        const runtime = workflowRuntime && typeof workflowRuntime === "object" ? workflowRuntime : null;
+        const events = Array.isArray(runtime?.fallback_events) ? runtime.fallback_events : [];
+        if (!events.length) {
+          board.innerHTML = `<p class="failure-empty">workflow fallback / validation 경고가 없습니다.</p>`;
+          return;
+        }
+
+        board.innerHTML = `
+          <h3>Fallback / Validation</h3>
+          <ul class="failure-list">
+            ${events.map((item) => `
+              <li class="failure-item type-${esc(item.severity || "warn")}">
+                <span class="failure-type">${esc(item.title || item.kind || "workflow")}</span>
+                <span class="failure-text">${esc(item.message || "-")}</span>
+              </li>
+            `).join("")}
+          </ul>
+        `;
+      }
+
       function renderWorkflowResumeBoard(resumeState) {
         const board = document.getElementById("workflow-resume-board");
         if (!board) return;
@@ -1056,6 +1178,83 @@
               <span class="failure-text">${esc(nextLabel)}${state.mode === "resume" ? ` · 재사용 ${skippedCount}개` : ""}</span>
             </li>
           </ul>
+        `;
+      }
+
+      function renderWorkflowMemoryBoard(memoryTrace) {
+        const board = document.getElementById("workflow-memory-board");
+        if (!board) return;
+        const trace = memoryTrace && typeof memoryTrace === "object" ? memoryTrace : null;
+        if (!trace || !Object.keys(trace).length) {
+          board.innerHTML = `<p class="failure-empty">memory retrieval trace가 아직 없습니다.</p>`;
+          return;
+        }
+
+        if (trace.enabled === false) {
+          board.innerHTML = `
+            <h3>Memory Retrieval</h3>
+            <ul class="failure-list">
+              <li class="failure-item">
+                <span class="failure-type">상태</span>
+                <span class="failure-text"><span class="badge status-queued">disabled</span></span>
+              </li>
+            </ul>
+          `;
+          return;
+        }
+
+        const source = String(trace.source || "-").trim();
+        const fallbackUsed = Boolean(trace.fallback_used);
+        const selectedTotal = Number(trace.selected_total || 0);
+        const corpusCounts = trace.corpus_counts && typeof trace.corpus_counts === "object"
+          ? trace.corpus_counts
+          : {};
+        const corpusSummary = Object.entries(corpusCounts)
+          .map(([kind, count]) => `${kind} ${count}`)
+          .join(" · ") || "-";
+        const routes = trace.routes && typeof trace.routes === "object" ? trace.routes : {};
+        const routeHtml = Object.entries(routes).map(([routeName, routePayload]) => {
+          const payload = routePayload && typeof routePayload === "object" ? routePayload : {};
+          const items = Array.isArray(payload.selected_items) ? payload.selected_items : [];
+          const kinds = payload.kind_counts && typeof payload.kind_counts === "object"
+            ? Object.entries(payload.kind_counts).map(([kind, count]) => `${kind} ${count}`).join(" · ")
+            : "-";
+          const itemsHtml = items.length
+            ? items.map((item) => `<li class="failure-item">
+                <span class="failure-type">${esc(String(item.kind || "-"))}</span>
+                <span class="failure-text">${esc(String(item.id || "-"))}${item.summary ? ` · ${esc(String(item.summary || ""))}` : ""}</span>
+              </li>`).join("")
+            : `<li class="failure-item"><span class="failure-type">${esc(routeName)}</span><span class="failure-text">선택 없음</span></li>`;
+          return `
+            <section class="stage-snapshot">
+              <h4>${esc(routeName)} · selected ${esc(String(payload.selected_count || 0))}</h4>
+              <p class="hint">${esc(kinds)}</p>
+              <ul class="failure-list">${itemsHtml}</ul>
+            </section>
+          `;
+        }).join("");
+
+        board.innerHTML = `
+          <h3>Memory Retrieval</h3>
+          <ul class="failure-list">
+            <li class="failure-item">
+              <span class="failure-type">소스</span>
+              <span class="failure-text">${esc(source)}${fallbackUsed ? ` · <span class="badge status-running">fallback</span>` : ` · <span class="badge status-done">primary</span>`}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">선택 합계</span>
+              <span class="failure-text">${esc(String(selectedTotal))}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">corpus</span>
+              <span class="failure-text">${esc(corpusSummary)}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">갱신</span>
+              <span class="failure-text">${esc(formatKstDateTime(trace.generated_at || ""))}</span>
+            </li>
+          </ul>
+          ${routeHtml || `<p class="failure-empty">route trace가 없습니다.</p>`}
         `;
       }
 
@@ -1231,12 +1430,21 @@
         return map[code] || "gh_read_issue";
       }
 
+      function parseWorkflowNodeStartMessage(message) {
+        const matched = String(message || "").match(/^Workflow node start:\s+(\S+)\s+\(([^)]+)\)/);
+        if (!matched) return null;
+        return {
+          nodeId: String(matched[1] || "").trim(),
+          nodeType: String(matched[2] || "").trim(),
+        };
+      }
+
       function currentWorkflowNodeFromLogs(entriesNewestFirst) {
         for (const entry of entriesNewestFirst || []) {
-          const m = String(entry.message || "").match(/^Workflow node start:\s+\S+\s+\(([^)]+)\)/);
-          if (m) return m[1];
+          const parsed = parseWorkflowNodeStartMessage(entry.message);
+          if (parsed) return parsed;
         }
-        return "";
+        return null;
       }
 
       function visitedWorkflowNodes(entriesNewestFirst) {
@@ -1244,16 +1452,35 @@
         const seen = new Set();
         const chronological = [...(entriesNewestFirst || [])].reverse();
         for (const entry of chronological) {
-          const m = String(entry.message || "").match(/^Workflow node start:\s+\S+\s+\(([^)]+)\)/);
-          if (!m) continue;
-          const node = m[1];
-          const key = `${node}:${nodes.length}`;
+          const parsed = parseWorkflowNodeStartMessage(entry.message);
+          if (!parsed) continue;
+          const key = parsed.nodeId || parsed.nodeType;
           if (!seen.has(key)) {
             seen.add(key);
-            nodes.push(node);
+            nodes.push(parsed);
           }
         }
         return nodes;
+      }
+
+      function workflowNodeMatchesMarker(node, marker) {
+        if (!node || !marker) return false;
+        const nodeId = String(node.id || "").trim();
+        const nodeType = String(node.type || "").trim();
+        const markerId = String(marker.nodeId || "").trim();
+        const markerType = String(marker.nodeType || "").trim();
+        if (markerId && nodeId && markerId === nodeId) return true;
+        return Boolean(markerType) && markerType === nodeType;
+      }
+
+      function workflowNodesForLane() {
+        const runtime = workflowRuntimeCache && typeof workflowRuntimeCache === "object"
+          ? workflowRuntimeCache
+          : null;
+        if (!runtime || runtime.uses_fixed_pipeline) return [];
+        return Array.isArray(runtime.nodes)
+          ? runtime.nodes.filter((item) => item && (item.id || item.type))
+          : [];
       }
 
       function renderWorkflowLane(entriesNewestFirst, stageCode) {
@@ -1262,7 +1489,94 @@
 
         const latestRuns = workflowNodeRunsForLatestAttempt(nodeRunsCache);
         const resumeState = (resumeStateCache && typeof resumeStateCache === "object") ? resumeStateCache : {};
+        const runtimeNodes = workflowNodesForLane();
+        renderWorkflowConfigBoard(workflowRuntimeCache);
+        renderWorkflowFallbackBoard(workflowRuntimeCache);
         renderWorkflowResumeBoard(resumeState);
+        renderWorkflowMemoryBoard(memoryTraceCache);
+        if (runtimeNodes.length) {
+          const latestAttempt = latestRuns.length ? Number(latestRuns[0]?.attempt || currentJobAttempt || 1) : (currentJobAttempt || 1);
+          const runsByNodeId = new Map();
+          const runsByType = new Map();
+          for (const item of latestRuns) {
+            const nodeId = String(item?.node_id || "").trim();
+            const nodeType = String(item?.node_type || "").trim();
+            if (nodeId) runsByNodeId.set(nodeId, item);
+            if (nodeType && !runsByType.has(nodeType)) runsByType.set(nodeType, item);
+          }
+          const reusedNodeIds = new Set(
+            Array.isArray(resumeState.skipped_nodes) && resumeState.mode === "resume"
+              ? resumeState.skipped_nodes
+                  .map((item) => String(item?.id || "").trim())
+                  .filter(Boolean)
+              : []
+          );
+          const currentMarker = currentWorkflowNodeFromLogs(entriesNewestFirst)
+            || {
+              nodeId: String(resumeState.resume_from_node_id || "").trim(),
+              nodeType: String(resumeState.resume_from_node_type || stageToWorkflowNode(stageCode) || "").trim(),
+            };
+          let doneCount = 0;
+          let failedCount = 0;
+          let runningCount = 0;
+          let reusedCount = 0;
+          let currentLabel = "";
+          const rows = runtimeNodes.map((node, idx) => {
+            const nodeId = String(node.id || "").trim();
+            const nodeType = String(node.type || "").trim();
+            const matchedRun = (nodeId ? runsByNodeId.get(nodeId) : null) || runsByType.get(nodeType) || null;
+            let statusClass = "queued";
+            let statusLabel = "대기";
+            if (reusedNodeIds.has(nodeId)) {
+              statusClass = "done";
+              statusLabel = "재사용";
+              doneCount += 1;
+              reusedCount += 1;
+            } else if (matchedRun) {
+              statusClass = workflowRunStatusClass(matchedRun?.status);
+              statusLabel = workflowRunStatusLabel(matchedRun?.status);
+              if (statusClass === "done") doneCount += 1;
+              if (statusClass === "failed" || statusClass === "interrupted") failedCount += 1;
+              if (statusClass === "running") runningCount += 1;
+            } else if (workflowNodeMatchesMarker(node, currentMarker)) {
+              statusClass = "running";
+              statusLabel = "현재";
+              runningCount += 1;
+            }
+            if (!currentLabel && statusClass === "running") {
+              currentLabel = workflowNodeDefinitionLabel(node);
+            }
+            return `<li class="workflow-lane-item ${statusClass}">
+              <span class="workflow-lane-index">${idx + 1}</span>
+              <span class="workflow-lane-label">${esc(workflowNodeDefinitionLabel(node))}</span>
+              <span class="workflow-lane-state badge status-${statusClass}">${esc(statusLabel)}</span>
+            </li>`;
+          }).join("");
+          const sourceLabel = workflowRuntimeCache?.resolution_source
+            ? `source: ${esc(workflowResolutionSourceLabel(workflowRuntimeCache.resolution_source))} · `
+            : "";
+          const workflowHint = currentWorkflowId ? `workflow: ${esc(currentWorkflowId)} · ` : "";
+          board.innerHTML = `<article class="task-log-card user-log-card">
+            <header class="task-log-head">
+              <div class="task-log-title">
+                <strong>워크플로우 진행 상태</strong>
+                <span class="hint">${workflowHint}${sourceLabel}attempt ${latestAttempt}${currentLabel ? ` · 현재 노드: ${esc(currentLabel)}` : ""}</span>
+              </div>
+            </header>
+            <section class="stage-snapshot">
+              <div class="workflow-lane-summary">
+                <span>성공 <strong>${doneCount}</strong></span>
+                <span>실패 <strong>${failedCount}</strong></span>
+                <span>실행 중 <strong>${runningCount}</strong></span>
+                ${reusedCount > 0 ? `<span>재사용 <strong>${reusedCount}</strong></span>` : ""}
+                <span>전체 <strong>${runtimeNodes.length}</strong></span>
+              </div>
+              <ul class="workflow-lane-list">${rows}</ul>
+            </section>
+          </article>`;
+          return;
+        }
+
         if (latestRuns.length) {
           const latestAttempt = Number(latestRuns[0]?.attempt || currentJobAttempt || 1);
           const reusedRows = Array.isArray(resumeState.skipped_nodes) && resumeState.mode === "resume"
@@ -1316,14 +1630,16 @@
 
         const order = defaultWorkflowNodeOrder();
         const visited = visitedWorkflowNodes(entriesNewestFirst);
-        const current = currentWorkflowNodeFromLogs(entriesNewestFirst) || stageToWorkflowNode(stageCode);
-        const currentIndex = Math.max(0, order.findIndex((node) => node === current));
+        const currentMarker = currentWorkflowNodeFromLogs(entriesNewestFirst)
+          || { nodeId: "", nodeType: stageToWorkflowNode(stageCode) };
+        const currentType = String(currentMarker?.nodeType || "").trim();
+        const currentIndex = Math.max(0, order.findIndex((node) => node === currentType));
         const doneCount = Math.max(0, currentIndex);
         const progressPct = Math.max(0, Math.min(100, Math.round((doneCount / Math.max(1, order.length)) * 100)));
 
         const rows = order.map((node, idx) => {
           const label = workflowNodeLabel(node);
-          const matchedVisited = visited.includes(node);
+          const matchedVisited = visited.some((item) => String(item?.nodeType || "") === node);
           const isCurrent = idx === currentIndex;
           const isDone = !isCurrent && (matchedVisited || idx < currentIndex);
           const status = isCurrent ? "현재" : isDone ? "완료" : "대기";
@@ -1339,7 +1655,7 @@
           <header class="task-log-head">
             <div class="task-log-title">
               <strong>워크플로우 진행 상태</strong>
-              <span class="hint">현재 단계: ${esc(workflowNodeLabel(current))}</span>
+              <span class="hint">현재 단계: ${esc(workflowNodeLabel(currentType))}</span>
             </div>
           </header>
           <section class="stage-snapshot">
@@ -1983,12 +2299,19 @@
           resumeStateCache = payload.resume_state && typeof payload.resume_state === "object"
             ? payload.resume_state
             : null;
+          workflowRuntimeCache = payload.workflow_runtime && typeof payload.workflow_runtime === "object"
+            ? payload.workflow_runtime
+            : null;
           manualRetryOptionsCache = payload.manual_retry_options && typeof payload.manual_retry_options === "object"
             ? payload.manual_retry_options
             : null;
           runtimeSignalsCache = payload.runtime_signals && typeof payload.runtime_signals === "object"
             ? payload.runtime_signals
             : null;
+          memoryTraceCache = payload.memory_trace && typeof payload.memory_trace === "object"
+            ? payload.memory_trace
+            : null;
+          renderWorkflowMeta(workflowRuntimeCache);
           const nextMdFiles = Array.isArray(payload.md_files) ? payload.md_files : [];
           const nextMdSignature = buildWorkspaceMdSignature(nextMdFiles);
           const docsChanged = nextMdSignature !== workspaceMdSignature;

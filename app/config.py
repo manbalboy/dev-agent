@@ -223,7 +223,7 @@ class AppSettings:
         self.logs_debug_dir.mkdir(parents=True, exist_ok=True)
         self.logs_user_dir.mkdir(parents=True, exist_ok=True)
         if self.memory_enabled:
-            self.memory_dir.mkdir(parents=True, exist_ok=True)
+            self.resolved_memory_dir.mkdir(parents=True, exist_ok=True)
 
     @property
     def jobs_file(self) -> Path:
@@ -254,6 +254,14 @@ class AppSettings:
         """Directory where per-job user-friendly log files are stored."""
 
         return self.logs_dir / "user"
+
+    @property
+    def resolved_memory_dir(self) -> Path:
+        """Return one stable memory directory path for both env and tests."""
+
+        if self.memory_dir.is_absolute():
+            return self.memory_dir
+        return (self.data_dir / self.memory_dir).resolve()
 
     def repository_workspace_path(
         self,

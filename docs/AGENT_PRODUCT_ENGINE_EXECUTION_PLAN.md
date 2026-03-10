@@ -16,10 +16,11 @@
 ## Delivery Order
 1. Product pipeline 강제력 확보
 2. Improvement loop 실행력 확보
-3. Job recovery / long-running 운영성 확보
-4. Observability / operator tooling 확보
-5. Durable backend / workspace hygiene 확보
-6. 무중단/HA 도입
+3. Memory runtime / adaptive learning engine 확보
+4. Job recovery / long-running 운영성 확보
+5. Observability / operator tooling 확보
+6. Durable backend / workspace hygiene 확보
+7. 무중단/HA 도입
 
 ## AI Role Policy
 - `Gemini`: 제품 정의, 기획, 리뷰, 우선순위 판단의 주 역할
@@ -57,7 +58,19 @@
 - 완료 조건:
   - improvement 결과가 파일 생성에서 끝나지 않고 다음 행동을 바꿈
 
-### Phase 3. Continuous Job Operations
+### Phase 3. Memory Runtime
+- 목적: adaptive memory를 durable DB runtime으로 올려 `스스로 성장하는 24시간 개발 동료`의 학습 계층을 만든다.
+- 핵심 작업:
+  - memory DB schema / ingest
+  - DB-backed retrieval
+  - feedback / ranking
+  - convention runtime
+  - autonomous backlog generation
+- 완료 조건:
+  - memory가 planner/reviewer/coder의 다음 행동을 auditable하게 바꾼다.
+  - 상세 설계/현재 상태: [PHASE3_MEMORY_RUNTIME_DESIGN.md](./PHASE3_MEMORY_RUNTIME_DESIGN.md)
+
+### Phase 4. Continuous Job Operations
 - 목적: 장기 운영 시 stuck job / provider outage / worker restart에 견디게 만든다.
 - 핵심 작업:
   - heartbeat / timeout / stuck detection
@@ -67,7 +80,7 @@
 - 완료 조건:
   - worker 재시작 후 running 고착 작업을 자동 정리/복구
 
-### Phase 4. Observability
+### Phase 5. Observability
 - 목적: 실패 원인과 품질 추세를 운영자가 즉시 파악할 수 있게 만든다.
 - 핵심 작업:
   - stage latency
@@ -75,7 +88,7 @@
   - review score trend
   - alert / dead-letter / recovery action
 
-### Phase 5. Durable Runtime
+### Phase 6. Durable Runtime
 - 목적: 365일 운영을 위한 저장소/워크스페이스/백업 기반을 강화한다.
 - 핵심 작업:
   - durable queue/state
@@ -83,7 +96,7 @@
   - backup / restore
   - periodic self-check
 
-### Phase 6. Zero-Downtime / HA
+### Phase 7. Zero-Downtime / HA
 - 목적: 마지막 단계에서 다중 인스턴스와 무중단 배포를 도입한다.
 - 핵심 작업:
   - multi-worker claim model

@@ -729,3 +729,54 @@ def test_jobs_api_query_matches_runtime_quality_signals(app_components):
     response = client.get("/api/jobs", params={"q": "adaptive_quality_loop_v1"})
     assert response.status_code == 200
     assert [item["job_id"] for item in response.json()["jobs"]] == ["job-runtime-query"]
+
+
+def test_roles_api_persists_skills_and_allowed_tools(app_components, monkeypatch, tmp_path: Path):
+    _, _, app = app_components
+    roles_path = tmp_path / "config" / "roles.json"
+    roles_path.parent.mkdir(parents=True, exist_ok=True)
+    roles_path.write_text("{\"roles\": [], \"presets\": []}\n", encoding="utf-8")
+    monkeypatch.setattr(dashboard, "_ROLES_CONFIG_PATH", roles_path)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/roles",
+        json={
+            "code": "planner",
+            "name": "Planner",
+            "cli": "gemini",
+            "template_key": "planner",
+            "skills": ["repo-reading", "mvp-planning", "repo-reading"],
+            "allowed_tools": ["research_search", "research_search"],
+            "enabled": True,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["saved"] is True
+    role = next(item for item in payload["roles"] if item["code"] == "planner")
+    assert role["skills"] == ["repo-reading", "mvp-planning"]
+    assert role["allowed_tools"] == ["research_search"]
+
+    persisted = json.loads(roles_path.read_text(encoding="utf-8"))
+    role = next(item for item in persisted["roles"] if item["code"] == "planner")
+    assert role["skills"] == ["repo-reading", "mvp-planning"]
+    assert role["allowed_tools"] == ["research_search"]
+
+
+def test_roles_api_default_catalog_hides_legacy_provider_roles(app_components, monkeypatch, tmp_path: Path):
+    _, _, app = app_components
+    roles_path = tmp_path / "config" / "missing-roles.json"
+    monkeypatch.setattr(dashboard, "_ROLES_CONFIG_PATH", roles_path)
+
+    client = TestClient(app)
+    response = client.get("/api/roles")
+
+    assert response.status_code == 200
+    payload = response.json()
+    role_codes = {item["code"] for item in payload["roles"]}
+    assert "log-analyzer-codex" in role_codes
+    assert "log-analyzer-gemini" in role_codes
+    assert "log-analyzer-claude" not in role_codes
+    assert "log-analyzer-copilot" not in role_codes

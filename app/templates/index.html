@@ -403,28 +403,24 @@
                 <select id="easy-planner-agent">
                   <option value="gemini">gemini</option>
                   <option value="codex">codex</option>
-                  <option value="claude">claude</option>
                 </select>
 
                 <label for="easy-coder-agent">Coder 에이전트</label>
                 <select id="easy-coder-agent">
                   <option value="codex">codex</option>
                   <option value="gemini">gemini</option>
-                  <option value="claude">claude</option>
                 </select>
 
                 <label for="easy-reviewer-agent">Reviewer 에이전트</label>
                 <select id="easy-reviewer-agent">
                   <option value="gemini">gemini</option>
                   <option value="codex">codex</option>
-                  <option value="claude">claude</option>
                 </select>
 
                 <label for="easy-escalation-agent">Escalation 에이전트</label>
                 <select id="easy-escalation-agent">
-                  <option value="claude">claude</option>
-                  <option value="gemini">gemini</option>
                   <option value="codex">codex</option>
+                  <option value="gemini">gemini</option>
                 </select>
 
                 <label for="easy-node-path">Node 실행 경로</label>
@@ -435,9 +431,6 @@
 
                 <label for="easy-codex-path">Codex CLI 경로</label>
                 <input id="easy-codex-path" type="text" />
-
-                <label for="easy-claude-path">Claude CLI 경로</label>
-                <input id="easy-claude-path" type="text" />
 
                 <label for="easy-approval-mode">Approval Mode</label>
                 <select id="easy-approval-mode">
@@ -451,8 +444,6 @@
                 <label for="easy-codex-extra">Codex 추가 옵션</label>
                 <input id="easy-codex-extra" type="text" placeholder="예: --dangerously-bypass-approvals-and-sandbox --color never" />
 
-                <label for="easy-claude-extra">Claude 추가 옵션</label>
-                <input id="easy-claude-extra" type="text" placeholder="예: --print" />
               </div>
 
               <div class="preview-box">
@@ -462,7 +453,7 @@
                 <pre id="preview-coder"></pre>
                 <p class="hint">Reviewer 미리보기</p>
                 <pre id="preview-reviewer"></pre>
-                <p class="hint">Copilot 미리보기</p>
+                <p class="hint">Helper 미리보기</p>
                 <pre id="preview-copilot"></pre>
                 <p class="hint">Escalation 미리보기</p>
                 <pre id="preview-escalation"></pre>
@@ -479,8 +470,8 @@
               <label for="tpl-reviewer">Reviewer</label>
               <textarea id="tpl-reviewer" rows="3" maxlength="4000" placeholder="예: gemini review ..."></textarea>
 
-              <label for="tpl-copilot">Copilot</label>
-              <textarea id="tpl-copilot" rows="3" maxlength="4000" placeholder="예: gh copilot -p &quot;$(cat {prompt_file})&quot;"></textarea>
+              <label for="tpl-copilot">Helper (Codex route)</label>
+              <textarea id="tpl-copilot" rows="3" maxlength="4000" placeholder="예: cat {prompt_file} | codex exec - ..."></textarea>
 
               <label for="tpl-escalation">Escalation</label>
               <textarea id="tpl-escalation" rows="3" maxlength="4000" placeholder="실패 시 실행할 보조 템플릿 명령"></textarea>
@@ -518,10 +509,10 @@
             <input id="role-name" type="text" maxlength="80" placeholder="예: 코더" />
 
             <label for="role-cli">CLI</label>
-            <input id="role-cli" type="text" maxlength="40" placeholder="예: codex, gemini, claude, gh, bash" />
+            <input id="role-cli" type="text" maxlength="40" placeholder="예: codex, gemini, bash, python3" />
 
             <label for="role-template-key">템플릿 키</label>
-            <input id="role-template-key" type="text" maxlength="80" placeholder="예: coder, reviewer, copilot" />
+            <input id="role-template-key" type="text" maxlength="80" placeholder="예: coder, reviewer, escalation" />
 
             <label for="role-inputs">입력</label>
             <input id="role-inputs" type="text" maxlength="400" placeholder="예: SPEC/PLAN" />
@@ -534,6 +525,12 @@
 
             <label for="role-checklist">체크리스트</label>
             <textarea id="role-checklist" rows="3" maxlength="1000"></textarea>
+
+            <label for="role-skills">스킬 (쉼표/줄바꿈 구분)</label>
+            <textarea id="role-skills" rows="2" maxlength="1000" placeholder="예: repo-reading, ui-implementation"></textarea>
+
+            <label for="role-allowed-tools">허용 도구 (쉼표/줄바꿈 구분)</label>
+            <textarea id="role-allowed-tools" rows="2" maxlength="1000" placeholder="예: research_search"></textarea>
 
             <label class="toggle-row" for="role-enabled">
               <input id="role-enabled" type="checkbox" checked />
@@ -578,7 +575,7 @@
           <div class="quick-panel-head">
             <div>
               <h2>시스템 로그 분석 도우미</h2>
-              <p class="hint">Claude / Copilot / Gemini / Codex 중 하나를 골라 로그 문제점을 분석합니다.</p>
+              <p class="hint">Gemini 또는 Codex를 골라 로그 문제점을 분석합니다.</p>
             </div>
           </div>
           <div id="assistant-messages" class="assistant-messages"></div>
@@ -589,8 +586,6 @@
                 <select id="assistant-provider">
                   <option value="codex">Codex</option>
                   <option value="gemini">Gemini</option>
-                  <option value="claude">Claude</option>
-                  <option value="copilot">Copilot</option>
                 </select>
               </label>
 
@@ -1091,6 +1086,10 @@
         workflows: [],
         defaultWorkflowId: "",
       };
+      const roleCatalogState = {
+        roles: [],
+        presets: [],
+      };
       const workflowEditorState = {
         schema: null,
         selectedWorkflowId: "",
@@ -1118,6 +1117,14 @@
               id: "n1",
               type: "gh_read_issue",
               title: "이슈 읽기",
+              agent_profile: "auto",
+              planning_mode: "auto",
+              role_code: "",
+              role_preset_id: "",
+              match_labels: "",
+              match_mode: "any",
+              loop_max_iterations: 3,
+              notes: "",
             },
           ],
           edges: [],
@@ -1147,6 +1154,8 @@
                   ? (node?.planning_mode || "auto")
                   : "auto"
               ).trim() || "auto",
+              role_code: String(node?.role_code || "").trim(),
+              role_preset_id: String(node?.role_preset_id || "").trim(),
               match_labels: String(
                 String(node?.type || "gh_read_issue").trim() === "if_label_match"
                   ? (node?.match_labels || "")
@@ -1229,6 +1238,8 @@
             ["title", "title"],
             ["agent_profile", "agent_profile"],
             ["planning_mode", "planning_mode"],
+            ["role_code", "role_code"],
+            ["role_preset_id", "role_preset_id"],
             ["match_labels", "match_labels"],
             ["match_mode", "match_mode"],
             ["loop_max_iterations", "loop_max_iterations"],
@@ -1337,6 +1348,8 @@
           title: String(row.querySelector(".workflow-editor-node-title")?.value || "").trim(),
           agent_profile: String(row.querySelector(".workflow-editor-node-agent-profile")?.value || "auto").trim() || "auto",
           planning_mode: String(row.querySelector(".workflow-editor-node-planning-mode")?.value || "auto").trim() || "auto",
+          role_code: String(row.querySelector(".workflow-editor-node-role-code")?.value || "").trim(),
+          role_preset_id: String(row.querySelector(".workflow-editor-node-role-preset")?.value || "").trim(),
           match_labels: String(row.querySelector(".workflow-editor-node-match-labels")?.value || "").trim(),
           match_mode: String(row.querySelector(".workflow-editor-node-match-mode")?.value || "any").trim() || "any",
           loop_max_iterations: Number(row.querySelector(".workflow-editor-node-loop-max")?.value || 3) || 3,
@@ -1355,6 +1368,8 @@
               title: node.title,
               agent_profile: node.agent_profile || "auto",
               planning_mode: node.type === "gemini_plan" ? (node.planning_mode || "auto") : "auto",
+              role_code: node.role_code || "",
+              role_preset_id: node.role_preset_id || "",
               match_labels: node.type === "if_label_match" ? node.match_labels : "",
               match_mode: node.type === "if_label_match" ? (node.match_mode || "any") : "any",
               loop_max_iterations: node.type === "loop_until_pass" ? (node.loop_max_iterations || 3) : 3,
@@ -1599,7 +1614,7 @@
         {
           role: "assistant",
           provider: "system",
-          content: "안녕하세요. 로그 분석 도우미입니다. Claude/Copilot/Gemini/Codex 중 하나를 선택해 문제점을 분석할 수 있습니다.",
+          content: "안녕하세요. 로그 분석 도우미입니다. Gemini 또는 Codex를 선택해 문제점을 분석할 수 있습니다.",
         },
       ];
       let assistantJobOptions = [];
@@ -1609,8 +1624,8 @@
         const normalized = String(provider || "").toLowerCase();
         if (normalized === "codex") return "Codex";
         if (normalized === "gemini") return "Gemini";
-        if (normalized === "claude") return "Claude";
-        if (normalized === "copilot") return "Copilot";
+        if (normalized === "claude") return "Codex";
+        if (normalized === "copilot") return "Codex";
         if (normalized === "system") return "System";
         return "Assistant";
       }
@@ -1997,6 +2012,12 @@
         const edgeEventOptions = supportedEdgeEvents
           .map((eventName) => `<option value="${esc(eventName)}">${esc(eventName)}</option>`)
           .join("");
+        const roleOptions = (roleCatalogState.roles || [])
+          .map((item) => `<option value="${esc(item.code)}">${esc(item.name || item.code)} (${esc(item.code)})</option>`)
+          .join("");
+        const presetOptions = (roleCatalogState.presets || [])
+          .map((item) => `<option value="${esc(item.preset_id)}">${esc(item.name || item.preset_id)} (${esc(item.preset_id)})</option>`)
+          .join("");
         const nodeRows = workflow.nodes
           .map((node, index) => `
             <tr class="workflow-editor-node-row" data-node-index="${index}">
@@ -2015,6 +2036,18 @@
               <td>
                 <select class="workflow-editor-node-planning-mode"${node.type === "gemini_plan" ? "" : " disabled"}>
                   ${planningModes.map((mode) => `<option value="${esc(mode)}"${mode === (node.type === "gemini_plan" ? (node.planning_mode || "auto") : "auto") ? " selected" : ""}>${esc(mode)}</option>`).join("")}
+                </select>
+              </td>
+              <td>
+                <select class="workflow-editor-node-role-code">
+                  <option value="">(기본 route)</option>
+                  ${roleOptions.replace(`value="${esc(node.role_code || "")}"`, `value="${esc(node.role_code || "")}" selected`)}
+                </select>
+              </td>
+              <td>
+                <select class="workflow-editor-node-role-preset">
+                  <option value="">(프리셋 안 씀)</option>
+                  ${presetOptions.replace(`value="${esc(node.role_preset_id || "")}"`, `value="${esc(node.role_preset_id || "")}" selected`)}
                 </select>
               </td>
               <td><input class="workflow-editor-node-match-labels" type="text" value="${esc(node.type === "if_label_match" ? (node.match_labels || "") : "")}" maxlength="160" placeholder="예: ultra,mobile" ${node.type === "if_label_match" ? "" : "disabled"} /></td>
@@ -2057,6 +2090,8 @@
         const metadataChips = [
           ...agentProfiles.map((profile) => `<span class="workflow-editor-chip">agent_profile · ${esc(profile)}</span>`),
           ...planningModes.map((mode) => `<span class="workflow-editor-chip">planning_mode · ${esc(mode)}</span>`),
+          `<span class="workflow-editor-chip">role_code · saved roles</span>`,
+          `<span class="workflow-editor-chip">role_preset_id · saved presets</span>`,
           ...matchModes.map((mode) => `<span class="workflow-editor-chip">match_mode · ${esc(mode)}</span>`),
           `<span class="workflow-editor-chip">loop_max_iterations · 1-10</span>`,
         ].join("");
@@ -2109,8 +2144,8 @@
               </div>
               <div class="app-table-wrap">
                 <table class="app-table workflow-editor-table">
-                  <thead><tr><th>ID</th><th>Type</th><th>Title</th><th>AI</th><th>Plan</th><th>라벨 조건</th><th>Match</th><th>Loop Max</th><th>메모</th><th>삭제</th></tr></thead>
-                  <tbody>${nodeRows || `<tr><td colspan="10" class="jobs-empty">노드 없음</td></tr>`}</tbody>
+                  <thead><tr><th>ID</th><th>Type</th><th>Title</th><th>AI</th><th>Plan</th><th>역할 코드</th><th>역할 프리셋</th><th>라벨 조건</th><th>Match</th><th>Loop Max</th><th>메모</th><th>삭제</th></tr></thead>
+                  <tbody>${nodeRows || `<tr><td colspan="12" class="jobs-empty">노드 없음</td></tr>`}</tbody>
                 </table>
               </div>
             </div>
@@ -2378,6 +2413,8 @@
               title: "",
               agent_profile: "auto",
               planning_mode: "auto",
+              role_code: "",
+              role_preset_id: "",
               match_labels: "",
               match_mode: "any",
               loop_max_iterations: 3,
@@ -2574,6 +2611,7 @@
       }
 
       function renderRoleList(roles) {
+        roleCatalogState.roles = Array.isArray(roles) ? roles : [];
         const box = document.getElementById("role-list-box");
         if (!box) return;
         if (!roles || roles.length === 0) {
@@ -2586,17 +2624,20 @@
             <td>${esc(item.name)}</td>
             <td>${esc(item.cli || "-")}</td>
             <td><code>${esc(item.template_key || "-")}</code></td>
+            <td>${esc((item.skills || []).join(", ") || "-")}</td>
+            <td>${esc((item.allowed_tools || []).join(", ") || "-")}</td>
             <td>${item.enabled ? "on" : "off"}</td>
             <td><button type="button" class="action-button role-delete" data-role-code="${esc(item.code)}">삭제</button></td>
           </tr>`)
           .join("");
         box.innerHTML = `<div class="app-table-wrap"><table class="app-table">
-          <thead><tr><th>코드</th><th>이름</th><th>CLI</th><th>템플릿</th><th>활성</th><th>삭제</th></tr></thead>
+          <thead><tr><th>코드</th><th>이름</th><th>CLI</th><th>템플릿</th><th>스킬</th><th>허용 도구</th><th>활성</th><th>삭제</th></tr></thead>
           <tbody>${rows}</tbody>
         </table></div>`;
       }
 
       function renderRolePresetList(presets) {
+        roleCatalogState.presets = Array.isArray(presets) ? presets : [];
         const box = document.getElementById("role-preset-list-box");
         if (!box) return;
         if (!presets || presets.length === 0) {
@@ -2640,6 +2681,9 @@
           renderRoleList(roles);
           renderRolePresetList(presets);
           renderRolePresetOptions(presets);
+          if (workflowEditorState.currentWorkflow) {
+            renderWorkflowEditor(cloneWorkflowDefinition(workflowEditorState.currentWorkflow));
+          }
         } catch {
           setRoleConfigResult("역할 목록을 불러오지 못했습니다.", true);
         }
@@ -2664,7 +2708,7 @@
       function renderCliCheckResult(payload) {
         const box = document.getElementById("agent-cli-check-result");
         if (!box) return;
-        const order = ["gemini", "codex", "claude"];
+        const order = ["gemini", "codex"];
         box.innerHTML = order
           .map((name) => {
             const item = payload?.[name] || {};
@@ -2683,7 +2727,7 @@
       function renderModelCheckResult(payload) {
         const box = document.getElementById("agent-model-check-result");
         if (!box) return;
-        const order = ["gemini", "codex", "claude"];
+        const order = ["gemini", "codex"];
         box.innerHTML = order
           .map((name) => {
             const item = payload?.[name] || {};
@@ -2705,15 +2749,13 @@
           plannerAgent: "gemini",
           coderAgent: "codex",
           reviewerAgent: "gemini",
-          escalationAgent: "claude",
+          escalationAgent: "codex",
           nodePath: "/root/.nvm/versions/node/v24.14.0/bin/node",
           geminiPath: "/root/.nvm/versions/node/v24.14.0/bin/gemini",
           codexPath: "/root/.nvm/versions/node/v24.14.0/bin/codex",
-          claudePath: "/root/.local/bin/claude",
           approvalMode: "yolo",
           geminiExtra: "--model gemini-3.1-pro-preview --output-format text",
           codexExtra: "--dangerously-bypass-approvals-and-sandbox --color never",
-          claudeExtra: "--print",
         };
       }
 
@@ -2726,11 +2768,9 @@
           nodePath: document.getElementById("easy-node-path").value.trim(),
           geminiPath: document.getElementById("easy-gemini-path").value.trim(),
           codexPath: document.getElementById("easy-codex-path").value.trim(),
-          claudePath: document.getElementById("easy-claude-path").value.trim(),
           approvalMode: document.getElementById("easy-approval-mode").value,
           geminiExtra: document.getElementById("easy-gemini-extra").value.trim(),
           codexExtra: document.getElementById("easy-codex-extra").value.trim(),
-          claudeExtra: document.getElementById("easy-claude-extra").value.trim(),
         };
       }
 
@@ -2748,22 +2788,12 @@
         const targetPath = roleTargetPath(role);
         const geminiFlags = `-p '' --approval-mode ${fields.approvalMode}${normalizeOptions(fields.geminiExtra)}`;
         const codexFlags = `exec - -C {work_dir}${normalizeOptions(fields.codexExtra)}`;
-        const claudeFlags = fields.claudeExtra || "--print";
 
         if (agent === "gemini") {
           const base = `cat {prompt_file} | ${fields.nodePath} ${fields.geminiPath} ${geminiFlags}`;
           return targetPath ? `${base} > ${targetPath}` : base;
         }
-        if (agent === "codex") {
-          const base = `cat {prompt_file} | ${fields.nodePath} ${fields.codexPath} ${codexFlags}`;
-          return targetPath ? `${base} > ${targetPath}` : base;
-        }
-
-        // claude
-        const usesPromptFile = claudeFlags.includes("{prompt_file}");
-        const base = usesPromptFile
-          ? `${fields.claudePath} ${claudeFlags}`
-          : `cat {prompt_file} | ${fields.claudePath} ${claudeFlags}`;
+        const base = `cat {prompt_file} | ${fields.nodePath} ${fields.codexPath} ${codexFlags}`;
         return targetPath ? `${base} > ${targetPath}` : base;
       }
 
@@ -2771,7 +2801,7 @@
         const planner = buildRoleCommand(fields.plannerAgent, "planner", fields);
         const coder = buildRoleCommand(fields.coderAgent, "coder", fields);
         const reviewer = buildRoleCommand(fields.reviewerAgent, "reviewer", fields);
-        const copilot = `gh copilot -p \"$(cat {prompt_file})\"`;
+        const copilot = buildRoleCommand("codex", "copilot", fields);
         const escalationBase = buildRoleCommand(fields.escalationAgent, "escalation", fields);
         const escalation = `${escalationBase} > ESCALATION.md`;
         return { planner, coder, reviewer, copilot, escalation };
@@ -2797,11 +2827,9 @@
         document.getElementById("easy-node-path").value = defaults.nodePath;
         document.getElementById("easy-gemini-path").value = defaults.geminiPath;
         document.getElementById("easy-codex-path").value = defaults.codexPath;
-        document.getElementById("easy-claude-path").value = defaults.claudePath;
         document.getElementById("easy-approval-mode").value = defaults.approvalMode;
         document.getElementById("easy-gemini-extra").value = defaults.geminiExtra;
         document.getElementById("easy-codex-extra").value = defaults.codexExtra;
-        document.getElementById("easy-claude-extra").value = defaults.claudeExtra;
         renderEasyPreview();
       }
 
@@ -2972,6 +3000,11 @@
         const submit = document.getElementById("role-config-submit");
         const list = document.getElementById("role-list-box");
         if (!form || !submit || !list) return;
+        const parseRoleListField = (raw) =>
+          String(raw || "")
+            .split(/[\n,]/)
+            .map((item) => item.trim().toLowerCase())
+            .filter((item, index, array) => item && array.indexOf(item) === index);
 
         list.addEventListener("click", async (event) => {
           const target = event.target;
@@ -3010,6 +3043,8 @@
             outputs: document.getElementById("role-outputs").value.trim(),
             objective: document.getElementById("role-objective").value.trim(),
             checklist: document.getElementById("role-checklist").value.trim(),
+            skills: parseRoleListField(document.getElementById("role-skills").value),
+            allowed_tools: parseRoleListField(document.getElementById("role-allowed-tools").value),
             enabled: document.getElementById("role-enabled").checked,
           };
           if (!payload.code || !payload.name) {
@@ -3319,11 +3354,9 @@
           "easy-node-path",
           "easy-gemini-path",
           "easy-codex-path",
-          "easy-claude-path",
           "easy-approval-mode",
           "easy-gemini-extra",
           "easy-codex-extra",
-          "easy-claude-extra",
         ]
           .forEach((id) => {
             const element = document.getElementById(id);
@@ -3340,7 +3373,7 @@
           let escalation = document.getElementById("tpl-escalation").value.trim();
           if (currentAgentMode() === "easy") {
             const fields = readEasyFields();
-            if (!fields.nodePath || !fields.geminiPath || !fields.codexPath || !fields.claudePath) {
+            if (!fields.nodePath || !fields.geminiPath || !fields.codexPath) {
               setAgentConfigResult("쉬운 입력의 경로 필드를 모두 입력해주세요.", true);
               return;
             }

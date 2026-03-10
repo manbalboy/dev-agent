@@ -62,6 +62,8 @@ _ROLES_CONFIG_PATH = Path.cwd() / "config" / "roles.json"
 _FEATURE_FLAGS_CONFIG_PATH = Path.cwd() / "config" / "feature_flags.json"
 _DEFAULT_DASHBOARD_PAGE_SIZE = 20
 _MAX_DASHBOARD_PAGE_SIZE = 100
+_PRIMARY_ASSISTANT_PROVIDERS = {"codex", "gemini"}
+_ASSISTANT_PROVIDER_ALIASES = {"claude": "codex", "copilot": "codex"}
 
 
 class IssueRegistrationRequest(BaseModel):
@@ -103,6 +105,8 @@ class RoleConfigRequest(BaseModel):
     inputs: str = Field(default="", max_length=400)
     outputs: str = Field(default="", max_length=400)
     checklist: str = Field(default="", max_length=1000)
+    skills: List[str] = Field(default_factory=list)
+    allowed_tools: List[str] = Field(default_factory=list)
     enabled: bool = Field(default=True)
 
 
@@ -202,6 +206,7 @@ def _build_job_runtime_signals(
     loop_payload = _read_dashboard_json(docs_dir / "IMPROVEMENT_LOOP_STATE.json")
     next_tasks_payload = _read_dashboard_json(docs_dir / "NEXT_IMPROVEMENT_TASKS.json")
     strategy_shadow_payload = _read_dashboard_json(docs_dir / "STRATEGY_SHADOW_REPORT.json")
+    memory_trace_payload = _read_dashboard_json(docs_dir / "MEMORY_TRACE.json")
     node_runs = store.list_node_runs(job.job_id)
     resume_state = _compute_job_resume_state(job, node_runs, settings)
 
@@ -209,6 +214,7 @@ def _build_job_runtime_signals(
     quality_gate = review_payload.get("quality_gate", {}) if isinstance(review_payload.get("quality_gate"), dict) else {}
     tasks = next_tasks_payload.get("tasks", []) if isinstance(next_tasks_payload.get("tasks"), list) else []
     first_task = tasks[0] if tasks and isinstance(tasks[0], dict) else {}
+    memory_routes = memory_trace_payload.get("routes", {}) if isinstance(memory_trace_payload.get("routes"), dict) else {}
     return {
         "review_overall": scores.get("overall"),
         "quality_gate_passed": quality_gate.get("passed"),
@@ -237,8 +243,24 @@ def _build_job_runtime_signals(
         "shadow_confidence": strategy_shadow_payload.get("confidence"),
         "shadow_diverged": bool(strategy_shadow_payload.get("diverged")),
         "shadow_decision_mode": str(strategy_shadow_payload.get("decision_mode", "")).strip(),
+        "retrieval_enabled": bool(memory_trace_payload.get("enabled")),
+        "retrieval_source": str(memory_trace_payload.get("source", "")).strip(),
+        "retrieval_fallback_used": bool(memory_trace_payload.get("fallback_used")),
+        "retrieval_selected_total": int(memory_trace_payload.get("selected_total", 0) or 0),
+        "retrieval_generated_at": str(memory_trace_payload.get("generated_at", "")).strip(),
+        "retrieval_route_counts": {
+            route_name: int((route_payload.get("selected_count", 0) if isinstance(route_payload, dict) else 0) or 0)
+            for route_name, route_payload in memory_routes.items()
+        },
         "execution_repository": _job_execution_repository(job),
     }
+
+
+def _read_job_memory_trace(job: JobRecord, settings: AppSettings) -> Dict[str, Any]:
+    """Read one job's structured memory retrieval trace."""
+
+    workspace_path = _job_workspace_path(job, settings)
+    return _read_dashboard_json(workspace_path / "_docs" / "MEMORY_TRACE.json")
 
 
 def _list_dashboard_jobs(store: JobStore, settings: AppSettings) -> List[Dict[str, Any]]:
@@ -1189,6 +1211,8 @@ def upsert_role(payload: RoleConfigRequest) -> JSONResponse:
         "inputs": payload.inputs.strip(),
         "outputs": payload.outputs.strip(),
         "checklist": payload.checklist.strip(),
+        "skills": _normalize_role_tag_list(payload.skills),
+        "allowed_tools": _normalize_role_tag_list(payload.allowed_tools),
         "enabled": bool(payload.enabled),
     }
     if not role["name"]:
@@ -1464,14 +1488,12 @@ def update_agents_config(
 def check_agent_clis(
     settings: AppSettings = Depends(get_settings),
 ) -> JSONResponse:
-    """Check whether Gemini/Codex/Claude/Copilot CLIs are executable."""
+    """Check whether Gemini/Codex CLIs are executable."""
 
     templates = _read_command_templates(settings.command_config)
     result = {
         "gemini": _check_one_cli("gemini", templates),
         "codex": _check_one_cli("codex", templates),
-        "claude": _check_one_cli("claude", templates),
-        "copilot": _check_one_cli("copilot", templates),
     }
     return JSONResponse(result)
 
@@ -1480,13 +1502,12 @@ def check_agent_clis(
 def check_agent_models(
     settings: AppSettings = Depends(get_settings),
 ) -> JSONResponse:
-    """Return inferred model settings for Gemini/Codex/Claude."""
+    """Return inferred model settings for Gemini/Codex."""
 
     templates = _read_command_templates(settings.command_config)
     result = {
         "gemini": _infer_cli_model("gemini", templates),
         "codex": _infer_cli_model("codex", templates),
-        "claude": _infer_cli_model("claude", templates),
     }
     return JSONResponse(result)
 
@@ -1517,7 +1538,7 @@ def codex_assistant_chat(
     conversation_context = "\n".join(history_lines)
     runtime_context = _build_agent_observability_context(store, settings)
     full_prompt = (
-        "You are 'AgentHub Ops Copilot', a diagnosis chatbot for AI-agent workflows.\n"
+        "You are 'AgentHub Ops Assistant', a diagnosis chatbot for AI-agent workflows.\n"
         "Primary mission: analyze what happened in agent runs, identify likely root causes, "
         "and provide practical next actions.\n"
         "Rules:\n"
@@ -1655,13 +1676,18 @@ def assistant_log_analysis(
 ) -> JSONResponse:
     """Analyze AgentHub logs with one selected assistant CLI."""
 
-    assistant = str(payload.assistant or "").strip().lower()
-    allowed = {"codex", "gemini", "claude", "copilot"}
-    if assistant not in allowed:
+    requested_assistant = str(payload.assistant or "").strip().lower()
+    allowed = _PRIMARY_ASSISTANT_PROVIDERS | set(_ASSISTANT_PROVIDER_ALIASES)
+    if requested_assistant not in allowed:
         raise HTTPException(
             status_code=400,
-            detail=f"지원하지 않는 assistant 입니다: {assistant}. 허용: {', '.join(sorted(allowed))}",
+            detail=(
+                f"지원하지 않는 assistant 입니다: {requested_assistant}. "
+                f"공식 지원: {', '.join(sorted(_PRIMARY_ASSISTANT_PROVIDERS))}. "
+                f"호환 별칭: {', '.join(sorted(_ASSISTANT_PROVIDER_ALIASES))}"
+            ),
         )
+    assistant = _canonical_cli_name(requested_assistant)
 
     question = payload.question.strip()
     if not question:
@@ -1698,6 +1724,7 @@ def assistant_log_analysis(
             "ok": True,
             "assistant": analysis,
             "provider": assistant,
+            "requested_provider": requested_assistant,
             "focus_job_id": focus_job_id,
         }
     )
@@ -1916,8 +1943,13 @@ def job_detail_api(
     md_files = _read_agent_md_files(workspace_path)
     stage_md_snapshots = _read_stage_md_snapshots(settings.data_dir, job_id)
     node_runs = store.list_node_runs(job_id)
+    workflow_runtime, _, _ = _resolve_job_workflow_runtime(job)
+    workflow_runtime["fallback_events"] = _extract_workflow_fallback_events(events)
+    if any(bool(item.get("uses_fixed_pipeline")) for item in workflow_runtime["fallback_events"]):
+        workflow_runtime["uses_fixed_pipeline"] = True
     resume_state = _compute_job_resume_state(job, node_runs, settings)
     runtime_signals = _build_job_runtime_signals(job, store=store, settings=settings)
+    memory_trace = _read_job_memory_trace(job, settings)
     manual_retry_options = _build_manual_retry_options(job, settings=settings, node_runs=node_runs)
 
     return JSONResponse(
@@ -1927,9 +1959,11 @@ def job_detail_api(
             "md_files": md_files,
             "stage_md_snapshots": stage_md_snapshots,
             "node_runs": [item.to_dict() for item in node_runs],
+            "workflow_runtime": workflow_runtime,
             "resume_state": resume_state,
             "manual_retry_options": manual_retry_options,
             "runtime_signals": runtime_signals,
+            "memory_trace": memory_trace,
             "stop_requested": _stop_signal_path(settings.data_dir, job_id).exists(),
         }
     )
@@ -1948,6 +1982,7 @@ def job_node_runs_api(
         raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
 
     node_runs = store.list_node_runs(job_id)
+    workflow_runtime, _, _ = _resolve_job_workflow_runtime(job)
     resume_state = _compute_job_resume_state(job, node_runs, settings)
     manual_retry_options = _build_manual_retry_options(job, settings=settings, node_runs=node_runs)
     return JSONResponse(
@@ -1955,28 +1990,149 @@ def job_node_runs_api(
             "job_id": job_id,
             "workflow_id": job.workflow_id,
             "node_runs": [item.to_dict() for item in node_runs],
+            "workflow_runtime": workflow_runtime,
             "resume_state": resume_state,
             "manual_retry_options": manual_retry_options,
         }
     )
 
 
-def _resolve_job_workflow_definition(job: JobRecord) -> tuple[str, Dict[str, Any], List[Dict[str, Any]]]:
-    """Resolve one job to the active workflow definition and ordered nodes."""
+def _resolve_job_workflow_runtime(
+    job: JobRecord,
+) -> tuple[Dict[str, Any], Dict[str, Any], List[Dict[str, Any]]]:
+    """Resolve one job to workflow metadata plus a validated workflow definition."""
 
     default_id, workflows_by_id = _load_workflows_catalog()
+    requested_workflow_id = str(job.workflow_id or "").strip()
     selection = resolve_workflow_selection(
-        requested_workflow_id=job.workflow_id,
+        requested_workflow_id=requested_workflow_id,
         app_code=job.app_code,
         repository=job.repository,
         apps_path=_APPS_CONFIG_PATH,
         workflows_path=_WORKFLOWS_CONFIG_PATH,
     )
-    workflow = workflows_by_id.get(selection.workflow_id) or workflows_by_id.get(default_id)
-    if not isinstance(workflow, dict):
-        return "", {}, []
-    ordered_nodes = linearize_workflow_nodes(workflow)
-    return str(workflow.get("workflow_id", "")).strip(), workflow, ordered_nodes
+    selected = workflows_by_id.get(selection.workflow_id)
+    if selected is None and selection.workflow_id != default_id:
+        selected = workflows_by_id.get(default_id)
+
+    raw_workflow = selected if isinstance(selected, dict) else {}
+    definition_valid = False
+    validation_errors: List[str] = []
+    ordered_nodes: List[Dict[str, Any]] = []
+    if raw_workflow:
+        definition_valid, validation_errors = validate_workflow(raw_workflow)
+        if definition_valid:
+            ordered_nodes = linearize_workflow_nodes(raw_workflow)
+
+    raw_nodes = raw_workflow.get("nodes", []) if isinstance(raw_workflow.get("nodes"), list) else []
+    node_source = ordered_nodes if ordered_nodes else [item for item in raw_nodes if isinstance(item, dict)]
+    nodes_payload = [
+        {
+            "id": str(item.get("id", "")).strip(),
+            "type": str(item.get("type", "")).strip(),
+            "title": str(item.get("title", "")).strip(),
+        }
+        for item in node_source
+    ]
+
+    resolved_workflow_id = str(raw_workflow.get("workflow_id", "")).strip()
+    runtime = {
+        "requested_workflow_id": requested_workflow_id,
+        "resolved_workflow_id": resolved_workflow_id,
+        "workflow_name": str(raw_workflow.get("name", "")).strip(),
+        "entry_node_id": str(raw_workflow.get("entry_node_id", "")).strip(),
+        "default_workflow_id": default_id,
+        "resolution_source": str(selection.source or "").strip(),
+        "selection_warning": str(selection.warning or "").strip(),
+        "definition_available": bool(raw_workflow),
+        "definition_valid": definition_valid,
+        "validation_errors": validation_errors,
+        "uses_fixed_pipeline": not bool(raw_workflow) or not definition_valid,
+        "nodes": nodes_payload,
+    }
+    return runtime, raw_workflow if definition_valid else {}, ordered_nodes
+
+
+def _resolve_job_workflow_definition(job: JobRecord) -> tuple[str, Dict[str, Any], List[Dict[str, Any]]]:
+    """Resolve one job to the active workflow definition and ordered nodes."""
+
+    runtime, workflow, ordered_nodes = _resolve_job_workflow_runtime(job)
+    return str(runtime.get("resolved_workflow_id", "")).strip(), workflow, ordered_nodes
+
+
+def _extract_workflow_fallback_events(events: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+    """Extract workflow resolution/fallback signals from parsed debug events."""
+
+    fallback_events: List[Dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for event in events:
+        message = str(event.get("message", "")).strip()
+        if not message:
+            continue
+
+        payload: Dict[str, Any] | None = None
+        warning_match = re.match(r"^Workflow resolution warning:\s*(.+)$", message)
+        if warning_match:
+            payload = {
+                "kind": "resolution_warning",
+                "severity": "warn",
+                "title": "선택 경고",
+                "message": str(warning_match.group(1)).strip(),
+                "uses_fixed_pipeline": False,
+            }
+
+        default_match = re.match(
+            r"^Resolved workflow '([^']+)' missing\. Falling back to default '([^']+)'\.$",
+            message,
+        )
+        if default_match:
+            payload = {
+                "kind": "default_fallback",
+                "severity": "warn",
+                "title": "기본 workflow로 전환",
+                "message": (
+                    f"등록되지 않은 workflow '{default_match.group(1)}' 대신 "
+                    f"'{default_match.group(2)}'를 사용했습니다."
+                ),
+                "uses_fixed_pipeline": False,
+            }
+
+        validation_match = re.match(
+            r"^Workflow validation failed; fallback to fixed pipeline:\s*(.+)$",
+            message,
+        )
+        if validation_match:
+            payload = {
+                "kind": "validation_failure",
+                "severity": "error",
+                "title": "Workflow validation 실패",
+                "message": str(validation_match.group(1)).strip(),
+                "uses_fixed_pipeline": True,
+            }
+
+        load_match = re.match(
+            r"^Workflow load failed; fallback to fixed pipeline:\s*(.+)$",
+            message,
+        )
+        if load_match:
+            payload = {
+                "kind": "load_failure",
+                "severity": "error",
+                "title": "Workflow 로드 실패",
+                "message": str(load_match.group(1)).strip(),
+                "uses_fixed_pipeline": True,
+            }
+
+        if payload is None:
+            continue
+
+        dedupe_key = (str(payload.get("kind", "")), str(payload.get("message", "")))
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        payload["timestamp"] = str(event.get("timestamp", "")).strip()
+        fallback_events.append(payload)
+    return fallback_events
 
 
 def _compute_job_resume_state(
@@ -2648,9 +2804,8 @@ def _check_one_cli(cli_name: str, templates: Dict[str, str]) -> Dict[str, Any]:
 def _build_cli_probe_candidates(cli_name: str, templates: Dict[str, str]) -> List[List[str]]:
     """Build probe command candidates from known paths and templates."""
 
+    cli_name = _canonical_cli_name(cli_name)
     known: List[List[str]] = []
-    if cli_name == "copilot":
-        return [["gh", "copilot", "--help"], ["copilot", "--version"]]
 
     template_text = " ".join(templates.values())
     absolute_paths = re.findall(r"(/[^ \t\"']+)", template_text)
@@ -2751,6 +2906,7 @@ def _resolve_cli_command_prefix(
 ) -> List[str]:
     """Resolve executable prefix for generic CLI commands."""
 
+    cli_name = _canonical_cli_name(cli_name)
     candidates: List[List[str]] = []
     if env_var:
         env_path = os.getenv(env_var, "").strip()
@@ -2938,13 +3094,6 @@ def _run_log_analyzer(
         return _run_codex_log_analysis(prompt, templates)
     if assistant == "gemini":
         return _run_gemini_log_analysis(prompt, templates)
-    if assistant == "claude":
-        return _run_claude_log_analysis(prompt, templates)
-    if assistant == "copilot":
-        # Keep the public "copilot" option for compatibility, but route the
-        # heavy log-analysis workload through Codex to reduce token waste and
-        # keep remediation suggestions aligned with the coding path.
-        return _run_codex_log_analysis(prompt, templates)
     raise HTTPException(status_code=400, detail=f"지원하지 않는 assistant: {assistant}")
 
 
@@ -3037,95 +3186,15 @@ def _run_gemini_log_analysis(prompt: str, templates: Dict[str, str]) -> str:
 
 
 def _run_claude_log_analysis(prompt: str, templates: Dict[str, str]) -> str:
-    """Run claude CLI for log analysis and return text output."""
+    """Legacy Claude alias maintained for compatibility and routed to Codex."""
 
-    prefix = _resolve_cli_command_prefix("claude", templates, env_var="AGENTHUB_CLAUDE_BIN")
-    try:
-        process = subprocess.run(
-            [*prefix, "--print"],
-            input=prompt,
-            capture_output=True,
-            text=True,
-            timeout=180,
-        )
-    except subprocess.TimeoutExpired as error:
-        raise HTTPException(status_code=504, detail="Claude 로그 분석이 시간 제한(180초)을 초과했습니다.") from error
-    except OSError as error:
-        raise HTTPException(status_code=500, detail=f"Claude 실행 실패: {error}") from error
-    if process.returncode != 0:
-        raw_error = (process.stderr or process.stdout or "").strip()[:1000]
-        raise HTTPException(
-            status_code=502,
-            detail=f"Claude 로그 분석 실패(exit={process.returncode}): {raw_error or '(no output)'}",
-        )
-    return (process.stdout or "").strip() or "응답이 비어 있습니다."
+    return _run_codex_log_analysis(prompt, templates)
 
 
 def _run_copilot_log_analysis(prompt: str, templates: Dict[str, str]) -> str:
-    """Run copilot template (or gh copilot) for log analysis."""
+    """Legacy Copilot alias maintained for compatibility and routed to Codex."""
 
-    prompt_file = tempfile.NamedTemporaryFile(
-        prefix="agenthub-log-analysis-copilot-",
-        suffix=".md",
-        delete=False,
-    )
-    prompt_path = Path(prompt_file.name)
-    prompt_file.close()
-    prompt_path.write_text(prompt, encoding="utf-8")
-
-    template = str(templates.get("copilot", "")).strip()
-    if template:
-        variables = {
-            "prompt_file": str(prompt_path),
-            "work_dir": str(Path.cwd()),
-            "plan_path": str(Path.cwd() / "_docs" / "COPILOT_PLAN.md"),
-            "review_path": str(Path.cwd() / "_docs" / "COPILOT_REVIEW.md"),
-            "docs_bundle_path": str(Path.cwd() / "_docs" / "COPILOT_BUNDLE.md"),
-        }
-        try:
-            command = template.format(**variables)
-        except KeyError as error:
-            prompt_path.unlink(missing_ok=True)
-            missing = str(error.args[0])
-            raise HTTPException(
-                status_code=500,
-                detail=f"copilot 템플릿 변수 누락: {missing}",
-            ) from error
-        try:
-            process = subprocess.run(
-                ["bash", "-lc", command],
-                capture_output=True,
-                text=True,
-                timeout=180,
-            )
-        except subprocess.TimeoutExpired as error:
-            prompt_path.unlink(missing_ok=True)
-            raise HTTPException(status_code=504, detail="Copilot 로그 분석이 시간 제한(180초)을 초과했습니다.") from error
-        except OSError as error:
-            prompt_path.unlink(missing_ok=True)
-            raise HTTPException(status_code=500, detail=f"Copilot 실행 실패: {error}") from error
-    else:
-        try:
-            process = subprocess.run(
-                ["gh", "copilot", "-p", prompt],
-                capture_output=True,
-                text=True,
-                timeout=180,
-            )
-        except subprocess.TimeoutExpired as error:
-            prompt_path.unlink(missing_ok=True)
-            raise HTTPException(status_code=504, detail="Copilot 로그 분석이 시간 제한(180초)을 초과했습니다.") from error
-        except OSError as error:
-            prompt_path.unlink(missing_ok=True)
-            raise HTTPException(status_code=500, detail=f"Copilot 실행 실패: {error}") from error
-    prompt_path.unlink(missing_ok=True)
-    if process.returncode != 0:
-        raw_error = (process.stderr or process.stdout or "").strip()[:1000]
-        raise HTTPException(
-            status_code=502,
-            detail=f"Copilot 로그 분석 실패(exit={process.returncode}): {raw_error or '(no output)'}",
-        )
-    return (process.stdout or "").strip() or "응답이 비어 있습니다."
+    return _run_codex_log_analysis(prompt, templates)
 
 
 def _tail_text_lines(path: Path, max_lines: int = 16) -> List[str]:
@@ -3142,6 +3211,7 @@ def _tail_text_lines(path: Path, max_lines: int = 16) -> List[str]:
 def _infer_cli_model(cli_name: str, templates: Dict[str, str]) -> Dict[str, Any]:
     """Infer model name from command templates first, then environment."""
 
+    cli_name = _canonical_cli_name(cli_name)
     from_template = _infer_model_from_templates(cli_name, templates)
     if from_template is not None:
         return {
@@ -3176,6 +3246,7 @@ def _infer_cli_model(cli_name: str, templates: Dict[str, str]) -> Dict[str, Any]
 def _infer_model_from_templates(cli_name: str, templates: Dict[str, str]) -> Optional[Dict[str, str]]:
     """Find explicit --model/-m style option in matching template command."""
 
+    cli_name = _canonical_cli_name(cli_name)
     for key, command in templates.items():
         lowered = command.lower()
         if cli_name not in lowered:
@@ -3204,10 +3275,10 @@ def _infer_model_from_templates(cli_name: str, templates: Dict[str, str]) -> Opt
 def _infer_model_from_env(cli_name: str) -> Optional[Dict[str, str]]:
     """Infer model from common environment variable names."""
 
+    cli_name = _canonical_cli_name(cli_name)
     candidates: Dict[str, List[str]] = {
         "gemini": ["GEMINI_MODEL", "AGENTHUB_GEMINI_MODEL"],
         "codex": ["CODEX_MODEL", "OPENAI_MODEL", "AGENTHUB_CODEX_MODEL"],
-        "claude": ["CLAUDE_MODEL", "ANTHROPIC_MODEL", "AGENTHUB_CLAUDE_MODEL"],
     }
     for env_name in candidates.get(cli_name, []):
         value = os.getenv(env_name, "").strip()
@@ -3219,18 +3290,12 @@ def _infer_model_from_env(cli_name: str) -> Optional[Dict[str, str]]:
 def _infer_model_from_runtime_files(cli_name: str) -> Optional[Dict[str, str]]:
     """Infer model from the latest local runtime/session files."""
 
+    cli_name = _canonical_cli_name(cli_name)
     if cli_name == "gemini":
         candidates = _recent_files(Path("/root/.gemini"), "tmp/**/chats/*.json")
         model = _find_model_in_recent_files(candidates, [r'"model"\s*:\s*"([^"]+)"'])
         if model:
             return {"model": model, "source": "runtime:gemini_chats"}
-        return None
-
-    if cli_name == "claude":
-        candidates = _recent_files(Path("/root/.claude"), "projects/**/*.jsonl")
-        model = _find_model_in_recent_files(candidates, [r'"model"\s*:\s*"([^"]+)"'])
-        if model:
-            return {"model": model, "source": "runtime:claude_projects"}
         return None
 
     if cli_name == "codex":
@@ -3250,6 +3315,13 @@ def _infer_model_from_runtime_files(cli_name: str) -> Optional[Dict[str, str]]:
         return None
 
     return None
+
+
+def _canonical_cli_name(cli_name: str) -> str:
+    """Map legacy provider aliases to the active runtime provider."""
+
+    normalized = str(cli_name or "").strip().lower()
+    return _ASSISTANT_PROVIDER_ALIASES.get(normalized, normalized)
 
 
 def _recent_files(base: Path, pattern: str, limit: int = 20) -> List[Path]:
@@ -3471,6 +3543,25 @@ def _normalize_role_code(value: str) -> str:
     return filtered[:40]
 
 
+def _normalize_role_tag_list(values: Any) -> List[str]:
+    """Normalize role skill/tool metadata into stable identifiers."""
+
+    items: List[str] = []
+    if isinstance(values, str):
+        items = [part.strip() for part in values.replace("\n", ",").split(",")]
+    elif isinstance(values, list):
+        items = [str(item).strip() for item in values]
+    else:
+        return []
+
+    normalized: List[str] = []
+    for item in items:
+        token = _normalize_role_code(item)[:80]
+        if token and token not in normalized:
+            normalized.append(token)
+    return normalized
+
+
 def _default_roles_payload() -> Dict[str, Any]:
     """Default role catalog for role-management MVP."""
 
@@ -3478,8 +3569,6 @@ def _default_roles_payload() -> Dict[str, Any]:
         ("ai-helper", "AI 도우미", "codex", "", "요청/문제 정리", "분석/조치안"),
         ("log-analyzer-codex", "로그 분석 도우미(Codex)", "codex", "coder", "워크플로우 로그", "문제점/조치안"),
         ("log-analyzer-gemini", "로그 분석 도우미(Gemini)", "gemini", "reviewer", "워크플로우 로그", "문제점/조치안"),
-        ("log-analyzer-claude", "로그 분석 도우미(Claude)", "claude", "escalation", "워크플로우 로그", "문제점/조치안"),
-        ("log-analyzer-copilot", "로그 분석 도우미(Copilot)", "copilot", "copilot", "워크플로우 로그", "문제점/조치안"),
         ("coder", "코더", "codex", "coder", "SPEC/PLAN", "코드 변경"),
         ("designer", "디자이너", "codex", "coder", "요구사항", "UI/디자인 산출물"),
         ("tester", "테스터", "bash", "", "코드 상태", "테스트 결과"),
@@ -3489,7 +3578,7 @@ def _default_roles_payload() -> Dict[str, Any]:
         ("qa", "QA", "bash", "", "테스트 계획", "품질 점검"),
         ("architect", "플래너", "gemini", "planner", "요구사항", "실행 계획"),
         ("devops-sre", "인프라·운영 엔지니어", "bash", "", "서비스 상태", "운영 조치"),
-        ("escalation-helper", "에스컬레이션 도우미", "claude", "escalation", "실패 로그/상태", "보조 분석/다음 액션"),
+        ("escalation-helper", "에스컬레이션 도우미", "codex", "escalation", "실패 로그/상태", "보조 분석/다음 액션"),
         ("security", "보안 엔지니어", "bash", "", "코드/설정", "보안 점검"),
         ("db-engineer", "데이터베이스 엔지니어", "bash", "", "스키마", "DB 변경안"),
         ("performance", "성능 최적화 엔지니어", "bash", "", "프로파일링", "개선안"),
@@ -3497,15 +3586,15 @@ def _default_roles_payload() -> Dict[str, Any]:
         ("test-automation", "테스트 자동화 엔지니어", "bash", "", "테스트 전략", "자동화 코드"),
         ("release-manager", "배포 관리자", "bash", "", "릴리즈 계획", "배포 체크"),
         ("incident-analyst", "장애 원인 분석가", "codex", "", "로그/지표", "RCA"),
-        ("orchestration-helper", "오케스트레이션 도우미", "copilot", "copilot", "워크플로우 상태/로그", "다음 단계/재시도 전략"),
+        ("orchestration-helper", "오케스트레이션 도우미", "codex", "copilot", "워크플로우 상태/로그", "다음 단계/재시도 전략"),
         ("system-owner", "시스템 오너", "gemini", "planner", "이슈 본문/SPEC.md", "확정 스펙/우선순위"),
-        ("tech-writer", "기술 문서 작성가", "claude", "documentation_writer", "SPEC/PLAN/REVIEW", "README.md, COPYRIGHT.md, DEVELOPMENT_GUIDE.md"),
+        ("tech-writer", "기술 문서 작성가", "codex", "documentation_writer", "SPEC/PLAN/REVIEW", "README.md, COPYRIGHT.md, DEVELOPMENT_GUIDE.md"),
         ("product-analyst", "제품 분석가", "gemini", "planner", "지표/요구", "개선 우선순위"),
         ("publisher", "퍼블리셔", "codex", "coder", "디자인 시스템/화면 구조", "퍼블리싱 결과물"),
         ("research-agent", "정보검색 도우미", "python3", "research_search", "질문/키워드", "SEARCH_CONTEXT.md"),
         ("refactor-specialist", "리팩토링 전문가", "codex", "coder", "코드베이스", "구조 개선"),
         ("requirements-manager", "요구사항 관리자", "gemini", "planner", "이해관계자 요청", "명세"),
-        ("data-ai-engineer", "데이터/AI 엔지니어", "copilot", "copilot", "데이터 과제", "파이프라인/모델 개선"),
+        ("data-ai-engineer", "데이터/AI 엔지니어", "codex", "copilot", "데이터 과제", "파이프라인/모델 개선"),
     ]
     roles = [
         {
@@ -3517,6 +3606,8 @@ def _default_roles_payload() -> Dict[str, Any]:
             "inputs": inputs,
             "outputs": outputs,
             "checklist": "",
+            "skills": [],
+            "allowed_tools": [],
             "enabled": True,
         }
         for code, name, cli, template_key, inputs, outputs in role_rows
@@ -3575,6 +3666,8 @@ def _read_roles_payload(path: Path) -> Dict[str, Any]:
                 "inputs": str(item.get("inputs", "")).strip(),
                 "outputs": str(item.get("outputs", "")).strip(),
                 "checklist": str(item.get("checklist", "")).strip(),
+                "skills": _normalize_role_tag_list(item.get("skills")),
+                "allowed_tools": _normalize_role_tag_list(item.get("allowed_tools")),
                 "enabled": bool(item.get("enabled", True)),
             }
         )

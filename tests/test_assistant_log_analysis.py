@@ -101,7 +101,7 @@ def test_log_analysis_routes_copilot_requests_to_codex(app_components, monkeypat
 
     def fake_codex(prompt, templates):
         captured["codex_called"] += 1
-        assert "로그 분석 도우미(copilot)" in prompt.lower()
+        assert "로그 분석 도우미(codex)" in prompt.lower()
         return "codex routed response"
 
     def fake_copilot(prompt, templates):
@@ -120,7 +120,40 @@ def test_log_analysis_routes_copilot_requests_to_codex(app_components, monkeypat
     assert response.status_code == 200
     payload = response.json()
     assert payload["ok"] is True
-    assert payload["provider"] == "copilot"
+    assert payload["provider"] == "codex"
+    assert payload["requested_provider"] == "copilot"
     assert payload["assistant"] == "codex routed response"
     assert captured["codex_called"] == 1
     assert captured["copilot_called"] == 0
+
+
+def test_log_analysis_routes_claude_requests_to_codex(app_components, monkeypatch):
+    _, _, app = app_components
+
+    captured = {"codex_called": 0, "claude_called": 0}
+
+    def fake_codex(prompt, templates):
+        captured["codex_called"] += 1
+        return "codex routed response"
+
+    def fake_claude(prompt, templates):
+        captured["claude_called"] += 1
+        return "claude direct response"
+
+    monkeypatch.setattr("app.dashboard._run_codex_log_analysis", fake_codex)
+    monkeypatch.setattr("app.dashboard._run_claude_log_analysis", fake_claude)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/assistant/log-analysis",
+        json={"assistant": "claude", "question": "최근 실패 원인 분석"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["provider"] == "codex"
+    assert payload["requested_provider"] == "claude"
+    assert payload["assistant"] == "codex routed response"
+    assert captured["codex_called"] == 1
+    assert captured["claude_called"] == 0

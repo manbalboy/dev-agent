@@ -616,6 +616,7 @@ def build_planner_prompt(
     next_improvement_tasks_path: str = "",
     memory_selection_path: str = "",
     memory_context_path: str = "",
+    role_context: str = "",
     is_long_term: bool = False,
     is_refinement_round: bool = False,
     planning_mode: str = "general",
@@ -699,6 +700,13 @@ def build_planner_prompt(
         - tool 값은 반드시 research_search만 허용.
         """
     ).strip()
+    if role_context.strip():
+        base += "\n\n" + dedent(
+            f"""
+            Agent runtime profile:
+            {role_context.strip()}
+            """
+        ).strip()
     memory_addendum = "\n\n".join(
         block
         for block in [
@@ -798,6 +806,7 @@ def build_coder_prompt(
     next_improvement_tasks_path: str = "",
     memory_selection_path: str = "",
     memory_context_path: str = "",
+    role_context: str = "",
 ) -> str:
     """Prompt text for coder model (Codex)."""
 
@@ -853,6 +862,13 @@ def build_coder_prompt(
         6. 반복 방지: 같은 문제를 기계적으로 다시 수정하는 패턴이 아닌가?
         """
     ).strip()
+    if role_context.strip():
+        base += "\n\n" + dedent(
+            f"""
+            Agent runtime profile:
+            {role_context.strip()}
+            """
+        ).strip()
     memory_addendum = "\n\n".join(
         block
         for block in [
@@ -1144,6 +1160,7 @@ def build_reviewer_prompt(
     review_path: str,
     memory_selection_path: str = "",
     memory_context_path: str = "",
+    role_context: str = "",
 ) -> str:
     """Prompt text for reviewer model (Gemini)."""
 
@@ -1189,6 +1206,13 @@ def build_reviewer_prompt(
         - 출력 내 후속 질문 금지.
         """
     ).strip()
+    if role_context.strip():
+        base += "\n\n" + dedent(
+            f"""
+            Agent runtime profile:
+            {role_context.strip()}
+            """
+        ).strip()
     memory_addendum = "\n\n".join(
         block
         for block in [

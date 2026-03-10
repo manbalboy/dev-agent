@@ -26,8 +26,7 @@ def default_ai_role_routing_payload() -> Dict[str, Any]:
 
     Current policy:
     - Gemini: planning/review
-    - Codex: coding/expert work
-    - Claude/Copilot: auxiliary or fallback-oriented roles
+    - Codex: coding/expert work plus auxiliary helper tasks
     """
 
     return {
@@ -36,7 +35,7 @@ def default_ai_role_routing_payload() -> Dict[str, Any]:
             "primary_planning_provider": "gemini",
             "primary_review_provider": "gemini",
             "primary_coding_provider": "codex",
-            "auxiliary_providers": ["claude", "copilot"],
+            "auxiliary_providers": ["codex"],
         },
         "routes": {
             "planner": {
@@ -267,6 +266,24 @@ def _normalize_template_keys(raw_value: Any) -> List[str]:
     return result
 
 
+def _normalize_string_list(raw_value: Any, *, max_length: int = 80) -> List[str]:
+    """Normalize optional list metadata into stable identifiers."""
+
+    if isinstance(raw_value, str):
+        values = [part.strip() for part in raw_value.replace("\n", ",").split(",")]
+    elif isinstance(raw_value, list):
+        values = [str(item).strip() for item in raw_value]
+    else:
+        return []
+
+    result: List[str] = []
+    for item in values:
+        key = _normalize_identifier(item, max_length=max_length)
+        if key and key not in result:
+            result.append(key)
+    return result
+
+
 def _read_roles_index(path: Path) -> Dict[str, Dict[str, Any]]:
     """Read enabled role rows into an index keyed by role code."""
 
@@ -293,9 +310,109 @@ def _read_roles_index(path: Path) -> Dict[str, Dict[str, Any]]:
             "name": str(item.get("name", "")).strip(),
             "cli": _normalize_identifier(str(item.get("cli", "")), max_length=32),
             "template_key": _normalize_identifier(str(item.get("template_key", "")), max_length=80),
+            "objective": str(item.get("objective", "")).strip(),
+            "inputs": str(item.get("inputs", "")).strip(),
+            "outputs": str(item.get("outputs", "")).strip(),
+            "checklist": str(item.get("checklist", "")).strip(),
+            "skills": _normalize_string_list(item.get("skills")),
+            "allowed_tools": _normalize_string_list(item.get("allowed_tools")),
             "enabled": bool(item.get("enabled", True)),
         }
     return roles
+
+
+def _read_presets_index(path: Path, known_roles: Dict[str, Dict[str, Any]]) -> Dict[str, Tuple[str, ...]]:
+    """Read role preset rows into an index keyed by preset id."""
+
+    if not path.exists():
+        return {}
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+
+    if not isinstance(payload, dict):
+        return {}
+
+    presets: Dict[str, Tuple[str, ...]] = {}
+    for item in payload.get("presets", []):
+        if not isinstance(item, dict):
+            continue
+        preset_id = _normalize_identifier(str(item.get("preset_id", "")))
+        if not preset_id:
+            continue
+        role_codes: List[str] = []
+        for raw_code in item.get("role_codes", []):
+            code = _normalize_identifier(str(raw_code))
+            if code and code in known_roles and code not in role_codes:
+                role_codes.append(code)
+        presets[preset_id] = tuple(role_codes)
+    return presets
+
+
+def _preferred_cli_for_route(route_name: str) -> str:
+    """Return the default provider bias for one logical route."""
+
+    if route_name in {"planner", "reviewer"}:
+        return "gemini"
+    if route_name == "research_search":
+        return "python3"
+    return "codex"
+
+
+def _select_role_override_from_preset(
+    *,
+    route_name: str,
+    preset_id: str,
+    roles: Dict[str, Dict[str, Any]],
+    presets: Dict[str, Tuple[str, ...]],
+    route_config: Dict[str, Any],
+    default_config: Dict[str, Any],
+) -> str:
+    """Pick the most compatible role from one preset for a logical route."""
+
+    preset_roles = presets.get(preset_id, ())
+    if not preset_roles:
+        return ""
+
+    template_keys = tuple(
+        _normalize_template_keys(route_config.get("template_keys"))
+        or _normalize_template_keys(default_config.get("template_keys"))
+    )
+    default_role_code = _normalize_identifier(str(route_config.get("role_code", ""))) or _normalize_identifier(
+        str(default_config.get("role_code", ""))
+    )
+    preferred_cli = _preferred_cli_for_route(route_name)
+
+    ranked: List[Tuple[int, int, str]] = []
+    for index, role_code in enumerate(preset_roles):
+        role = roles.get(role_code)
+        if role is None or not role.get("enabled", True):
+            continue
+        score = 0
+        if role_code == default_role_code:
+            score += 100
+        role_template = _normalize_identifier(str(role.get("template_key", "")), max_length=80)
+        if role_template and role_template in template_keys:
+            score += 60
+        if role_template == "coder" and route_name in {"designer", "publisher", "copywriter"}:
+            score += 25
+        if role_template == "documentation_writer" and route_name in {"documentation", "commit_summary", "pr_summary"}:
+            score += 25
+        if role_template == "escalation" and route_name == "escalation":
+            score += 25
+        if role_template == "research_search" and route_name == "research_search":
+            score += 25
+        if str(role.get("cli", "")).strip().lower() == preferred_cli:
+            score += 20
+        if score > 0:
+            ranked.append((score, -index, role_code))
+
+    if not ranked:
+        return ""
+    ranked.sort(reverse=True)
+    return ranked[0][2]
 
 
 @dataclass(frozen=True)
@@ -309,6 +426,12 @@ class ResolvedAIRoute:
     template_keys: Tuple[str, ...]
     fallback_route: str
     description: str
+    objective: str
+    inputs: str
+    outputs: str
+    checklist: str
+    skills: Tuple[str, ...]
+    allowed_tools: Tuple[str, ...]
 
 
 class AIRoleRouter:
@@ -318,7 +441,13 @@ class AIRoleRouter:
         self.roles_path = roles_path
         self.routing_path = routing_path
 
-    def resolve(self, route_name: str) -> ResolvedAIRoute:
+    def resolve(
+        self,
+        route_name: str,
+        *,
+        role_code_override: str = "",
+        preset_id: str = "",
+    ) -> ResolvedAIRoute:
         """Resolve one logical route with default fallback behavior."""
 
         normalized_route = _normalize_identifier(route_name)
@@ -327,16 +456,34 @@ class AIRoleRouter:
 
         payload = read_ai_role_routing_payload(self.routing_path)
         roles = _read_roles_index(self.roles_path)
-        return self._resolve_from_payload(normalized_route, payload, roles, visited=set())
+        presets = _read_presets_index(self.roles_path, roles)
+        return self._resolve_from_payload(
+            normalized_route,
+            payload,
+            roles,
+            presets,
+            role_code_override=_normalize_identifier(role_code_override),
+            preset_id=_normalize_identifier(preset_id),
+            visited=set(),
+        )
 
     def describe(self) -> Dict[str, Any]:
         """Return the resolved routing view for inspection and debugging."""
 
         payload = read_ai_role_routing_payload(self.routing_path)
         roles = _read_roles_index(self.roles_path)
+        presets = _read_presets_index(self.roles_path, roles)
         resolved_routes: List[Dict[str, Any]] = []
         for route_name in sorted(payload.get("routes", {})):
-            resolved = self._resolve_from_payload(route_name, payload, roles, visited=set())
+            resolved = self._resolve_from_payload(
+                route_name,
+                payload,
+                roles,
+                presets,
+                role_code_override="",
+                preset_id="",
+                visited=set(),
+            )
             resolved_routes.append(
                 {
                     "route_name": resolved.route_name,
@@ -346,6 +493,12 @@ class AIRoleRouter:
                     "template_keys": list(resolved.template_keys),
                     "fallback_route": resolved.fallback_route,
                     "description": resolved.description,
+                    "objective": resolved.objective,
+                    "inputs": resolved.inputs,
+                    "outputs": resolved.outputs,
+                    "checklist": resolved.checklist,
+                    "skills": list(resolved.skills),
+                    "allowed_tools": list(resolved.allowed_tools),
                 }
             )
         return {
@@ -359,7 +512,10 @@ class AIRoleRouter:
         route_name: str,
         payload: Dict[str, Any],
         roles: Dict[str, Dict[str, Any]],
+        presets: Dict[str, Tuple[str, ...]],
         *,
+        role_code_override: str,
+        preset_id: str,
         visited: set[str],
     ) -> ResolvedAIRoute:
         if route_name in visited:
@@ -373,7 +529,18 @@ class AIRoleRouter:
         if not route_config:
             raise KeyError(f"Unknown AI role route: {route_name}")
 
-        role_code = _normalize_identifier(str(route_config.get("role_code", "")))
+        requested_role_code = role_code_override
+        if not requested_role_code and preset_id:
+            requested_role_code = _select_role_override_from_preset(
+                route_name=route_name,
+                preset_id=preset_id,
+                roles=roles,
+                presets=presets,
+                route_config=route_config,
+                default_config=default_config,
+            )
+
+        role_code = requested_role_code or _normalize_identifier(str(route_config.get("role_code", "")))
         resolved_role = roles.get(role_code)
         if resolved_role is None or not resolved_role.get("enabled", True):
             fallback_role_code = _normalize_identifier(str(default_config.get("role_code", "")))
@@ -382,9 +549,21 @@ class AIRoleRouter:
 
         cli = ""
         role_name = role_code or route_name
+        objective = ""
+        inputs = ""
+        outputs = ""
+        checklist = ""
+        skills: Tuple[str, ...] = ()
+        allowed_tools: Tuple[str, ...] = ()
         if resolved_role:
             cli = str(resolved_role.get("cli", "")).strip().lower()
             role_name = str(resolved_role.get("name", "")).strip() or role_name
+            objective = str(resolved_role.get("objective", "")).strip()
+            inputs = str(resolved_role.get("inputs", "")).strip()
+            outputs = str(resolved_role.get("outputs", "")).strip()
+            checklist = str(resolved_role.get("checklist", "")).strip()
+            skills = tuple(resolved_role.get("skills", []) or [])
+            allowed_tools = tuple(resolved_role.get("allowed_tools", []) or [])
 
         template_keys = tuple(
             _normalize_template_keys(route_config.get("template_keys"))
@@ -398,7 +577,15 @@ class AIRoleRouter:
         ).strip()
 
         if not template_keys and fallback_route:
-            return self._resolve_from_payload(fallback_route, payload, roles, visited=visited)
+            return self._resolve_from_payload(
+                fallback_route,
+                payload,
+                roles,
+                presets,
+                role_code_override=role_code_override,
+                preset_id=preset_id,
+                visited=visited,
+            )
         if not template_keys:
             raise ValueError(f"AI role route '{route_name}' does not define any template keys")
 
@@ -410,4 +597,10 @@ class AIRoleRouter:
             template_keys=template_keys,
             fallback_route=fallback_route,
             description=description,
+            objective=objective,
+            inputs=inputs,
+            outputs=outputs,
+            checklist=checklist,
+            skills=skills,
+            allowed_tools=allowed_tools,
         )

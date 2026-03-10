@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 import shlex
 
+from app.ai_role_routing import AIRoleRouter, default_ai_role_routing_payload
 from app.command_runner import CommandResult
 from app.command_runner import CommandExecutionError
 from app.models import JobRecord, JobStage, JobStatus, NodeRunRecord, utc_now_iso
@@ -104,6 +105,7 @@ def _improvement_paths(repository_path: Path) -> dict[str, Path]:
         "conventions": Orchestrator._docs_file(repository_path, "CONVENTIONS.json"),
         "memory_selection": Orchestrator._docs_file(repository_path, "MEMORY_SELECTION.json"),
         "memory_context": Orchestrator._docs_file(repository_path, "MEMORY_CONTEXT.json"),
+        "memory_trace": Orchestrator._docs_file(repository_path, "MEMORY_TRACE.json"),
         "memory_feedback": Orchestrator._docs_file(repository_path, "MEMORY_FEEDBACK.json"),
         "memory_rankings": Orchestrator._docs_file(repository_path, "MEMORY_RANKINGS.json"),
         "strategy_shadow_report": Orchestrator._docs_file(repository_path, "STRATEGY_SHADOW_REPORT.json"),
@@ -1577,17 +1579,23 @@ def test_memory_retrieval_artifacts_build_route_specific_context(app_components)
 
     selection_payload = json.loads(paths["memory_selection"].read_text(encoding="utf-8"))
     context_payload = json.loads(paths["memory_context"].read_text(encoding="utf-8"))
+    trace_payload = json.loads(paths["memory_trace"].read_text(encoding="utf-8"))
 
     assert selection_payload["corpus_counts"]["episodic"] == 1
     assert selection_payload["corpus_counts"]["decisions"] == 1
     assert selection_payload["corpus_counts"]["failure_patterns"] >= 2
     assert selection_payload["corpus_counts"]["conventions"] >= 3
+    assert selection_payload["source"] == "db"
     assert selection_payload["planner_context"]
     assert selection_payload["reviewer_context"]
     assert selection_payload["coder_context"]
     assert any(item["kind"] == "decision" for item in context_payload["coder_context"])
     assert any(item["kind"] == "failure_pattern" for item in context_payload["reviewer_context"])
     assert any(item["kind"] == "convention" for item in context_payload["planner_context"])
+    assert trace_payload["source"] == "db"
+    assert trace_payload["fallback_used"] is False
+    assert trace_payload["routes"]["planner"]["selected_count"] >= 1
+    assert any(item["kind"] == "convention" for item in trace_payload["routes"]["planner"]["selected_items"])
 
 
 def test_memory_retrieval_skips_banned_memory_entries(app_components):
@@ -1647,9 +1655,191 @@ def test_memory_retrieval_skips_banned_memory_entries(app_components):
     orchestrator._write_memory_retrieval_artifacts(job=job, repository_path=repository_path, paths=paths)
 
     context_payload = json.loads(paths["memory_context"].read_text(encoding="utf-8"))
+    trace_payload = json.loads(paths["memory_trace"].read_text(encoding="utf-8"))
     planner_ids = [item["id"] for item in context_payload["planner_context"]]
     assert "episodic_job_summary:good" in planner_ids
     assert "episodic_job_summary:banned" not in planner_ids
+    assert trace_payload["source"] == "file"
+    assert trace_payload["fallback_used"] is True
+
+
+def test_memory_retrieval_prefers_runtime_db_over_file_artifacts(app_components):
+    settings, store, _ = app_components
+    job = _make_job("job-memory-retrieval-db")
+    job.app_code = "web"
+    job.workflow_id = "wf-memory"
+    store.create_job(job)
+
+    repository_path = settings.repository_workspace_path(job.repository, job.app_code)
+    repository_path.mkdir(parents=True, exist_ok=True)
+    paths = _improvement_paths(repository_path)
+
+    # If retrieval falls back to files, this ID would leak into planner context.
+    paths["memory_log"].write_text(
+        json.dumps(
+            {
+                "memory_id": "episodic_job_summary:file-only",
+                "memory_type": "episodic",
+                "generated_at": "2026-03-10T09:00:00Z",
+                "signals": {"strategy": "feature_expansion", "overall": 9.9, "maturity_level": "fake"},
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    paths["decision_history"].write_text(json.dumps({"entries": []}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    paths["failure_patterns"].write_text(json.dumps({"items": []}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    paths["conventions"].write_text(json.dumps({"rules": []}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    paths["memory_rankings"].write_text(
+        json.dumps(
+            {
+                "items": [
+                    {"memory_id": "episodic_job_summary:file-only", "score": 5.0, "confidence": 0.99, "usage_count": 9, "state": "promoted"},
+                ]
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    orchestrator = Orchestrator(settings, store, FakeTemplateRunner())
+    runtime_store = orchestrator._get_memory_runtime_store()
+    runtime_store.upsert_entry(
+        {
+            "memory_id": f"episodic_job_summary:{job.job_id}",
+            "memory_type": "episodic",
+            "repository": job.repository,
+            "execution_repository": job.repository,
+            "app_code": job.app_code,
+            "workflow_id": job.workflow_id,
+            "job_id": job.job_id,
+            "issue_number": job.issue_number,
+            "issue_title": job.issue_title,
+            "source_kind": "artifact_memory_log",
+            "source_path": str(paths["memory_log"]),
+            "title": "runtime episodic",
+            "summary": "strategy=test_hardening",
+            "state": "promoted",
+            "confidence": 0.92,
+            "score": 4.0,
+            "usage_count": 3,
+            "payload": {
+                "memory_id": f"episodic_job_summary:{job.job_id}",
+                "memory_type": "episodic",
+                "generated_at": "2026-03-10T10:00:00Z",
+                "signals": {"strategy": "test_hardening", "overall": 4.4, "maturity_level": "usable"},
+            },
+            "updated_at": "2026-03-10T10:00:00Z",
+        }
+    )
+    runtime_store.upsert_entry(
+        {
+            "memory_id": f"improvement_strategy:{job.job_id}",
+            "memory_type": "decision",
+            "repository": job.repository,
+            "execution_repository": job.repository,
+            "app_code": job.app_code,
+            "workflow_id": job.workflow_id,
+            "job_id": job.job_id,
+            "issue_number": job.issue_number,
+            "issue_title": job.issue_title,
+            "source_kind": "artifact_decision_history",
+            "source_path": str(paths["decision_history"]),
+            "title": "improvement_strategy",
+            "summary": "test_hardening",
+            "state": "active",
+            "confidence": 0.71,
+            "score": 1.0,
+            "usage_count": 1,
+            "payload": {
+                "decision_id": f"improvement_strategy:{job.job_id}",
+                "generated_at": "2026-03-10T10:00:00Z",
+                "chosen_strategy": "test_hardening",
+                "strategy_focus": "testing",
+            },
+            "updated_at": "2026-03-10T10:00:00Z",
+        }
+    )
+    runtime_store.upsert_entry(
+        {
+            "memory_id": "persistent_low:test_coverage",
+            "memory_type": "failure_pattern",
+            "repository": job.repository,
+            "execution_repository": job.repository,
+            "app_code": job.app_code,
+            "workflow_id": job.workflow_id,
+            "job_id": "job-older",
+            "issue_number": 11,
+            "issue_title": "older issue",
+            "source_kind": "artifact_failure_patterns",
+            "source_path": str(paths["failure_patterns"]),
+            "title": "persistent_low",
+            "summary": "test_coverage",
+            "state": "decayed",
+            "confidence": 0.43,
+            "score": -1.0,
+            "usage_count": 2,
+            "payload": {
+                "pattern_id": "persistent_low:test_coverage",
+                "pattern_type": "persistent_low",
+                "category": "test_coverage",
+                "trigger": "trend_persistent_low",
+                "count": 3,
+                "recommended_actions": ["추가 회귀 테스트 작성"],
+            },
+            "updated_at": "2026-03-10T10:00:00Z",
+        }
+    )
+    runtime_store.upsert_entry(
+        {
+            "memory_id": "conv_pytest_file_pattern",
+            "memory_type": "convention",
+            "repository": job.repository,
+            "execution_repository": job.repository,
+            "app_code": job.app_code,
+            "workflow_id": job.workflow_id,
+            "job_id": "job-older",
+            "issue_number": 11,
+            "issue_title": "older issue",
+            "source_kind": "artifact_conventions",
+            "source_path": str(paths["conventions"]),
+            "title": "testing",
+            "summary": "Python tests follow test_*.py naming under tests/",
+            "state": "promoted",
+            "confidence": 0.88,
+            "score": 3.0,
+            "usage_count": 2,
+            "payload": {
+                "id": "conv_pytest_file_pattern",
+                "type": "testing",
+                "rule": "Python tests follow test_*.py naming under tests/",
+                "confidence": 0.88,
+                "evidence_paths": ["tests/test_orchestrator_retry.py"],
+            },
+            "updated_at": "2026-03-10T10:00:00Z",
+        }
+    )
+
+    orchestrator._write_memory_retrieval_artifacts(job=job, repository_path=repository_path, paths=paths)
+
+    selection_payload = json.loads(paths["memory_selection"].read_text(encoding="utf-8"))
+    context_payload = json.loads(paths["memory_context"].read_text(encoding="utf-8"))
+    trace_payload = json.loads(paths["memory_trace"].read_text(encoding="utf-8"))
+
+    assert selection_payload["source"] == "db"
+    assert context_payload["source"] == "db"
+    assert trace_payload["source"] == "db"
+    assert trace_payload["fallback_used"] is False
+    assert selection_payload["corpus_counts"]["episodic"] == 1
+    assert "episodic_job_summary:file-only" not in selection_payload["planner_context"]
+    assert any(item["id"] == f"episodic_job_summary:{job.job_id}" for item in context_payload["planner_context"])
+    assert any(item["id"] == f"improvement_strategy:{job.job_id}" for item in context_payload["coder_context"])
+    assert any(item["id"] == "persistent_low:test_coverage" for item in context_payload["reviewer_context"])
+    assert any(item["id"] == "conv_pytest_file_pattern" for item in context_payload["planner_context"])
+    assert trace_payload["routes"]["coder"]["selected_count"] >= 2
 
 
 def test_planner_prompt_includes_memory_context_snapshot(app_components):
@@ -1986,10 +2176,13 @@ def test_memory_retrieval_flag_writes_disabled_context_payload(app_components, t
 
     selection_payload = json.loads(paths["memory_selection"].read_text(encoding="utf-8"))
     context_payload = json.loads(paths["memory_context"].read_text(encoding="utf-8"))
+    trace_payload = json.loads(paths["memory_trace"].read_text(encoding="utf-8"))
     assert selection_payload["enabled"] is False
     assert selection_payload["planner_context"] == []
     assert context_payload["enabled"] is False
     assert context_payload["coder_context"] == []
+    assert trace_payload["enabled"] is False
+    assert trace_payload["source"] == "disabled"
 
 
 def test_improvement_stage_writes_disabled_strategy_shadow_when_flag_off(app_components, tmp_path: Path):
@@ -2332,6 +2525,89 @@ def test_workflow_node_metadata_controls_planning_mode_and_agent_profile(app_com
     log_text = log_path.read_text(encoding="utf-8")
     assert "Workflow node note: fallback planner note" in log_text
     assert "Workflow node agent profile override: primary -> fallback" in log_text
+
+
+def test_workflow_node_role_preset_binds_documentation_route(app_components, tmp_path: Path):
+    settings, store, _ = app_components
+    job = replace(_make_job("job-node-role-preset"), attempt=1)
+    store.create_job(job)
+
+    repository_path = settings.repository_workspace_path(job.repository, job.app_code)
+    repository_path.mkdir(parents=True, exist_ok=True)
+    log_path = settings.logs_debug_dir / job.log_file
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text("", encoding="utf-8")
+
+    roles_path = tmp_path / "roles.json"
+    roles_path.write_text(
+        json.dumps(
+            {
+                "roles": [
+                    {"code": "tech-writer", "name": "기술 문서 작성가", "cli": "codex", "template_key": "documentation_writer", "enabled": True},
+                    {"code": "coder", "name": "코더", "cli": "codex", "template_key": "coder", "enabled": True},
+                ],
+                "presets": [
+                    {"preset_id": "doc-fast", "name": "문서 빠른 처리", "role_codes": ["coder"]},
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    routing_path = tmp_path / "ai_role_routing.json"
+    routing_path.write_text(json.dumps(default_ai_role_routing_payload(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    workflow = {
+        "workflow_id": "wf-node-role-preset",
+        "entry_node_id": "n1",
+        "nodes": [
+            {
+                "id": "n1",
+                "type": "documentation_task",
+                "title": "문서화",
+                "role_preset_id": "doc-fast",
+            }
+        ],
+        "edges": [],
+    }
+
+    orchestrator = Orchestrator(
+        settings,
+        store,
+        FakeTemplateRunner(),
+        ai_role_router=AIRoleRouter(roles_path=roles_path, routing_path=routing_path),
+    )
+    orchestrator._commit_markdown_changes_after_stage = lambda *args, **kwargs: None  # type: ignore[method-assign]
+
+    observed: dict[str, str] = {}
+
+    def fake_documentation_stage(job_obj, repo_path, passed_paths, passed_log_path):
+        observed["route_context"] = orchestrator._build_route_runtime_context("documentation")
+        observed["template_name"] = orchestrator._template_for_route("documentation")
+        assert repo_path == repository_path
+        assert passed_log_path == log_path
+
+    orchestrator._workflow_context_paths = lambda _context: {  # type: ignore[method-assign]
+        "spec": Orchestrator._docs_file(repository_path, "SPEC.md"),
+        "plan": Orchestrator._docs_file(repository_path, "PLAN.md"),
+        "review": Orchestrator._docs_file(repository_path, "REVIEW.md"),
+    }
+    orchestrator._stage_documentation_with_claude = fake_documentation_stage  # type: ignore[method-assign]
+
+    orchestrator._run_workflow_pipeline(
+        job,
+        repository_path,
+        workflow,
+        workflow["nodes"],
+        log_path,
+    )
+
+    assert "role_code: coder" in observed["route_context"]
+    assert observed["template_name"] == "documentation_writer__codex"
+    log_text = log_path.read_text(encoding="utf-8")
+    assert "Workflow node role binding: documentation->coder" in log_text
 
 
 def test_workflow_context_results_accumulate_previous_node_outputs(app_components):

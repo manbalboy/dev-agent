@@ -39,7 +39,7 @@ SUPPORTED_NODE_TYPES: Dict[str, Dict[str, Any]] = {
     "gemini_review": {"label": "Gemini 리뷰", "kind": "ai"},
     "product_review": {"label": "제품 품질 리뷰", "kind": "qa"},
     "improvement_stage": {"label": "개선 우선순위/루프 계획", "kind": "qa"},
-    "claude_escalation": {"label": "Claude 에스컬레이션", "kind": "ai"},
+    "claude_escalation": {"label": "에스컬레이션 분석", "kind": "ai"},
     "codex_fix": {"label": "Codex 수정", "kind": "ai"},
     "test_after_fix": {"label": "테스트(수정 후)", "kind": "qa"},
     "test_after_fix_final": {"label": "테스트(최종 수정 후)", "kind": "qa"},
@@ -51,6 +51,14 @@ SUPPORTED_NODE_TYPES: Dict[str, Dict[str, Any]] = {
 SUPPORTED_NODE_AGENT_PROFILES = {"", "auto", "primary", "fallback"}
 SUPPORTED_NODE_PLANNING_MODES = {"", "auto", "general", "big_picture", "dev_planning"}
 SUPPORTED_NODE_MATCH_MODES = {"", "any", "all", "none"}
+
+
+def _normalize_binding_identifier(value: str, max_length: int = 64) -> str:
+    """Normalize role binding identifiers stored on workflow nodes."""
+
+    lowered = str(value or "").strip().lower()
+    filtered = "".join(ch for ch in lowered if ch.isalnum() or ch in {"-", "_"})
+    return filtered[:max_length]
 
 
 def default_workflow_template() -> Dict[str, Any]:
@@ -244,6 +252,8 @@ def schema_payload() -> Dict[str, Any]:
         "node_metadata_fields": [
             {"key": "agent_profile", "label": "AI 프로필", "applies_to": ["*"]},
             {"key": "planning_mode", "label": "Planning Mode", "applies_to": ["gemini_plan"]},
+            {"key": "role_code", "label": "역할 코드", "applies_to": ["*"]},
+            {"key": "role_preset_id", "label": "역할 프리셋", "applies_to": ["*"]},
             {"key": "match_labels", "label": "라벨 조건", "applies_to": ["if_label_match"]},
             {"key": "match_mode", "label": "Match Mode", "applies_to": ["if_label_match"]},
             {"key": "loop_max_iterations", "label": "Loop Max", "applies_to": ["loop_until_pass"]},
@@ -330,6 +340,12 @@ def validate_workflow(workflow: Dict[str, Any]) -> Tuple[bool, List[str]]:
             errors.append(f"unsupported node.planning_mode: {planning_mode}")
         if planning_mode and planning_mode != "auto" and node_type != "gemini_plan":
             errors.append(f"node.planning_mode is only supported for gemini_plan: {node_id}")
+        role_code = str(node.get("role_code", "")).strip()
+        if role_code and _normalize_binding_identifier(role_code) != role_code.lower():
+            errors.append(f"node.role_code has invalid format: {node_id}")
+        role_preset_id = str(node.get("role_preset_id", "")).strip()
+        if role_preset_id and _normalize_binding_identifier(role_preset_id) != role_preset_id.lower():
+            errors.append(f"node.role_preset_id has invalid format: {node_id}")
         match_labels = node.get("match_labels", "")
         if match_labels is not None and not isinstance(match_labels, str):
             errors.append(f"node.match_labels must be string: {node_id}")

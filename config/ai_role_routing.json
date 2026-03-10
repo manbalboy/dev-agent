@@ -4,7 +4,7 @@
     "primary_planning_provider": "gemini",
     "primary_review_provider": "gemini",
     "primary_coding_provider": "codex",
-    "auxiliary_providers": ["copilot", "claude"]
+    "auxiliary_providers": ["codex"]
   },
   "routes": {
     "planner": {

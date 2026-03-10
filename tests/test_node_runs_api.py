@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
+import app.dashboard as dashboard
 from app.models import JobRecord, JobStage, JobStatus, NodeRunRecord, utc_now_iso
 from app.workflow_design import default_workflow_template
 
@@ -28,6 +32,74 @@ def _make_job(job_id: str) -> JobRecord:
         updated_at=now,
         started_at=None,
         finished_at=None,
+    )
+
+
+def _write_workflow_catalog(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "default_workflow_id": "wf-default",
+                "workflows": [
+                    {
+                        "workflow_id": "wf-default",
+                        "name": "Default",
+                        "version": 1,
+                        "entry_node_id": "n1",
+                        "nodes": [{"id": "n1", "type": "gh_read_issue", "title": "기본 이슈 읽기"}],
+                        "edges": [],
+                    },
+                    {
+                        "workflow_id": "wf-app",
+                        "name": "App Workflow",
+                        "version": 2,
+                        "entry_node_id": "n1",
+                        "nodes": [
+                            {"id": "n1", "type": "gh_read_issue", "title": "앱 이슈 읽기"},
+                            {"id": "n2", "type": "write_spec", "title": "앱 SPEC"},
+                            {"id": "n3", "type": "codex_implement", "title": "앱 구현"},
+                        ],
+                        "edges": [
+                            {"from": "n1", "to": "n2", "on": "success"},
+                            {"from": "n2", "to": "n3", "on": "success"},
+                        ],
+                    },
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _write_apps(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "code": "default",
+                    "name": "Default",
+                    "repository": "owner/repo",
+                    "workflow_id": "wf-default",
+                    "source_repository": "",
+                },
+                {
+                    "code": "web",
+                    "name": "Web",
+                    "repository": "owner/repo",
+                    "workflow_id": "wf-app",
+                    "source_repository": "",
+                },
+            ],
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
     )
 
 
@@ -64,6 +136,38 @@ def test_job_detail_api_includes_node_runs(app_components):
     assert len(payload["node_runs"]) == 1
     assert payload["node_runs"][0]["node_type"] == "gh_read_issue"
     assert payload["node_runs"][0]["workflow_id"] == "wf-default"
+
+
+def test_job_detail_api_includes_resolved_workflow_runtime_from_app_mapping(
+    app_components,
+    monkeypatch,
+    tmp_path: Path,
+):
+    _, store, app = app_components
+    client = TestClient(app)
+
+    workflows_path = tmp_path / "config" / "workflows.json"
+    apps_path = tmp_path / "config" / "apps.json"
+    _write_workflow_catalog(workflows_path)
+    _write_apps(apps_path)
+    monkeypatch.setattr(dashboard, "_WORKFLOWS_CONFIG_PATH", workflows_path)
+    monkeypatch.setattr(dashboard, "_APPS_CONFIG_PATH", apps_path)
+
+    job = _make_job("job-detail-workflow-runtime")
+    job.app_code = "web"
+    job.workflow_id = ""
+    store.create_job(job)
+
+    response = client.get(f"/api/jobs/{job.job_id}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    runtime = payload["workflow_runtime"]
+    assert runtime["requested_workflow_id"] == ""
+    assert runtime["resolved_workflow_id"] == "wf-app"
+    assert runtime["resolution_source"] == "app"
+    assert runtime["definition_valid"] is True
+    assert [item["id"] for item in runtime["nodes"]] == ["n1", "n2", "n3"]
 
 
 def test_job_node_runs_api_returns_ordered_records(app_components):
@@ -110,6 +214,40 @@ def test_job_node_runs_api_returns_ordered_records(app_components):
     assert payload["job_id"] == job.job_id
     assert payload["workflow_id"] == "wf-custom"
     assert [item["node_run_id"] for item in payload["node_runs"]] == ["nr-1", "nr-2"]
+
+
+def test_job_detail_api_extracts_workflow_fallback_events(app_components):
+    settings, store, app = app_components
+    client = TestClient(app)
+
+    job = _make_job("job-detail-workflow-fallback")
+    store.create_job(job)
+
+    debug_log_path = settings.logs_dir / "debug" / job.log_file
+    debug_log_path.parent.mkdir(parents=True, exist_ok=True)
+    debug_log_path.write_text(
+        "\n".join(
+            [
+                "[2026-03-10T00:00:00+00:00] Workflow resolution warning: Requested workflow_id not found: wf-missing",
+                "[2026-03-10T00:00:01+00:00] Workflow validation failed; fallback to fixed pipeline: entry_node_id is required",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    response = client.get(f"/api/jobs/{job.job_id}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    runtime = payload["workflow_runtime"]
+    assert runtime["uses_fixed_pipeline"] is True
+    assert [item["kind"] for item in runtime["fallback_events"]] == [
+        "resolution_warning",
+        "validation_failure",
+    ]
+    assert runtime["fallback_events"][0]["message"] == "Requested workflow_id not found: wf-missing"
+    assert runtime["fallback_events"][1]["message"] == "entry_node_id is required"
 
 
 def test_job_detail_api_includes_resume_state(app_components):
@@ -219,6 +357,23 @@ def test_job_detail_api_includes_runtime_signals(app_components):
         '{\n  "shadow_strategy": "test_hardening",\n  "diverged": true,\n  "decision_mode": "memory_divergence",\n  "confidence": 0.84\n}\n',
         encoding="utf-8",
     )
+    (docs_dir / "MEMORY_TRACE.json").write_text(
+        (
+            '{\n'
+            '  "generated_at": "2026-03-10T02:00:00+00:00",\n'
+            '  "enabled": true,\n'
+            '  "source": "db",\n'
+            '  "fallback_used": false,\n'
+            '  "selected_total": 4,\n'
+            '  "routes": {\n'
+            '    "planner": {"selected_count": 2},\n'
+            '    "reviewer": {"selected_count": 1},\n'
+            '    "coder": {"selected_count": 1}\n'
+            '  }\n'
+            '}\n'
+        ),
+        encoding="utf-8",
+    )
 
     response = client.get(f"/api/jobs/{job.job_id}")
 
@@ -236,6 +391,13 @@ def test_job_detail_api_includes_runtime_signals(app_components):
     assert payload["runtime_signals"]["shadow_strategy"] == "test_hardening"
     assert payload["runtime_signals"]["shadow_diverged"] is True
     assert payload["runtime_signals"]["shadow_decision_mode"] == "memory_divergence"
+    assert payload["runtime_signals"]["retrieval_enabled"] is True
+    assert payload["runtime_signals"]["retrieval_source"] == "db"
+    assert payload["runtime_signals"]["retrieval_fallback_used"] is False
+    assert payload["runtime_signals"]["retrieval_selected_total"] == 4
+    assert payload["runtime_signals"]["retrieval_route_counts"]["planner"] == 2
+    assert payload["memory_trace"]["source"] == "db"
+    assert payload["memory_trace"]["routes"]["reviewer"]["selected_count"] == 1
 
 
 def test_job_detail_api_includes_manual_retry_options(app_components):

@@ -151,6 +151,9 @@ def test_workflow_schema_api_returns_supported_node_types(app_components):
     assert payload["node_agent_profiles"] == ["auto", "primary", "fallback"]
     assert payload["node_planning_modes"] == ["auto", "general", "big_picture", "dev_planning"]
     assert payload["node_match_modes"] == ["any", "all", "none"]
+    metadata_keys = {item["key"] for item in payload["node_metadata_fields"]}
+    assert "role_code" in metadata_keys
+    assert "role_preset_id" in metadata_keys
 
 
 def test_save_workflow_api_persists_new_definition(app_components, monkeypatch, tmp_path: Path):
@@ -172,8 +175,21 @@ def test_save_workflow_api_persists_new_definition(app_components, monkeypatch, 
                 "entry_node_id": "n1",
                 "nodes": [
                     {"id": "n1", "type": "gh_read_issue", "title": "이슈 읽기", "notes": "read first"},
-                    {"id": "n2", "type": "write_spec", "title": "SPEC 작성", "agent_profile": "fallback", "notes": "spec note"},
-                    {"id": "n3", "type": "gemini_plan", "title": "플랜", "planning_mode": "dev_planning"},
+                    {
+                        "id": "n2",
+                        "type": "write_spec",
+                        "title": "SPEC 작성",
+                        "agent_profile": "fallback",
+                        "role_code": "coder",
+                        "notes": "spec note",
+                    },
+                    {
+                        "id": "n3",
+                        "type": "gemini_plan",
+                        "title": "플랜",
+                        "planning_mode": "dev_planning",
+                        "role_preset_id": "default-dev",
+                    },
                 ],
                 "edges": [
                     {"from": "n1", "to": "n2", "on": "success"},
@@ -196,8 +212,10 @@ def test_save_workflow_api_persists_new_definition(app_components, monkeypatch, 
     assert stored["name"] == "Product Loop"
     assert stored["entry_node_id"] == "n1"
     assert stored["nodes"][1]["agent_profile"] == "fallback"
+    assert stored["nodes"][1]["role_code"] == "coder"
     assert stored["nodes"][1]["notes"] == "spec note"
     assert stored["nodes"][2]["planning_mode"] == "dev_planning"
+    assert stored["nodes"][2]["role_preset_id"] == "default-dev"
 
 
 def test_validate_workflow_api_allows_cycle_when_loop_until_pass_exists(app_components, monkeypatch, tmp_path: Path):

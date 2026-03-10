@@ -73,9 +73,31 @@ from app.workflow_resume import (
 )
 from app.workflow_resolution import load_workflow_catalog, resolve_workflow_selection
 from app.memory.fix_store import FixStore, NoOpFixStore
+from app.memory.runtime_ingest import ingest_memory_runtime_artifacts
+from app.memory.runtime_store import MemoryRuntimeStore
 
 
 ShellExecutor = Callable[..., object]
+WORKFLOW_NODE_ROUTE_NAMES: Dict[str, tuple[str, ...]] = {
+    "gemini_plan": ("planner",),
+    "idea_to_product_brief": ("planner",),
+    "generate_user_flows": ("planner",),
+    "define_mvp_scope": ("planner",),
+    "architecture_planning": ("planner",),
+    "project_scaffolding": ("planner",),
+    "designer_task": ("designer",),
+    "publisher_task": ("publisher",),
+    "copywriter_task": ("copywriter",),
+    "documentation_task": ("documentation",),
+    "codex_implement": ("coder",),
+    "code_change_summary": ("copilot_helper",),
+    "commit_implement": ("commit_summary",),
+    "gemini_review": ("reviewer",),
+    "codex_fix": ("coder",),
+    "coder_fix_from_test_report": ("coder",),
+    "commit_fix": ("commit_summary",),
+    "create_pr": ("pr_summary",),
+}
 
 
 @dataclass
@@ -109,16 +131,26 @@ class Orchestrator:
         )
         self.feature_flags_path = Path.cwd() / "config" / "feature_flags.json"
         self._agent_profile = "primary"
+        self._workflow_route_role_overrides: Dict[str, str] = {}
         self._active_job_id: str | None = None
         self._last_heartbeat_monotonic: float = 0.0
+        self._memory_runtime_db_path = settings.resolved_memory_dir / "memory_runtime.db"
+        self._memory_runtime_store: MemoryRuntimeStore | None = None
         self._fix_store: FixStore | NoOpFixStore = (
-            FixStore(settings.memory_dir) if settings.memory_enabled else NoOpFixStore()
+            FixStore(settings.resolved_memory_dir) if settings.memory_enabled else NoOpFixStore()
         )
 
     def _feature_enabled(self, flag_name: str) -> bool:
         """Read one adaptive feature flag without requiring process restart."""
 
         return is_feature_enabled(self.feature_flags_path, flag_name)
+
+    def _get_memory_runtime_store(self) -> MemoryRuntimeStore:
+        """Create the canonical memory DB lazily so normal API boot stays light."""
+
+        if self._memory_runtime_store is None:
+            self._memory_runtime_store = MemoryRuntimeStore(self._memory_runtime_db_path)
+        return self._memory_runtime_store
 
     def process_next_job(self) -> bool:
         """Pop one job from queue and process it.
@@ -650,7 +682,9 @@ class Orchestrator:
             node_type = str(node.get("type", ""))
             node_notes = str(node.get("notes", "")).strip()
             previous_agent_profile = self._agent_profile
+            previous_route_role_overrides = dict(self._workflow_route_role_overrides)
             effective_agent_profile = self._workflow_node_agent_profile(node)
+            node_route_role_overrides = self._workflow_node_route_role_overrides(node)
             self._append_actor_log(
                 log_path,
                 "ORCHESTRATOR",
@@ -669,10 +703,22 @@ class Orchestrator:
                     f"Workflow node agent profile override: {previous_agent_profile} -> {effective_agent_profile}",
                 )
             self._agent_profile = effective_agent_profile
+            self._workflow_route_role_overrides = node_route_role_overrides
+            if node_route_role_overrides:
+                binding_items = ", ".join(
+                    f"{route_name}->{role_code}"
+                    for route_name, role_code in sorted(node_route_role_overrides.items())
+                )
+                self._append_actor_log(
+                    log_path,
+                    "ORCHESTRATOR",
+                    f"Workflow node role binding: {binding_items}",
+                )
 
             executor = self._resolve_workflow_node_executor(node_type)
             if executor is None:
                 self._agent_profile = previous_agent_profile
+                self._workflow_route_role_overrides = previous_route_role_overrides
                 raise CommandExecutionError(f"Unsupported workflow node type: {node_type}")
             node_run: NodeRunRecord | None = None
             node_event = "success"
@@ -701,6 +747,7 @@ class Orchestrator:
                 node_exception = error
             finally:
                 self._agent_profile = previous_agent_profile
+                self._workflow_route_role_overrides = previous_route_role_overrides
             if node_run is not None:
                 self._finish_node_run(
                     node_run,
@@ -726,6 +773,7 @@ class Orchestrator:
                 event=node_event,
                 status=node_status,
                 error_message=node_error_message,
+                route_role_overrides=node_route_role_overrides,
             )
 
             if node_status == "success" and node_type not in WORKFLOW_NODE_SKIP_AUTO_COMMIT:
@@ -809,6 +857,45 @@ class Orchestrator:
         if requested in {"primary", "fallback"}:
             return requested
         return self._agent_profile
+
+    @staticmethod
+    def _normalize_workflow_binding_id(value: str, *, max_length: int = 64) -> str:
+        """Normalize one workflow role-binding identifier."""
+
+        lowered = str(value or "").strip().lower()
+        filtered = "".join(ch for ch in lowered if ch.isalnum() or ch in {"-", "_"})
+        return filtered[:max_length]
+
+    def _workflow_node_route_names(self, node: Dict[str, Any]) -> tuple[str, ...]:
+        """Return logical AI routes affected by one workflow node."""
+
+        node_type = str(node.get("type", "")).strip()
+        return WORKFLOW_NODE_ROUTE_NAMES.get(node_type, ())
+
+    def _workflow_node_route_role_overrides(self, node: Dict[str, Any]) -> Dict[str, str]:
+        """Resolve route->role overrides requested by one workflow node."""
+
+        route_names = self._workflow_node_route_names(node)
+        if not route_names:
+            return {}
+
+        explicit_role_code = self._normalize_workflow_binding_id(str(node.get("role_code", "")))
+        preset_id = self._normalize_workflow_binding_id(str(node.get("role_preset_id", "")))
+        if not explicit_role_code and not preset_id:
+            return {}
+
+        overrides: Dict[str, str] = {}
+        for route_name in route_names:
+            if explicit_role_code:
+                resolved = self.ai_role_router.resolve(route_name, role_code_override=explicit_role_code)
+                if resolved.role_code == explicit_role_code:
+                    overrides[route_name] = resolved.role_code
+                continue
+
+            resolved = self.ai_role_router.resolve(route_name, preset_id=preset_id)
+            if resolved.role_code:
+                overrides[route_name] = resolved.role_code
+        return overrides
 
     def _start_node_run(
         self,
@@ -944,6 +1031,7 @@ class Orchestrator:
         event: str,
         status: str,
         error_message: str | None,
+        route_role_overrides: Optional[Dict[str, str]] = None,
     ) -> None:
         """Persist one normalized node result into workflow context."""
 
@@ -964,6 +1052,9 @@ class Orchestrator:
             "started_at": str(getattr(node_run, "started_at", "") or ""),
             "finished_at": str(getattr(node_run, "finished_at", "") or ""),
             "agent_profile": str(getattr(node_run, "agent_profile", self._agent_profile) or self._agent_profile),
+            "role_code": str(node.get("role_code", "")).strip(),
+            "role_preset_id": str(node.get("role_preset_id", "")).strip(),
+            "route_role_overrides": dict(route_role_overrides or {}),
             "artifact_keys": artifact_info["keys"],
             "artifacts": artifact_info["paths"],
         }
@@ -3406,6 +3497,12 @@ class Orchestrator:
             selected_strategy=strategy,
             selected_focus=strategy_focus,
         )
+        self._ingest_memory_runtime_artifacts(
+            job=job,
+            repository_path=repository_path,
+            paths=paths,
+            log_path=log_path,
+        )
         self._append_actor_log(
             log_path, "ORCHESTRATOR",
             f"IMPROVEMENT_PLAN.md 생성 완료 — strategy={loop_state['strategy']}, "
@@ -4286,6 +4383,7 @@ class Orchestrator:
 
         selection_path = paths.get("memory_selection", self._docs_file(repository_path, "MEMORY_SELECTION.json"))
         context_path = paths.get("memory_context", self._docs_file(repository_path, "MEMORY_CONTEXT.json"))
+        trace_path = paths.get("memory_trace", self._docs_file(repository_path, "MEMORY_TRACE.json"))
         if not self._feature_enabled("memory_retrieval"):
             generated_at = utc_now_iso()
             self._write_json_artifact(
@@ -4311,7 +4409,166 @@ class Orchestrator:
                     "coder_context": [],
                 },
             )
+            self._write_json_artifact(
+                trace_path,
+                {
+                    "generated_at": generated_at,
+                    "job_id": job.job_id,
+                    "enabled": False,
+                    "source": "disabled",
+                    "fallback_used": False,
+                    "repository": self._job_execution_repository(job),
+                    "corpus_counts": {},
+                    "selected_total": 0,
+                    "selected_memory_ids": [],
+                    "routes": {},
+                },
+            )
             return
+
+        retrieval_corpus = self._load_memory_retrieval_corpus_from_db(job=job)
+        source = "db"
+        if retrieval_corpus is None:
+            source = "file"
+            retrieval_corpus = self._load_memory_retrieval_corpus_from_files(paths=paths)
+
+        planner_context = self._build_route_memory_context(
+            route="planner",
+            memory_log_entries=retrieval_corpus["memory_log_entries"],
+            decision_entries=retrieval_corpus["decision_entries"],
+            failure_pattern_entries=retrieval_corpus["failure_pattern_entries"],
+            convention_entries=retrieval_corpus["convention_entries"],
+            rankings_map=retrieval_corpus["rankings_map"],
+        )
+        reviewer_context = self._build_route_memory_context(
+            route="reviewer",
+            memory_log_entries=retrieval_corpus["memory_log_entries"],
+            decision_entries=retrieval_corpus["decision_entries"],
+            failure_pattern_entries=retrieval_corpus["failure_pattern_entries"],
+            convention_entries=retrieval_corpus["convention_entries"],
+            rankings_map=retrieval_corpus["rankings_map"],
+        )
+        coder_context = self._build_route_memory_context(
+            route="coder",
+            memory_log_entries=retrieval_corpus["memory_log_entries"],
+            decision_entries=retrieval_corpus["decision_entries"],
+            failure_pattern_entries=retrieval_corpus["failure_pattern_entries"],
+            convention_entries=retrieval_corpus["convention_entries"],
+            rankings_map=retrieval_corpus["rankings_map"],
+        )
+
+        selection_payload = {
+            "generated_at": utc_now_iso(),
+            "job_id": job.job_id,
+            "source": source,
+            "corpus_counts": {
+                "episodic": len(retrieval_corpus["memory_log_entries"]),
+                "decisions": len(retrieval_corpus["decision_entries"]),
+                "failure_patterns": len(retrieval_corpus["failure_pattern_entries"]),
+                "conventions": len(retrieval_corpus["convention_entries"]),
+            },
+            "planner_context": [str(item.get("id", "")).strip() for item in planner_context],
+            "reviewer_context": [str(item.get("id", "")).strip() for item in reviewer_context],
+            "coder_context": [str(item.get("id", "")).strip() for item in coder_context],
+        }
+        context_payload = {
+            "generated_at": selection_payload["generated_at"],
+            "job_id": job.job_id,
+            "repository": self._job_execution_repository(job),
+            "source": source,
+            "planner_context": planner_context,
+            "reviewer_context": reviewer_context,
+            "coder_context": coder_context,
+        }
+        route_traces = {
+            "planner": self._memory_route_trace_payload(planner_context),
+            "reviewer": self._memory_route_trace_payload(reviewer_context),
+            "coder": self._memory_route_trace_payload(coder_context),
+        }
+        selected_memory_ids = sorted(
+            {
+                memory_id
+                for route_payload in route_traces.values()
+                for memory_id in route_payload["selected_ids"]
+            }
+        )
+        trace_payload = {
+            "generated_at": selection_payload["generated_at"],
+            "job_id": job.job_id,
+            "enabled": True,
+            "source": source,
+            "fallback_used": source != "db",
+            "repository": self._job_execution_repository(job),
+            "corpus_counts": dict(selection_payload["corpus_counts"]),
+            "selected_total": len(selected_memory_ids),
+            "selected_memory_ids": selected_memory_ids,
+            "routes": route_traces,
+        }
+
+        selection_path.write_text(json.dumps(selection_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        context_path.write_text(json.dumps(context_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        trace_path.write_text(json.dumps(trace_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    def _load_memory_retrieval_corpus_from_db(self, *, job: JobRecord) -> Optional[Dict[str, Any]]:
+        """Return retrieval corpus from the canonical memory DB when available."""
+
+        try:
+            runtime_store = self._get_memory_runtime_store()
+            runtime_store.refresh_rankings(as_of=utc_now_iso())
+            runtime_entries = runtime_store.query_entries_for_retrieval(
+                repository=job.repository,
+                execution_repository=self._job_execution_repository(job),
+                app_code=job.app_code,
+                workflow_id=str(job.workflow_id or "").strip(),
+            )
+        except Exception:
+            return None
+
+        if not runtime_entries:
+            return None
+
+        memory_log_entries: List[Dict[str, Any]] = []
+        decision_entries: List[Dict[str, Any]] = []
+        failure_pattern_entries: List[Dict[str, Any]] = []
+        convention_entries: List[Dict[str, Any]] = []
+        rankings_map: Dict[str, Dict[str, Any]] = {}
+
+        for entry in runtime_entries:
+            memory_id = str(entry.get("memory_id", "")).strip()
+            if not memory_id:
+                continue
+            rankings_map[memory_id] = {
+                "memory_id": memory_id,
+                "state": str(entry.get("state", "active")).strip() or "active",
+                "score": float(entry.get("score", 0.0) or 0.0),
+                "confidence": float(entry.get("confidence", 0.5) or 0.5),
+                "usage_count": int(entry.get("usage_count", 0) or 0),
+            }
+            payload = self._memory_runtime_entry_payload(entry)
+            if not payload:
+                continue
+            memory_type = str(entry.get("memory_type", "")).strip()
+            if memory_type == "episodic":
+                memory_log_entries.append(payload)
+            elif memory_type == "decision":
+                decision_entries.append(payload)
+            elif memory_type == "failure_pattern":
+                failure_pattern_entries.append(payload)
+            elif memory_type == "convention":
+                convention_entries.append(payload)
+
+        if not any([memory_log_entries, decision_entries, failure_pattern_entries, convention_entries]):
+            return None
+        return {
+            "memory_log_entries": memory_log_entries,
+            "decision_entries": decision_entries,
+            "failure_pattern_entries": failure_pattern_entries,
+            "convention_entries": convention_entries,
+            "rankings_map": rankings_map,
+        }
+
+    def _load_memory_retrieval_corpus_from_files(self, *, paths: Dict[str, Path]) -> Dict[str, Any]:
+        """Return retrieval corpus from legacy file artifacts."""
 
         memory_log_entries = self._read_jsonl_entries(paths.get("memory_log"))
         decision_entries = self._read_json_history_entries(paths.get("decision_history"))
@@ -4332,56 +4589,83 @@ class Orchestrator:
             for item in ranking_entries
             if isinstance(item, dict) and str(item.get("memory_id", "")).strip()
         }
-
-        planner_context = self._build_route_memory_context(
-            route="planner",
-            memory_log_entries=memory_log_entries,
-            decision_entries=decision_entries,
-            failure_pattern_entries=failure_pattern_entries,
-            convention_entries=convention_entries,
-            rankings_map=rankings_map,
-        )
-        reviewer_context = self._build_route_memory_context(
-            route="reviewer",
-            memory_log_entries=memory_log_entries,
-            decision_entries=decision_entries,
-            failure_pattern_entries=failure_pattern_entries,
-            convention_entries=convention_entries,
-            rankings_map=rankings_map,
-        )
-        coder_context = self._build_route_memory_context(
-            route="coder",
-            memory_log_entries=memory_log_entries,
-            decision_entries=decision_entries,
-            failure_pattern_entries=failure_pattern_entries,
-            convention_entries=convention_entries,
-            rankings_map=rankings_map,
-        )
-
-        selection_payload = {
-            "generated_at": utc_now_iso(),
-            "job_id": job.job_id,
-            "corpus_counts": {
-                "episodic": len(memory_log_entries),
-                "decisions": len(decision_entries),
-                "failure_patterns": len(failure_pattern_entries),
-                "conventions": len(convention_entries),
-            },
-            "planner_context": [str(item.get("id", "")).strip() for item in planner_context],
-            "reviewer_context": [str(item.get("id", "")).strip() for item in reviewer_context],
-            "coder_context": [str(item.get("id", "")).strip() for item in coder_context],
-        }
-        context_payload = {
-            "generated_at": selection_payload["generated_at"],
-            "job_id": job.job_id,
-            "repository": self._job_execution_repository(job),
-            "planner_context": planner_context,
-            "reviewer_context": reviewer_context,
-            "coder_context": coder_context,
+        return {
+            "memory_log_entries": memory_log_entries,
+            "decision_entries": decision_entries,
+            "failure_pattern_entries": failure_pattern_entries,
+            "convention_entries": convention_entries,
+            "rankings_map": rankings_map,
         }
 
-        selection_path.write_text(json.dumps(selection_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        context_path.write_text(json.dumps(context_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    @staticmethod
+    def _memory_runtime_entry_payload(entry: Dict[str, Any]) -> Dict[str, Any]:
+        """Project one canonical DB entry back to legacy retrieval payload shape."""
+
+        payload = entry.get("payload", {}) if isinstance(entry.get("payload"), dict) else {}
+        if isinstance(payload, dict) and payload:
+            return dict(payload)
+
+        memory_id = str(entry.get("memory_id", "")).strip()
+        memory_type = str(entry.get("memory_type", "")).strip()
+        if memory_type == "episodic":
+            return {
+                "memory_id": memory_id,
+                "memory_type": "episodic",
+                "generated_at": str(entry.get("updated_at", "")).strip(),
+                "issue_title": str(entry.get("issue_title", "")).strip(),
+                "signals": {},
+            }
+        if memory_type == "decision":
+            return {
+                "decision_id": memory_id,
+                "generated_at": str(entry.get("updated_at", "")).strip(),
+                "decision_type": str(entry.get("title", "")).strip(),
+                "chosen_strategy": str(entry.get("summary", "")).strip(),
+            }
+        if memory_type == "failure_pattern":
+            return {
+                "pattern_id": memory_id,
+                "generated_at": str(entry.get("updated_at", "")).strip(),
+                "pattern_type": str(entry.get("title", "")).strip(),
+                "trigger": str(entry.get("summary", "")).strip(),
+            }
+        if memory_type == "convention":
+            return {
+                "id": memory_id,
+                "type": str(entry.get("title", "")).strip(),
+                "rule": str(entry.get("summary", "")).strip(),
+                "confidence": float(entry.get("confidence", 0.0) or 0.0),
+                "evidence_paths": [],
+            }
+        return {}
+
+    @staticmethod
+    def _memory_route_trace_payload(items: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Build one compact route trace payload for dashboard/operator inspection."""
+
+        selected_items: List[Dict[str, Any]] = []
+        selected_ids: List[str] = []
+        kind_counts: Dict[str, int] = {}
+        for item in items:
+            memory_id = str(item.get("id", "")).strip()
+            if not memory_id:
+                continue
+            kind = str(item.get("kind", "")).strip() or "unknown"
+            selected_ids.append(memory_id)
+            kind_counts[kind] = int(kind_counts.get(kind, 0) or 0) + 1
+            selected_items.append(
+                {
+                    "id": memory_id,
+                    "kind": kind,
+                    "summary": str(item.get("summary", "")).strip(),
+                }
+            )
+        return {
+            "selected_count": len(selected_ids),
+            "selected_ids": selected_ids,
+            "kind_counts": kind_counts,
+            "selected_items": selected_items,
+        }
 
     def _write_strategy_shadow_report(
         self,
@@ -4435,6 +4719,41 @@ class Orchestrator:
             selected_focus=selected_focus,
         )
         report_path.write_text(json.dumps(report_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    def _ingest_memory_runtime_artifacts(
+        self,
+        *,
+        job: JobRecord,
+        repository_path: Path,
+        paths: Dict[str, Path],
+        log_path: Path,
+    ) -> None:
+        """Sync file-based memory artifacts into the canonical SQLite store."""
+
+        try:
+            sync_counts = ingest_memory_runtime_artifacts(
+                self._get_memory_runtime_store(),
+                job=job,
+                execution_repository=self._job_execution_repository(job),
+                paths=paths,
+            )
+        except Exception as exc:
+            self._append_actor_log(
+                log_path,
+                "ORCHESTRATOR",
+                f"Memory runtime ingest skipped: {exc}",
+            )
+            return
+
+        if any(sync_counts.values()):
+            self._append_actor_log(
+                log_path,
+                "ORCHESTRATOR",
+                "Memory runtime ingest synced "
+                f"(entries={sync_counts['entries']}, "
+                f"feedback={sync_counts['feedback']}, "
+                f"retrieval_runs={sync_counts['retrieval_runs']})",
+            )
 
     def _build_strategy_shadow_report_payload(
         self,
@@ -5246,6 +5565,7 @@ class Orchestrator:
                 next_improvement_tasks_path=str(paths.get("next_improvement_tasks", self._docs_file(repository_path, "NEXT_IMPROVEMENT_TASKS.json"))),
                 memory_selection_path=str(paths.get("memory_selection", self._docs_file(repository_path, "MEMORY_SELECTION.json"))),
                 memory_context_path=str(paths.get("memory_context", self._docs_file(repository_path, "MEMORY_CONTEXT.json"))),
+                role_context=self._build_route_runtime_context("planner"),
                 is_long_term=self._is_long_track(self._require_job(job.job_id)),
                 is_refinement_round=review_ready,
                 planning_mode=planning_mode,
@@ -5320,6 +5640,7 @@ class Orchestrator:
             next_improvement_tasks_path=str(paths.get("next_improvement_tasks", self._docs_file(repository_path, "NEXT_IMPROVEMENT_TASKS.json"))),
             memory_selection_path=str(paths.get("memory_selection", self._docs_file(repository_path, "MEMORY_SELECTION.json"))),
             memory_context_path=str(paths.get("memory_context", self._docs_file(repository_path, "MEMORY_CONTEXT.json"))),
+            role_context=self._build_route_runtime_context("planner"),
             is_long_term=self._is_long_track(self._require_job(job.job_id)),
             is_refinement_round=review_ready,
             planning_mode=planning_mode,
@@ -5365,6 +5686,13 @@ class Orchestrator:
                 plan_text = paths["plan"].read_text(encoding="utf-8", errors="replace")
                 tool_request = self._parse_planner_tool_request(plan_text)
                 if not tool_request:
+                    break
+                if not self._route_allows_tool("planner", str(tool_request.get("tool", ""))):
+                    self._append_actor_log(
+                        log_path,
+                        "ORCHESTRATOR",
+                        f"Planner requested disallowed tool '{tool_request.get('tool', '')}'. Ignoring tool request.",
+                    )
                     break
                 if tool_request_count >= max_tool_requests:
                     self._append_actor_log(
@@ -5650,6 +5978,7 @@ class Orchestrator:
                 next_improvement_tasks_path=str(paths.get("next_improvement_tasks", self._docs_file(repository_path, "NEXT_IMPROVEMENT_TASKS.json"))),
                 memory_selection_path=str(paths.get("memory_selection", self._docs_file(repository_path, "MEMORY_SELECTION.json"))),
                 memory_context_path=str(paths.get("memory_context", self._docs_file(repository_path, "MEMORY_CONTEXT.json"))),
+                role_context=self._build_route_runtime_context("coder"),
             ),
             encoding="utf-8",
         )
@@ -5764,7 +6093,7 @@ class Orchestrator:
         paths: Dict[str, Path],
         log_path: Path,
     ) -> None:
-        """Run documentation stage with Claude first, then Codex fallback."""
+        """Run documentation stage with configured documentation route, then coder fallback."""
 
         self._set_stage(job.job_id, JobStage.DOCUMENTATION_TASK, log_path)
         prompt_path = self._docs_file(repository_path, "DOCUMENTATION_PROMPT.md")
@@ -5786,12 +6115,12 @@ class Orchestrator:
             encoding="utf-8",
         )
 
-        claude_error: Optional[str] = None
+        route_error: Optional[str] = None
         bundle_applied = False
         for resolved_template in self._template_candidates_for_route("documentation"):
             if not self.command_templates.has_template(resolved_template):
                 continue
-            claude_vars = {
+            route_vars = {
                 **self._build_template_variables(job, paths, prompt_path),
                 "docs_bundle_path": str(bundle_path),
                 "pr_summary_path": str(bundle_path),
@@ -5800,7 +6129,7 @@ class Orchestrator:
             try:
                 result = self.command_templates.run_template(
                     template_name=resolved_template,
-                    variables=claude_vars,
+                    variables=route_vars,
                     cwd=repository_path,
                     log_writer=self._actor_log_writer(log_path, "TECH_WRITER"),
                 )
@@ -5811,24 +6140,24 @@ class Orchestrator:
                     self._append_actor_log(
                         log_path,
                         "ORCHESTRATOR",
-                        f"Documentation generated by Claude template: {resolved_template}",
+                        f"Documentation generated by route template: {resolved_template}",
                     )
                     break
             except CommandExecutionError as error:
-                claude_error = str(error)
+                route_error = str(error)
 
         if not bundle_applied:
-            if claude_error:
+            if route_error:
                 self._append_actor_log(
                     log_path,
                     "ORCHESTRATOR",
-                    f"Claude documentation step failed. Fallback to Codex: {claude_error}",
+                    f"Documentation route failed. Fallback to coder route: {route_error}",
                 )
             else:
                 self._append_actor_log(
                     log_path,
                     "ORCHESTRATOR",
-                    "Claude documentation template unavailable or output invalid. Fallback to Codex.",
+                    "Documentation route unavailable or output invalid. Fallback to coder route.",
                 )
             fallback_prompt = self._docs_file(repository_path, "CODER_PROMPT_DOCUMENTATION_FALLBACK.md")
             fallback_prompt.write_text(
@@ -6697,7 +7026,7 @@ class Orchestrator:
             self._append_actor_log(
                 log_path,
                 "COPILOT",
-                f"Wrote code change summary via Copilot: {summary_path.name}",
+                f"Wrote code change summary via helper route: {summary_path.name}",
             )
             return
 
@@ -6752,7 +7081,7 @@ class Orchestrator:
         repository_path: Path,
         log_path: Path,
     ) -> Optional[str]:
-        """Try Copilot CLI summary generation and return markdown text."""
+        """Try helper-route summary generation and return markdown text."""
 
         prompt_path = self._docs_file(repository_path, "COPILOT_SUMMARY_PROMPT.md")
         prompt_path.write_text(prompt, encoding="utf-8")
@@ -6778,24 +7107,11 @@ class Orchestrator:
                 self._append_actor_log(
                     log_path,
                     "COPILOT",
-                    f"Copilot template failed. Fallback to built-in command: {error}",
+                    f"Helper route failed without external fallback: {error}",
                 )
-                result = self.shell_executor(
-                    command=f"gh copilot -p {shlex.quote(prompt)}",
-                    cwd=repository_path,
-                    log_writer=self._actor_log_writer(log_path, "COPILOT"),
-                    check=False,
-                    command_purpose="copilot code change summary fallback",
-                )
+                return None
         else:
-            command = f"gh copilot -p {shlex.quote(prompt)}"
-            result = self.shell_executor(
-                command=command,
-                cwd=repository_path,
-                log_writer=self._actor_log_writer(log_path, "COPILOT"),
-                check=False,
-                command_purpose="copilot code change summary",
-            )
+            return None
         if int(getattr(result, "exit_code", 1)) != 0:
             return None
         output = str(getattr(result, "stdout", "")).strip()
@@ -7086,7 +7402,7 @@ class Orchestrator:
         changed_paths: List[str],
         log_path: Path,
     ) -> str:
-        """Generate one-line commit summary with Copilot-first strategy."""
+        """Generate one-line commit summary using configured helper routes."""
 
         summary = self._prepare_commit_summary_with_copilot(
             job=job,
@@ -7118,7 +7434,7 @@ class Orchestrator:
         commit_type: str,
         log_path: Path,
     ) -> str:
-        """Generate one-line Korean commit summary using Claude templates."""
+        """Generate one-line Korean commit summary using configured summary route."""
 
         template_name = self._find_configured_template_for_route("commit_summary")
         if not template_name:
@@ -7190,7 +7506,7 @@ class Orchestrator:
         changed_paths: List[str],
         log_path: Path,
     ) -> str:
-        """Try to generate one-line commit summary with Copilot."""
+        """Try to generate one-line commit summary with helper route."""
 
         prompt_lines = [
             "다음 변경사항의 커밋 제목 요약 1줄만 작성하세요.",
@@ -7243,17 +7559,11 @@ class Orchestrator:
                 self._append_actor_log(
                     log_path,
                     "COPILOT",
-                    f"Copilot commit summary template failed: {error}",
+                    f"Helper commit summary template failed: {error}",
                 )
                 return ""
         else:
-            result = self.shell_executor(
-                command=f"gh copilot -p {shlex.quote(prompt)}",
-                cwd=repository_path,
-                log_writer=self._actor_log_writer(log_path, "COPILOT"),
-                check=False,
-                command_purpose="copilot commit summary",
-            )
+            return ""
 
         if int(getattr(result, "exit_code", 1)) != 0:
             return ""
@@ -7314,6 +7624,7 @@ class Orchestrator:
                 review_path=str(paths["review"]),
                 memory_selection_path=str(paths.get("memory_selection", self._docs_file(repository_path, "MEMORY_SELECTION.json"))),
                 memory_context_path=str(paths.get("memory_context", self._docs_file(repository_path, "MEMORY_CONTEXT.json"))),
+                role_context=self._build_route_runtime_context("reviewer"),
             ),
             encoding="utf-8",
         )
@@ -7385,6 +7696,7 @@ class Orchestrator:
                 next_improvement_tasks_path=str(paths.get("next_improvement_tasks", self._docs_file(repository_path, "NEXT_IMPROVEMENT_TASKS.json"))),
                 memory_selection_path=str(paths.get("memory_selection", self._docs_file(repository_path, "MEMORY_SELECTION.json"))),
                 memory_context_path=str(paths.get("memory_context", self._docs_file(repository_path, "MEMORY_CONTEXT.json"))),
+                role_context=self._build_route_runtime_context("coder"),
             ),
             encoding="utf-8",
         )
@@ -7770,7 +8082,7 @@ class Orchestrator:
         paths: Dict[str, Path],
         log_path: Path,
     ) -> Optional[Path]:
-        """Generate PR summary markdown with Claude before PR creation."""
+        """Generate PR summary markdown with configured summary route before PR creation."""
 
         template_name = self._find_configured_template_for_route("pr_summary")
         if not template_name:
@@ -8178,7 +8490,7 @@ class Orchestrator:
         return stage_map.get(stage_name, f"{stage_name} 문서 반영")
 
     def _run_optional_escalation(self, job_id: str, log_path: Path, last_error: str) -> None:
-        """Run optional escalation template (for example Claude) after a failure."""
+        """Run optional escalation template after a failure."""
 
         job = self._require_job(job_id)
         repository_path = self._job_workspace_path(job)
@@ -9829,10 +10141,18 @@ class Orchestrator:
             return True
         return "[초초장기]" in title or "[ultra10]" in title
 
+    def _resolve_ai_route(self, route_name: str):
+        """Resolve one logical route with active workflow-node role overrides."""
+
+        override_role_code = self._workflow_route_role_overrides.get(str(route_name or "").strip(), "")
+        if override_role_code:
+            return self.ai_role_router.resolve(route_name, role_code_override=override_role_code)
+        return self.ai_role_router.resolve(route_name)
+
     def _template_candidates_for_route(self, route_name: str) -> List[str]:
         """Return ordered template candidates for one logical AI route."""
 
-        route = self.ai_role_router.resolve(route_name)
+        route = self._resolve_ai_route(route_name)
         candidates: List[str] = []
         for base_template in route.template_keys:
             per_provider = ""
@@ -9851,6 +10171,51 @@ class Orchestrator:
             if candidate and candidate not in deduped:
                 deduped.append(candidate)
         return deduped
+
+    def _build_route_runtime_context(self, route_name: str) -> str:
+        """Describe one route's runtime profile for prompt injection."""
+
+        route = self._resolve_ai_route(route_name)
+        lines = [
+            f"- route: {route.route_name}",
+            f"- role_code: {route.role_code}",
+            f"- role_name: {route.role_name}",
+            f"- cli: {route.cli or '(unspecified)'}",
+        ]
+        if route.description:
+            lines.append(f"- route_description: {route.description}")
+        if route.objective:
+            lines.append(f"- objective: {route.objective}")
+        if route.inputs:
+            lines.append(f"- expected_inputs: {route.inputs}")
+        if route.outputs:
+            lines.append(f"- expected_outputs: {route.outputs}")
+        if route.skills:
+            lines.append(f"- attached_skills: {', '.join(route.skills)}")
+        if route.allowed_tools:
+            lines.append(f"- allowed_tools: {', '.join(route.allowed_tools)}")
+        checklist_items = [
+            item.strip()
+            for item in re.split(r"[\n,]+", route.checklist)
+            if item.strip()
+        ]
+        if checklist_items:
+            lines.append("- role_checklist:")
+            lines.extend(f"  - {item}" for item in checklist_items[:8])
+        elif route.checklist:
+            lines.append(f"- role_checklist: {route.checklist}")
+        return "\n".join(lines)
+
+    def _route_allows_tool(self, route_name: str, tool_name: str) -> bool:
+        """Return True when one route may request one tool."""
+
+        normalized_tool = str(tool_name or "").strip().lower()
+        if not normalized_tool:
+            return False
+        route = self._resolve_ai_route(route_name)
+        if not route.allowed_tools:
+            return normalized_tool == "research_search" if route_name == "planner" else False
+        return normalized_tool in route.allowed_tools
 
     def _template_for_route(self, route_name: str) -> str:
         """Resolve one logical AI route to the best available template key."""
