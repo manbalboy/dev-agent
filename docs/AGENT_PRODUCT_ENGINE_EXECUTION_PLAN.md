@@ -79,7 +79,20 @@
   - LangGraph planner/recovery subgraph
 - 완료 조건:
   - top-level orchestrator를 유지한 채 외부 프레임워크가 shadow/opt-in/default 순서로 안전하게 들어간다.
+  - 현재 상태: planner/recovery는 LangGraph shadow trace까지 진입
+  - Phase 5 전에 `approved backlog -> next job enqueue` 첫 슬라이스와 `FOLLOWUP_BACKLOG_TASK.json` bridge까지 연결됨
+  - follow-up job contract 메타(`job_kind`, `parent_job_id`, `backlog_candidate_id`)까지 분리됨
+  - `FAILURE_PATTERNS.json` 기반 recurring failure backlog 입력도 연결됨
+  - 다음 남은 연결고리: operator backlog UX 보강, diagnosis trace 장기 효과성/빈도 상관관계
+  - `tool-using diagnosis loop` 첫 슬라이스는 assistant log-analysis 경로에 연결됨
+  - assistant chat과 job detail에도 diagnosis trace가 노출됨
+  - admin panel에도 diagnosis trace 비교 뷰가 노출됨
+  - admin panel에서 selected/compare trace diff까지 가능
+  - UI 품질 가드레일과 운영자 runtime input registry 첫 슬라이스가 들어감
+  - 운영자 입력 관리에는 AI/템플릿 기반 request draft 추천과 승인 등록 경로가 추가됨
   - 상세 설계/도입 순서: [PHASE4_AGENTIC_RUNTIME_ADOPTION_PLAN.md](./PHASE4_AGENTIC_RUNTIME_ADOPTION_PLAN.md)
+  - 단기 우선순위/작은 슬라이스 기준: [FUTURE_DIRECTION_PRIORITY_ROADMAP.md](./FUTURE_DIRECTION_PRIORITY_ROADMAP.md)
+  - UI 품질/운영자 입력 상세: [UI_QUALITY_AND_OPERATOR_INPUTS_PLAN.md](./UI_QUALITY_AND_OPERATOR_INPUTS_PLAN.md)
 
 ### Phase 5. Continuous Job Operations
 - 목적: 장기 운영 시 stuck job / provider outage / worker restart에 견디게 만든다.
@@ -90,6 +103,8 @@
   - retry policy split
 - 완료 조건:
   - worker 재시작 후 running 고착 작업을 자동 정리/복구
+  - 상세 설계/확장 방향: [PHASE5_CONTINUOUS_JOB_OPERATIONS_EXPANSION_PLAN.md](./PHASE5_CONTINUOUS_JOB_OPERATIONS_EXPANSION_PLAN.md)
+  - 첫 구현 권장 슬라이스: `5-A1 Runtime Recovery Trace`
 
 ### Phase 6. Observability
 - 목적: 실패 원인과 품질 추세를 운영자가 즉시 파악할 수 있게 만든다.

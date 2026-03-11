@@ -614,8 +614,10 @@ def build_planner_prompt(
     improvement_plan_path: str = "",
     improvement_loop_state_path: str = "",
     next_improvement_tasks_path: str = "",
+    followup_backlog_task_path: str = "",
     memory_selection_path: str = "",
     memory_context_path: str = "",
+    operator_inputs_path: str = "",
     role_context: str = "",
     is_long_term: bool = False,
     is_refinement_round: bool = False,
@@ -633,8 +635,10 @@ def build_planner_prompt(
         - {improvement_plan_path} (파일이 존재하고 비어있지 않으면 다음 라운드 전략으로 반영)
         - {improvement_loop_state_path} (strategy / scope_restriction / rollback 신호 참고)
         - {next_improvement_tasks_path} (다음 우선 작업 목록이 있으면 반드시 반영)
+        - {followup_backlog_task_path} (follow-up backlog 브릿지 파일이 있으면 최우선 다음 작업으로 반영)
         - {memory_selection_path} (memory retrieval selection 결과가 있으면 참고)
         - {memory_context_path} (retrieved memory context가 있으면 참고)
+        - {operator_inputs_path} (운영자가 나중에 제공할 입력/키 상태가 있으면 반영)
 
         출력 대상 경로(참고용):
         - {plan_path}
@@ -653,6 +657,8 @@ def build_planner_prompt(
         - 디자인 풍: 예) 미니멀, 모던, 대시보드형, 카드형 등 구체 스타일
         - 시각 원칙: 컬러/패딩/마진/타이포의 방향성
         - 반응형 원칙: 모바일 우선 규칙
+        - UI 복잡도 제어: 새 기능이 들어와도 메뉴/정보 위계를 어떻게 단순하게 유지할지
+        - 벤치마크 방향: 참고할 상위권 레퍼런스 제품 1~2개와 차용할 구조 원칙
 
         Extensible architecture design 섹션 필수 항목:
         - 모듈 경계: 역할/도메인별 책임 분리
@@ -676,8 +682,13 @@ def build_planner_prompt(
         - 각 섹션은 실행 가능한 체크리스트와 산출물 파일을 포함.
         - 계획 작성 전에 저장소의 관련 코드/문서/테스트를 직접 검색해 현재 상태를 파악.
         - 변경 파일 후보와 영향 범위를 근거 기반으로 명시.
+        - UI 변경이 포함되면 모바일(360~430px) 기준 레이아웃 유지 전략을 반드시 쓴다.
+        - UI 변경이 포함되면 새 패널/새 카드/새 메뉴를 추가할 때 무엇을 접거나 분리할지 함께 제시한다.
+        - UI 복잡도가 이미 높은 화면은 기능 추가보다 정보 구조 단순화, 탭/메뉴 분리, 카드 축약을 우선 고려한다.
         - REVIEW.md가 있으면 TODO를 고도화 플랜에 반영.
         - IMPROVEMENT_PLAN.md / NEXT_IMPROVEMENT_TASKS.json 이 있으면 strategy와 우선순위를 계획에 직접 반영.
+        - FOLLOWUP_BACKLOG_TASK.json 이 있으면 이 후보를 이번 라운드의 최우선 next action으로 반영.
+        - OPERATOR_INPUTS.json 에 pending input이 있으면 차단 요소와 대체 경로를 함께 계획에 쓴다.
         - improvement strategy가 `design_rebaseline` 또는 scope_restriction이 `MVP_redefinition`이면,
           구현 확대가 아니라 제품 정의/범위/설계 문서 재정렬 계획을 우선 작성.
         - improvement strategy가 `feature_expansion`이면 품질 게이트를 깨지 않는 범위에서 사용자 가치가 높은 기능 1개만 확장.
@@ -710,8 +721,10 @@ def build_planner_prompt(
     memory_addendum = "\n\n".join(
         block
         for block in [
+            _read_prompt_context(followup_backlog_task_path, label="Follow-up Backlog Task"),
             _read_prompt_context(memory_selection_path, label="Memory Selection"),
             _read_prompt_context(memory_context_path, label="Memory Context"),
+            _read_prompt_context(operator_inputs_path, label="Operator Inputs"),
         ]
         if block
     ).strip()
@@ -806,6 +819,7 @@ def build_coder_prompt(
     next_improvement_tasks_path: str = "",
     memory_selection_path: str = "",
     memory_context_path: str = "",
+    operator_inputs_path: str = "",
     role_context: str = "",
 ) -> str:
     """Prompt text for coder model (Codex)."""
@@ -826,6 +840,7 @@ def build_coder_prompt(
         {improvement_plan_path}가 존재하고 비어있지 않으면 개선 전략과 scope restriction을 우선 반영하세요.
         {improvement_loop_state_path}가 존재하면 strategy / rollback / principle enforcement 신호를 참고하세요.
         {next_improvement_tasks_path}가 존재하고 비어있지 않으면 listed task를 우선순위대로 처리하세요.
+        {operator_inputs_path}가 존재하면 운영자 제공 입력 상태를 참고하세요. secret 값은 직접 출력하지 말고 env var 존재 여부만 활용하세요.
 
         Requirements:
         - 아래 운영 원칙을 따른다.
@@ -851,7 +866,11 @@ def build_coder_prompt(
         - improvement strategy가 `quality_hardening`이면 레거시 전략으로 간주하고 안정성/테스트/에러/빈/로딩 상태 보강을 우선.
         - 회귀(regression) 유발 금지.
         - 보안 민감정보 하드코딩 금지.
+        - secret input은 코드/로그/문서에 그대로 출력하지 말고 env var 참조로만 연결.
         - 실패 시 우회가 아닌 원인 기반 수정 우선.
+        - UI 변경 시 모바일(360~430px) 우선으로 레이아웃이 깨지지 않게 유지.
+        - 화면 복잡도가 이미 높으면 새 UI를 덧대기보다 탭/메뉴/접힘 구조로 분리.
+        - 스타일은 모던하고 심플하게 유지하되, 기능이 늘수록 정보 밀도를 낮추는 방향으로 정리.
 
         개발 체크리스트:
         1. 요구사항 충족: SPEC/PLAN/MVP_SCOPE 범위를 벗어나지 않았는가?
@@ -874,6 +893,7 @@ def build_coder_prompt(
         for block in [
             _read_prompt_context(memory_selection_path, label="Memory Selection"),
             _read_prompt_context(memory_context_path, label="Memory Context"),
+            _read_prompt_context(operator_inputs_path, label="Operator Inputs"),
         ]
         if block
     ).strip()

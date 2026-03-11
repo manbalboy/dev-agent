@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 import subprocess
 import time
@@ -83,6 +84,7 @@ class CommandTemplateRunner:
             command_purpose=f"AI template '{template_name}'",
             heartbeat_callback=getattr(self, "heartbeat_callback", None),
             heartbeat_interval_seconds=float(getattr(self, "heartbeat_interval_seconds", 15.0) or 15.0),
+            extra_env=dict(getattr(self, "extra_env", {}) or {}),
         )
 
     def _load_templates(self) -> Dict[str, str]:
@@ -130,6 +132,7 @@ def run_shell_command(
     command_purpose: str = "command",
     heartbeat_callback: HeartbeatCallback | None = None,
     heartbeat_interval_seconds: float = 15.0,
+    extra_env: Dict[str, str] | None = None,
 ) -> CommandResult:
     """Execute one shell command through bash.
 
@@ -140,6 +143,10 @@ def run_shell_command(
     start_time = time.monotonic()
     log_writer(f"[RUN] {command}")
 
+    environment = os.environ.copy()
+    if extra_env:
+        environment.update({str(key): str(value) for key, value in extra_env.items()})
+
     use_heartbeat_loop = heartbeat_callback is not None and heartbeat_interval_seconds > 0
     if use_heartbeat_loop:
         process = subprocess.Popen(  # noqa: S603,S607 - intentional shell execution.
@@ -148,6 +155,7 @@ def run_shell_command(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            env=environment,
         )
         stdout = ""
         stderr = ""
@@ -166,6 +174,7 @@ def run_shell_command(
             cwd=str(cwd),
             capture_output=True,
             text=True,
+            env=environment,
         )
         process = completed
         stdout = completed.stdout

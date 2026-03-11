@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 import hashlib
 import os
 import re
@@ -32,6 +33,8 @@ class RecoveryRuntime:
         actor_log_writer,
         is_escalation_enabled: Callable[[], bool],
         run_optional_escalation: Callable[[str, Path, str], None],
+        feature_enabled: Callable[[str], bool] | None = None,
+        recovery_shadow_runner=None,
     ) -> None:
         self.command_templates = command_templates
         self.stage_run_tests = stage_run_tests
@@ -46,6 +49,8 @@ class RecoveryRuntime:
         self.actor_log_writer = actor_log_writer
         self.is_escalation_enabled = is_escalation_enabled
         self.run_optional_escalation = run_optional_escalation
+        self.feature_enabled = feature_enabled or (lambda _flag_name: False)
+        self.recovery_shadow_runner = recovery_shadow_runner
 
     def run_test_hard_gate(
         self,
@@ -262,11 +267,23 @@ class RecoveryRuntime:
             log_path=log_path,
             reason=reason,
         )
-        if not self.is_recoverable_failure(repository_path, stage):
+        analysis_written = self._failure_analysis_written(repository_path)
+        recoverable = self.is_recoverable_failure(repository_path, stage)
+        if not recoverable:
             self.append_actor_log(
                 log_path,
                 "ORCHESTRATOR",
                 f"[RECOVERY_MODE:{gate_label}] not recoverable by heuristic. Skip auto-recovery.",
+            )
+            self._write_recovery_shadow_trace(
+                repository_path=repository_path,
+                stage=stage,
+                gate_label=gate_label,
+                reason=reason,
+                analysis_written=analysis_written,
+                recoverable=False,
+                recovery_attempted=False,
+                recovery_succeeded=False,
             )
             return False
         self.append_actor_log(
@@ -293,11 +310,31 @@ class RecoveryRuntime:
                 "ORCHESTRATOR",
                 f"[RECOVERY_MODE:{gate_label}] recovery succeeded.",
             )
+            self._write_recovery_shadow_trace(
+                repository_path=repository_path,
+                stage=stage,
+                gate_label=gate_label,
+                reason=reason,
+                analysis_written=analysis_written,
+                recoverable=True,
+                recovery_attempted=True,
+                recovery_succeeded=True,
+            )
             return True
         self.append_actor_log(
             log_path,
             "ORCHESTRATOR",
             f"[RECOVERY_MODE:{gate_label}] recovery attempt failed.",
+        )
+        self._write_recovery_shadow_trace(
+            repository_path=repository_path,
+            stage=stage,
+            gate_label=gate_label,
+            reason=reason,
+            analysis_written=analysis_written,
+            recoverable=True,
+            recovery_attempted=True,
+            recovery_succeeded=False,
         )
         return False
 
@@ -494,3 +531,81 @@ class RecoveryRuntime:
             "ORCHESTRATOR",
             "[FIX_LOOP] Reached max rounds with remaining failures. Proceeding by policy.",
         )
+
+    def _write_recovery_shadow_trace(
+        self,
+        *,
+        repository_path: Path,
+        stage: JobStage,
+        gate_label: str,
+        reason: str,
+        analysis_written: bool,
+        recoverable: bool,
+        recovery_attempted: bool,
+        recovery_succeeded: bool,
+    ) -> None:
+        """Persist optional LangGraph recovery shadow trace."""
+
+        shadow_path = self.docs_file(repository_path, "LANGGRAPH_RECOVERY_SHADOW.json")
+        if not self.feature_enabled("langgraph_recovery_shadow"):
+            shadow_path.write_text(
+                json.dumps(
+                    {
+                        "enabled": False,
+                        "available": False,
+                        "status": "disabled",
+                        "detail": "feature_flag_disabled",
+                        "framework": "langgraph",
+                        "framework_version": "",
+                        "generated_at": "",
+                        "session_count": 0,
+                        "sessions": [],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            return
+        if self.recovery_shadow_runner is None:
+            return
+        session_payload = self.recovery_shadow_runner.run(
+            stage=stage.value,
+            gate_label=gate_label,
+            reason=reason,
+            analysis_written=analysis_written,
+            recoverable=recoverable,
+            recovery_attempted=recovery_attempted,
+            recovery_succeeded=recovery_succeeded,
+        )
+        existing = {}
+        if shadow_path.exists():
+            try:
+                existing = json.loads(shadow_path.read_text(encoding="utf-8", errors="replace"))
+            except json.JSONDecodeError:
+                existing = {}
+        sessions = existing.get("sessions", []) if isinstance(existing.get("sessions"), list) else []
+        sessions.append(session_payload)
+        payload = {
+            "enabled": True,
+            "available": bool(session_payload.get("framework_version")) or session_payload.get("status") != "unavailable",
+            "status": "completed",
+            "detail": "shadow_trace_recorded",
+            "framework": "langgraph",
+            "framework_version": str(session_payload.get("framework_version", "")).strip(),
+            "generated_at": str(session_payload.get("generated_at", "")).strip(),
+            "session_count": len(sessions),
+            "sessions": sessions[-12:],
+        }
+        shadow_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    @staticmethod
+    def _failure_analysis_written(repository_path: Path) -> bool:
+        output_path = repository_path / "_docs" / "FAILURE_ANALYSIS.md"
+        if not output_path.exists():
+            return False
+        try:
+            return bool(output_path.read_text(encoding="utf-8", errors="replace").strip())
+        except OSError:
+            return False

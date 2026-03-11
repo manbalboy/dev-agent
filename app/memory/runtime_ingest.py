@@ -617,6 +617,68 @@ def _build_backlog_candidate_payloads(
             )
         )
 
+    failure_patterns_payload = _read_json_file(paths.get("failure_patterns"))
+    failure_patterns = failure_patterns_payload.get("items", []) if isinstance(failure_patterns_payload, dict) else []
+    if not isinstance(failure_patterns, list):
+        failure_patterns = []
+    for entry in failure_patterns:
+        if not isinstance(entry, dict):
+            continue
+        pattern_id = str(entry.get("pattern_id", "")).strip()
+        if not pattern_id:
+            continue
+        count = int(entry.get("count", 0) or 0)
+        if count < 2:
+            continue
+        pattern_type = str(entry.get("pattern_type", "")).strip() or "failure_pattern"
+        category = str(entry.get("category", "")).strip()
+        trigger = str(entry.get("trigger", "")).strip()
+        recommended_actions = [
+            str(item).strip()
+            for item in (entry.get("recommended_actions", []) or [])
+            if str(item).strip()
+        ]
+        action_hint = recommended_actions[0] if recommended_actions else ""
+        priority = "P1" if count >= 3 or pattern_type == "loop_guard" else "P2"
+        candidates.append(
+            _make_backlog_candidate_payload(
+                job=job,
+                execution_repository=execution_repository,
+                workflow_id=workflow_id,
+                source_kind="failure_pattern_cluster",
+                source_id=pattern_id,
+                title=f"반복 실패 묶음: {pattern_id}",
+                summary=_join_summary_parts(
+                    f"같은 failure pattern이 {count}회 누적됨",
+                    trigger,
+                    action_hint,
+                ),
+                priority=priority,
+                created_at=str(entry.get("last_seen_at", "")).strip()
+                or str(failure_patterns_payload.get("generated_at", "")).strip(),
+                source_path=paths.get("failure_patterns"),
+                payload={
+                    "source_kind": "failure_pattern_cluster",
+                    "job_id": job.job_id,
+                    "pattern_id": pattern_id,
+                    "pattern_type": pattern_type,
+                    "category": category,
+                    "trigger": trigger,
+                    "count": count,
+                    "recommended_action": action_hint,
+                    "recommended_actions": recommended_actions[:3],
+                    "cluster_key": _cluster_key(
+                        repository=job.repository,
+                        app_code=job.app_code,
+                        workflow_id=workflow_id,
+                        source_kind="failure_pattern_cluster",
+                        source_id=pattern_id,
+                    ),
+                    "raw": entry,
+                },
+            )
+        )
+
     return candidates
 
 

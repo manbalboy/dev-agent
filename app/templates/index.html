@@ -28,7 +28,7 @@
             <span class="theme-label">라이트</span>
           </button>
         </div>
-        <p class="hint">라벨 <code>agent:run</code> 이벤트를 실시간으로 추적합니다.</p>
+        <p class="hint">작업 등록, 실행 상태, 로그, 운영 입력을 한 화면에서 확인합니다.</p>
       </header>
 
       <nav class="menu-tabs">
@@ -36,29 +36,51 @@
           <span class="tab-icon" aria-hidden="true">
             <svg viewBox="0 0 24 24" focusable="false"><path d="M4 6h16v3H4V6zm0 5h16v3H4v-3zm0 5h16v3H4v-3z"/></svg>
           </span>
-          <span>리스트</span>
+          <span>작업 현황</span>
         </button>
         <button type="button" class="menu-tab" data-tab="settings">
           <span class="tab-icon" aria-hidden="true">
             <svg viewBox="0 0 24 24" focusable="false"><path d="M19.14 12.94a7.43 7.43 0 0 0 .05-.94 7.43 7.43 0 0 0-.05-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.14 7.14 0 0 0-1.63-.94l-.36-2.54A.5.5 0 0 0 13.9 2h-3.8a.5.5 0 0 0-.49.42l-.36 2.54a7.14 7.14 0 0 0-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.71 8.48a.5.5 0 0 0 .12.64l2.03 1.58a7.43 7.43 0 0 0-.05.94 7.43 7.43 0 0 0 .05.94l-2.03 1.58a.5.5 0 0 0-.12.64l1.92 3.32a.5.5 0 0 0 .6.22l2.39-.96c.5.39 1.05.71 1.63.94l.36 2.54a.5.5 0 0 0 .49.42h3.8a.5.5 0 0 0 .49-.42l.36-2.54c.58-.23 1.13-.55 1.63-.94l2.39.96a.5.5 0 0 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58zM12 15.2A3.2 3.2 0 1 1 12 8.8a3.2 3.2 0 0 1 0 6.4z"/></svg>
           </span>
-          <span>설정</span>
+          <span>운영 설정</span>
         </button>
         <button type="button" class="menu-tab" data-tab="assistant">
           <span class="tab-icon" aria-hidden="true">
             <svg viewBox="0 0 24 24" focusable="false"><path d="M12 2a7 7 0 0 0-7 7v3.2c0 .53-.21 1.04-.59 1.41L3 15v2h4l1 3h8l1-3h4v-2l-1.41-1.39A2 2 0 0 1 19 12.2V9a7 7 0 0 0-7-7zm0 2a5 5 0 0 1 5 5v3.2c0 1.06.42 2.08 1.17 2.83l.24.23V15h-2.2l-1 3H8.79l-1-3H5.6v.23l.23-.23A4 4 0 0 0 7 12.2V9a5 5 0 0 1 5-5zm-2 6h4v2h-4v-2zm0 3h4v2h-4v-2z"/></svg>
           </span>
-          <span>AI 도우미</span>
+          <span>AI 진단</span>
         </button>
         <button type="button" class="menu-tab" data-tab="admin">
           <span class="tab-icon" aria-hidden="true">
             <svg viewBox="0 0 24 24" focusable="false"><path d="M4 5h16v4H4V5zm0 5h7v9H4v-9zm8 0h8v4h-8v-4zm0 5h8v4h-8v-4z"/></svg>
           </span>
-          <span>관리</span>
+          <span>운영 지표</span>
         </button>
       </nav>
 
       <section id="panel-jobs" class="tab-panel active">
+        <section class="quick-panel overview-panel">
+          <div class="quick-panel-head">
+            <div>
+              <h2>처음 쓰는 순서</h2>
+              <p class="hint">처음 보는 개발자도 아래 순서대로 보면 바로 사용할 수 있습니다.</p>
+            </div>
+          </div>
+          <div class="overview-grid">
+            <article class="overview-card">
+              <h3>1. 작업 등록</h3>
+              <p>새 기능이나 수정 요청은 <strong>운영 설정 &gt; 작업 등록</strong>에서 시작합니다.</p>
+            </article>
+            <article class="overview-card">
+              <h3>2. 상태 확인</h3>
+              <p><strong>작업 현황</strong>에서 현재 단계, 실패 이유, 최근 로그를 빠르게 찾습니다.</p>
+            </article>
+            <article class="overview-card">
+              <h3>3. 막힌 점 해결</h3>
+              <p><strong>AI 진단</strong>으로 원인을 좁히고, 필요한 키나 입력은 <strong>운영 지표</strong>에서 등록합니다.</p>
+            </article>
+          </div>
+        </section>
         <section class="stats" id="stats-cards">
           <article class="stat-card"><h2>전체</h2><p id="stat-total">0</p></article>
           <article class="stat-card"><h2>대기</h2><p id="stat-queued">0</p></article>
@@ -70,7 +92,7 @@
           <div class="quick-panel-head">
             <div>
               <h2>작업 필터</h2>
-              <p class="hint">최근 작업을 검색하고 상태별로 필터를 적용할 수 있습니다.</p>
+              <p class="hint">제목, 앱, 상태, 단계 기준으로 최근 작업을 빠르게 찾습니다.</p>
             </div>
           </div>
           <form id="jobs-filter-form" class="jobs-filter-form">
@@ -78,16 +100,16 @@
               <span class="jobs-search-icon" aria-hidden="true">
                 <svg viewBox="0 0 24 24" focusable="false"><path d="M10 4a6 6 0 1 1 0 12 6 6 0 0 1 0-12zm0-2a8 8 0 1 0 4.9 14.3l4.4 4.4 1.4-1.4-4.4-4.4A8 8 0 0 0 10 2z"/></svg>
               </span>
-              <input id="jobs-filter-query" type="search" maxlength="200" placeholder="작업 ID, 제목, 에러, 브랜치 이름 입력 등" />
+              <input id="jobs-filter-query" type="search" maxlength="200" placeholder="제목, 앱, 에러, 브랜치, 작업 ID로 검색" />
             </div>
             <label class="jobs-filter-control" for="jobs-filter-status">
-              <span>전체 상태</span>
+              <span>상태</span>
               <select id="jobs-filter-status">
                 <option value="">전체 상태</option>
               </select>
             </label>
             <label class="jobs-filter-control" for="jobs-filter-track">
-              <span>전체 트랙</span>
+              <span>작업 유형</span>
               <select id="jobs-filter-track">
                 <option value="">전체 트랙</option>
                 <option value="bug">bug</option>
@@ -99,13 +121,13 @@
               </select>
             </label>
             <label class="jobs-filter-control" for="jobs-filter-app-code">
-              <span>전체 앱</span>
+              <span>앱</span>
               <select id="jobs-filter-app-code">
                 <option value="">전체 앱</option>
               </select>
             </label>
             <label class="jobs-filter-control" for="jobs-filter-stage">
-              <span>전체 단계</span>
+              <span>단계</span>
               <select id="jobs-filter-stage">
                 <option value="">전체 단계</option>
               </select>
@@ -117,7 +139,7 @@
               </select>
             </label>
             <label class="jobs-filter-control" for="jobs-filter-strategy">
-              <span>개선 전략</span>
+              <span>개선 방향</span>
               <select id="jobs-filter-strategy">
                 <option value="">전체 전략</option>
               </select>
@@ -148,7 +170,8 @@
         <section class="quick-panel jobs-table-panel">
           <div class="jobs-table-panel-head">
             <div>
-              <h2>실제 진행 상황/로그</h2>
+              <h2>진행 중인 작업과 최근 로그</h2>
+              <p class="hint">막힌 작업을 먼저 보고, 상세 화면에서 로그와 lineage를 확인하세요.</p>
             </div>
             <div class="issue-form-actions jobs-table-actions">
               <button id="requeue-failed-button" class="action-button" type="button">실패 전체 재큐잉</button>
@@ -159,13 +182,13 @@
             <table class="jobs-table">
               <thead>
                 <tr>
-                  <th>작업 ID</th>
-                  <th>템플릿</th>
+                  <th>작업</th>
+                  <th>앱/유형</th>
                   <th>상태</th>
                   <th>단계</th>
                   <th>이슈</th>
                   <th>PR</th>
-                  <th>작업</th>
+                  <th>바로가기</th>
                   <th>생성 시각</th>
                 </tr>
               </thead>
@@ -183,50 +206,72 @@
       </section>
 
       <section id="panel-settings" class="tab-panel">
+        <section class="quick-panel overview-panel">
+          <div class="quick-panel-head">
+            <div>
+              <h2>운영 설정 안내</h2>
+              <p class="hint">복잡한 설정을 한 번에 보기보다, 목적별로 나눠서 관리합니다.</p>
+            </div>
+          </div>
+          <div class="overview-grid">
+            <article class="overview-card">
+              <h3>작업 등록</h3>
+              <p>새 이슈를 만들고 큐에 넣을 때 사용합니다.</p>
+            </article>
+            <article class="overview-card">
+              <h3>실행 흐름</h3>
+              <p>앱별 실행 방식, 워크플로우, 실험 기능을 조절합니다.</p>
+            </article>
+            <article class="overview-card">
+              <h3>AI 실행기</h3>
+              <p>Gemini, Codex, 역할 프리셋을 운영 환경에 맞게 조정합니다.</p>
+            </article>
+          </div>
+        </section>
         <nav class="settings-tabs">
           <button type="button" class="settings-tab active" data-settings-tab="issue">
             <span class="tab-icon" aria-hidden="true">
               <svg viewBox="0 0 24 24" focusable="false"><path d="M4 4h16v16H4V4zm3 3v2h10V7H7zm0 4v2h10v-2H7zm0 4v2h7v-2H7z"/></svg>
             </span>
-            <span>이슈 등록</span>
+            <span>작업 등록</span>
           </button>
           <button type="button" class="settings-tab" data-settings-tab="apps">
             <span class="tab-icon" aria-hidden="true">
               <svg viewBox="0 0 24 24" focusable="false"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5s-3 1.34-3 3 1.34 3 3 3zM8 11c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5C15 14.17 10.33 13 8 13zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.94 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>
             </span>
-            <span>앱 관리</span>
+            <span>앱 연결</span>
           </button>
           <button type="button" class="settings-tab" data-settings-tab="workflows">
             <span class="tab-icon" aria-hidden="true">
               <svg viewBox="0 0 24 24" focusable="false"><path d="M5 4h14a2 2 0 0 1 2 2v3h-2V6H5v12h5v2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zm9 5h7v2h-7V9zm0 4h7v2h-7v-2zm0 4h7v2h-7v-2zm-5-6h3v3H9v-3zm0 4h3v3H9v-3z"/></svg>
             </span>
-            <span>워크플로우</span>
+            <span>실행 흐름</span>
           </button>
           <button type="button" class="settings-tab" data-settings-tab="flags">
             <span class="tab-icon" aria-hidden="true">
               <svg viewBox="0 0 24 24" focusable="false"><path d="M7 2h10v2H7V2zm5 4c3.87 0 7 3.13 7 7 0 2.39-1.2 4.5-3.03 5.76L17 22h-2l-.71-2.12c-.42.08-.85.12-1.29.12s-.87-.04-1.29-.12L11 22H9l1.03-3.24A6.96 6.96 0 0 1 5 13c0-3.87 3.13-7 7-7zm-1 4v6l5-3-5-3z"/></svg>
             </span>
-            <span>기능 플래그</span>
+            <span>실험 기능</span>
           </button>
           <button type="button" class="settings-tab" data-settings-tab="agents">
             <span class="tab-icon" aria-hidden="true">
               <svg viewBox="0 0 24 24" focusable="false"><path d="M12 2a3 3 0 0 1 3 3v1h2a2 2 0 0 1 2 2v3h-2V8h-2v3H9V8H7v3H5V8a2 2 0 0 1 2-2h2V5a3 3 0 0 1 3-3zm1 4V5a1 1 0 1 0-2 0v1h2zM5 13h14v2H5v-2zm2 4h10v5H7v-5z"/></svg>
             </span>
-            <span>에이전트</span>
+            <span>AI 실행기</span>
           </button>
           <button type="button" class="settings-tab" data-settings-tab="roles">
             <span class="tab-icon" aria-hidden="true">
               <svg viewBox="0 0 24 24" focusable="false"><path d="M12 2l3 6 6 .9-4.5 4.4 1 6.2L12 17l-5.5 2.5 1-6.2L3 8.9 9 8l3-6zm0 3.3L10.7 8l-3 .5 2.2 2.2-.5 3.2L12 12.6l2.6 1.3-.5-3.2 2.2-2.2-3-.5L12 5.3z"/></svg>
             </span>
-            <span>역할 관리</span>
+            <span>역할/프리셋</span>
           </button>
         </nav>
 
         <section class="quick-panel settings-section active" data-settings-section="issue">
           <div class="quick-panel-head">
             <div>
-              <h2>작업 이슈 등록</h2>
-              <p class="hint">등록하면 GitHub 이슈 생성 후 즉시 작업 큐에 들어갑니다.</p>
+              <h2>새 작업 등록</h2>
+              <p class="hint">등록하면 GitHub 이슈를 만들고 바로 작업 큐에 넣습니다.</p>
             </div>
           </div>
           <form id="issue-form" class="issue-form">
@@ -250,7 +295,7 @@
               <option value="">(선택 안 함)</option>
             </select>
 
-            <label for="issue-workflow-id">Workflow Override</label>
+            <label for="issue-workflow-id">실행 흐름 덮어쓰기</label>
             <select id="issue-workflow-id" name="workflow_id">
               <option value="">앱 기본값 사용</option>
             </select>
@@ -268,7 +313,7 @@
             ></textarea>
 
             <div class="issue-form-actions">
-              <button type="submit" id="issue-submit" class="action-button">작업 이슈 등록하기</button>
+              <button type="submit" id="issue-submit" class="action-button">작업 등록하기</button>
               <p id="issue-submit-result" class="hint"></p>
             </div>
           </form>
@@ -277,8 +322,8 @@
         <section class="quick-panel settings-section" data-settings-section="apps">
           <div class="quick-panel-head">
             <div>
-              <h2>앱 등록 관리</h2>
-              <p class="hint">앱 코드를 먼저 등록하면 이슈 등록 드롭다운과 라벨 자동부착에 사용됩니다.</p>
+              <h2>앱 연결 관리</h2>
+              <p class="hint">앱 코드와 실행 저장소를 등록해 두면 작업 등록과 자동 라벨링에 사용됩니다.</p>
             </div>
           </div>
           <form id="app-config-form" class="issue-form">
@@ -291,18 +336,18 @@
             <label for="app-source-repository">실행 소스 저장소</label>
             <input id="app-source-repository" type="text" maxlength="200" placeholder="예: manbalboy/Food 또는 https://github.com/manbalboy/Food.git" />
 
-            <label for="app-workflow-id">기본 Workflow</label>
+            <label for="app-workflow-id">기본 실행 흐름</label>
             <select id="app-workflow-id">
               <option value="">workflow 목록 불러오는 중...</option>
             </select>
 
             <div class="workflow-map-actions">
-              <button type="button" id="app-workflow-apply-default" class="action-button">기본 preset</button>
-              <button type="button" id="app-workflow-apply-adaptive" class="action-button">Adaptive preset</button>
+              <button type="button" id="app-workflow-apply-default" class="action-button">기본 흐름 적용</button>
+              <button type="button" id="app-workflow-apply-adaptive" class="action-button">적응형 흐름 적용</button>
             </div>
 
             <div class="issue-form-actions">
-              <button type="submit" id="app-config-submit" class="action-button">앱 등록/수정</button>
+              <button type="submit" id="app-config-submit" class="action-button">앱 저장</button>
               <p id="app-config-result" class="hint"></p>
             </div>
 
@@ -313,8 +358,8 @@
         <section class="quick-panel settings-section" data-settings-section="workflows">
           <div class="quick-panel-head">
             <div>
-              <h2>워크플로우 실행 설정</h2>
-              <p class="hint">기본 workflow와 앱별 workflow를 운영 화면에서 바로 바꿉니다.</p>
+              <h2>실행 흐름 설정</h2>
+              <p class="hint">앱별 실행 방식과 워크플로우를 운영 화면에서 바로 바꿉니다.</p>
             </div>
           </div>
           <p id="workflow-config-result" class="hint workflow-config-result">기본값과 앱별 매핑을 불러오는 중...</p>
@@ -322,8 +367,8 @@
             <section class="workflow-settings-card">
               <div class="workflow-settings-head">
                 <div>
-                  <h3>기본 Workflow</h3>
-                  <p class="hint">유효한 app/job override가 없을 때 사용됩니다.</p>
+                  <h3>기본 실행 흐름</h3>
+                  <p class="hint">앱 또는 작업에서 따로 지정하지 않았을 때 사용합니다.</p>
                 </div>
               </div>
               <div id="workflow-default-box" class="workflow-settings-box hint">불러오는 중...</div>
@@ -331,8 +376,8 @@
             <section class="workflow-settings-card">
               <div class="workflow-settings-head">
                 <div>
-                  <h3>Workflow Catalog</h3>
-                  <p class="hint">저장된 workflow 목록과 기본 지정 상태를 확인합니다.</p>
+                  <h3>저장된 실행 흐름</h3>
+                  <p class="hint">저장된 워크플로우 목록과 기본 지정 상태를 확인합니다.</p>
                 </div>
               </div>
               <div id="workflow-list-box" class="workflow-settings-box hint">불러오는 중...</div>
@@ -340,8 +385,8 @@
             <section class="workflow-settings-card workflow-settings-card-wide">
               <div class="workflow-settings-head">
                 <div>
-                  <h3>앱별 Workflow 매핑</h3>
-                  <p class="hint">앱 단위로 실제 실행 workflow를 바꿉니다.</p>
+                  <h3>앱별 실행 흐름 매핑</h3>
+                  <p class="hint">앱 단위로 실제 실행 워크플로우를 바꿉니다.</p>
                 </div>
               </div>
               <div id="workflow-app-map-box" class="workflow-settings-box hint">불러오는 중...</div>
@@ -349,8 +394,8 @@
             <section class="workflow-settings-card workflow-settings-card-wide">
               <div class="workflow-settings-head">
                 <div>
-                  <h3>Workflow Editor</h3>
-                  <p class="hint">노드/엣지 구조를 직접 편집하고 검증한 뒤 저장합니다.</p>
+                  <h3>실행 흐름 편집기</h3>
+                  <p class="hint">노드와 연결 구조를 직접 편집하고 검증한 뒤 저장합니다.</p>
                 </div>
               </div>
               <div id="workflow-editor-box" class="workflow-settings-box hint">에디터를 준비 중...</div>
@@ -361,8 +406,8 @@
         <section class="quick-panel settings-section" data-settings-section="flags">
           <div class="quick-panel-head">
             <div>
-              <h2>Adaptive Feature Flags</h2>
-              <p class="hint">메모리/리트리벌/섀도 전략 기능을 코드 수정 없이 단계적으로 켜고 끕니다.</p>
+              <h2>실험 기능</h2>
+              <p class="hint">메모리, 리트리벌, 섀도 전략 기능을 코드 수정 없이 단계적으로 켜고 끕니다.</p>
             </div>
           </div>
           <p id="feature-flags-result" class="hint workflow-config-result">기능 플래그를 불러오는 중...</p>
@@ -370,8 +415,8 @@
             <section class="workflow-settings-card workflow-settings-card-wide">
               <div class="workflow-settings-head">
                 <div>
-                  <h3>Adaptive Rollout Controls</h3>
-                  <p class="hint">configured 상태와 실제 artifact 활성 상태는 어드민 탭에서 함께 확인할 수 있습니다.</p>
+                  <h3>단계적 적용 제어</h3>
+                  <p class="hint">설정값과 실제 활성 상태는 운영 지표 탭에서 함께 확인할 수 있습니다.</p>
                 </div>
               </div>
               <div id="feature-flags-box" class="workflow-settings-box hint">불러오는 중...</div>
@@ -382,48 +427,48 @@
         <section class="quick-panel settings-section" data-settings-section="agents">
           <div class="quick-panel-head">
             <div>
-              <h2>에이전트 템플릿 설정</h2>
-              <p class="hint">쉬운 입력으로 안전한 템플릿을 만들고, 필요하면 상세 문자열을 직접 편집하세요.</p>
+              <h2>AI 실행기 설정</h2>
+              <p class="hint">권장 템플릿으로 시작하고, 필요할 때만 고급 명령 문자열을 수정하세요.</p>
             </div>
           </div>
           <form id="agent-config-form" class="issue-form">
             <div class="sub-tabs">
-              <button type="button" class="sub-tab active" data-agent-mode="easy">쉬운 입력</button>
-              <button type="button" class="sub-tab" data-agent-mode="raw">상세 문자열</button>
+              <button type="button" class="sub-tab active" data-agent-mode="easy">간단 설정</button>
+              <button type="button" class="sub-tab" data-agent-mode="raw">고급 설정</button>
             </div>
 
             <section id="agent-panel-easy" class="config-panel active">
               <div class="issue-form-actions">
-                <button type="button" id="apply-safe-template" class="action-button">안전한 템플릿 적용</button>
-                <p class="hint">역할별 에이전트 선택 + 경로/옵션 입력값으로 명령 문자열을 생성합니다.</p>
+                <button type="button" id="apply-safe-template" class="action-button">권장 템플릿 적용</button>
+                <p class="hint">역할별 모델과 실행 경로를 조합해 안전한 명령 템플릿을 만듭니다.</p>
               </div>
 
               <div class="field-grid">
-                <label for="easy-planner-agent">Planner 에이전트</label>
+                <label for="easy-planner-agent">계획 모델</label>
                 <select id="easy-planner-agent">
                   <option value="gemini">gemini</option>
                   <option value="codex">codex</option>
                 </select>
 
-                <label for="easy-coder-agent">Coder 에이전트</label>
+                <label for="easy-coder-agent">구현 모델</label>
                 <select id="easy-coder-agent">
                   <option value="codex">codex</option>
                   <option value="gemini">gemini</option>
                 </select>
 
-                <label for="easy-reviewer-agent">Reviewer 에이전트</label>
+                <label for="easy-reviewer-agent">리뷰 모델</label>
                 <select id="easy-reviewer-agent">
                   <option value="gemini">gemini</option>
                   <option value="codex">codex</option>
                 </select>
 
-                <label for="easy-escalation-agent">Escalation 에이전트</label>
+                <label for="easy-escalation-agent">보조 모델</label>
                 <select id="easy-escalation-agent">
                   <option value="codex">codex</option>
                   <option value="gemini">gemini</option>
                 </select>
 
-                <label for="easy-node-path">Node 실행 경로</label>
+                <label for="easy-node-path">Node 경로</label>
                 <input id="easy-node-path" type="text" />
 
                 <label for="easy-gemini-path">Gemini CLI 경로</label>
@@ -432,60 +477,60 @@
                 <label for="easy-codex-path">Codex CLI 경로</label>
                 <input id="easy-codex-path" type="text" />
 
-                <label for="easy-approval-mode">Approval Mode</label>
+                <label for="easy-approval-mode">승인 모드</label>
                 <select id="easy-approval-mode">
                   <option value="yolo">yolo</option>
                   <option value="default">default</option>
                 </select>
 
-                <label for="easy-gemini-extra">Gemini 추가 옵션</label>
+                <label for="easy-gemini-extra">Gemini 옵션</label>
                 <input id="easy-gemini-extra" type="text" placeholder="예: --output-format text" />
 
-                <label for="easy-codex-extra">Codex 추가 옵션</label>
+                <label for="easy-codex-extra">Codex 옵션</label>
                 <input id="easy-codex-extra" type="text" placeholder="예: --dangerously-bypass-approvals-and-sandbox --color never" />
 
               </div>
 
               <div class="preview-box">
-                <p class="hint">Planner 미리보기</p>
+                <p class="hint">계획 모델 미리보기</p>
                 <pre id="preview-planner"></pre>
-                <p class="hint">Coder 미리보기</p>
+                <p class="hint">구현 모델 미리보기</p>
                 <pre id="preview-coder"></pre>
-                <p class="hint">Reviewer 미리보기</p>
+                <p class="hint">리뷰 모델 미리보기</p>
                 <pre id="preview-reviewer"></pre>
-                <p class="hint">Helper 미리보기</p>
+                <p class="hint">보조 모델 미리보기</p>
                 <pre id="preview-copilot"></pre>
-                <p class="hint">Escalation 미리보기</p>
+                <p class="hint">에스컬레이션 미리보기</p>
                 <pre id="preview-escalation"></pre>
               </div>
             </section>
 
             <section id="agent-panel-raw" class="config-panel">
-              <label for="tpl-planner">Planner</label>
+              <label for="tpl-planner">계획 실행기</label>
               <textarea id="tpl-planner" rows="3" maxlength="4000" placeholder="예: gemini ..."></textarea>
 
-              <label for="tpl-coder">Coder</label>
+              <label for="tpl-coder">구현 실행기</label>
               <textarea id="tpl-coder" rows="3" maxlength="4000" placeholder="예: codex ..."></textarea>
 
-              <label for="tpl-reviewer">Reviewer</label>
+              <label for="tpl-reviewer">리뷰 실행기</label>
               <textarea id="tpl-reviewer" rows="3" maxlength="4000" placeholder="예: gemini review ..."></textarea>
 
-              <label for="tpl-copilot">Helper (Codex route)</label>
+              <label for="tpl-copilot">보조 실행기 (Codex route)</label>
               <textarea id="tpl-copilot" rows="3" maxlength="4000" placeholder="예: cat {prompt_file} | codex exec - ..."></textarea>
 
-              <label for="tpl-escalation">Escalation</label>
+              <label for="tpl-escalation">에스컬레이션 실행기</label>
               <textarea id="tpl-escalation" rows="3" maxlength="4000" placeholder="실패 시 실행할 보조 템플릿 명령"></textarea>
             </section>
 
             <label class="toggle-row" for="enable-escalation">
               <input id="enable-escalation" type="checkbox" />
-              <span>Escalation 활성화</span>
+              <span>에스컬레이션 활성화</span>
             </label>
 
             <div class="issue-form-actions">
-              <button type="submit" id="agent-config-submit" class="action-button">템플릿 저장</button>
+              <button type="submit" id="agent-config-submit" class="action-button">설정 저장</button>
               <button type="button" id="agent-cli-check" class="action-button">CLI 연결 확인</button>
-              <button type="button" id="agent-model-check" class="action-button">적용 모델 확인</button>
+              <button type="button" id="agent-model-check" class="action-button">현재 모델 확인</button>
               <p id="agent-config-result" class="hint"></p>
             </div>
             <div id="agent-cli-check-result" class="cli-check-box hint">확인 전</div>
@@ -496,8 +541,8 @@
         <section class="quick-panel settings-section" data-settings-section="roles">
           <div class="quick-panel-head">
             <div>
-              <h2>역할/프리셋 관리 (MVP)</h2>
-              <p class="hint">역할 정의와 역할 조합 프리셋을 관리하고 이슈 등록에서 선택합니다.</p>
+              <h2>역할/프리셋 관리</h2>
+              <p class="hint">역할 정의와 역할 조합 프리셋을 관리하고, 작업 등록 시 바로 선택합니다.</p>
             </div>
           </div>
 
@@ -574,15 +619,15 @@
         <section class="quick-panel assistant-panel">
           <div class="quick-panel-head">
             <div>
-              <h2>AI 도우미</h2>
-              <p class="hint">현재 범위: 로그/운영 진단. Gemini 또는 Codex와 여러 턴으로 대화하면서 최근 실행 문제를 좁혀갈 수 있습니다.</p>
+              <h2>AI 진단</h2>
+              <p class="hint">실패 원인, 로그 해석, 운영 흐름을 Gemini 또는 Codex와 대화하면서 좁혀갈 수 있습니다.</p>
             </div>
           </div>
           <div id="assistant-messages" class="assistant-messages"></div>
           <form id="assistant-form" class="assistant-form">
             <div class="assistant-form-grid">
               <label class="assistant-field" for="assistant-provider">
-                <span>도우미 선택</span>
+                <span>진단 모델</span>
                 <select id="assistant-provider">
                   <option value="codex">Codex</option>
                   <option value="gemini">Gemini</option>
@@ -590,7 +635,7 @@
               </label>
 
               <label class="assistant-field assistant-field-wide" for="assistant-job-id">
-                <span>대상 Job ID (선택)</span>
+                <span>대상 작업 ID (선택)</span>
                 <div class="assistant-combo-shell">
                   <input
                     id="assistant-job-id"
@@ -605,15 +650,15 @@
               </label>
               <datalist id="assistant-job-options"></datalist>
 
-              <p id="assistant-job-preview" class="hint assistant-field-note">미선택 시 최근 전체 작업 로그 기준으로 분석합니다.</p>
+              <p id="assistant-job-preview" class="hint assistant-field-note">선택하지 않으면 최근 전체 작업 로그 기준으로 분석합니다.</p>
 
               <label class="assistant-field assistant-field-wide" for="assistant-input">
-                <span>메시지</span>
-                <textarea id="assistant-input" rows="4" maxlength="8000" placeholder="예: 방금 실패한 job 기준으로 stale heartbeat 원인을 더 좁혀줘"></textarea>
+                <span>질문 내용</span>
+                <textarea id="assistant-input" rows="4" maxlength="8000" placeholder="예: 방금 실패한 작업 기준으로 heartbeat stale 원인을 더 좁혀줘"></textarea>
               </label>
             </div>
             <div class="issue-form-actions assistant-form-actions">
-              <button type="submit" id="assistant-submit" class="action-button">메시지 보내기</button>
+              <button type="submit" id="assistant-submit" class="action-button">질문 보내기</button>
               <p id="assistant-status" class="hint"></p>
             </div>
           </form>
@@ -621,6 +666,28 @@
       </section>
 
       <section id="panel-admin" class="tab-panel">
+        <section class="quick-panel overview-panel">
+          <div class="quick-panel-head">
+            <div>
+              <h2>운영 지표 안내</h2>
+              <p class="hint">운영자는 여기서 상태, 품질, 메모리, 입력 대기 항목을 한눈에 확인합니다.</p>
+            </div>
+          </div>
+          <div class="overview-grid">
+            <article class="overview-card">
+              <h3>상태와 품질</h3>
+              <p>실행 중, 실패, 품질 점수, 분포와 추세를 먼저 확인합니다.</p>
+            </article>
+            <article class="overview-card">
+              <h3>메모리와 개선 후보</h3>
+              <p>메모리 상태, 백로그 후보, 진단 기록을 비교해 다음 작업을 정합니다.</p>
+            </article>
+            <article class="overview-card">
+              <h3>운영자 입력</h3>
+              <p>API 키나 외부 서비스 설정처럼 나중에 넣을 값을 안전하게 관리합니다.</p>
+            </article>
+          </div>
+        </section>
         <section class="stats admin-stats" id="admin-stats-cards">
           <article class="stat-card"><h2>앱</h2><p id="admin-stat-apps">0</p></article>
           <article class="stat-card"><h2>워크플로우</h2><p id="admin-stat-workflows">0</p></article>
@@ -629,223 +696,362 @@
           <article class="stat-card"><h2>실행 저장소</h2><p id="admin-stat-repos">0</p></article>
         </section>
 
-        <section class="quick-panel admin-panel">
-          <div class="quick-panel-head">
-            <div>
-              <h2>운영 현황</h2>
-              <p class="hint">현재 잡/복구/전략 분포를 읽기 전용으로 확인합니다.</p>
+        <nav class="admin-section-tabs">
+          <button type="button" class="admin-section-tab active" data-admin-section-tab="summary">운영 요약</button>
+          <button type="button" class="admin-section-tab" data-admin-section-tab="memory">진단/메모리</button>
+          <button type="button" class="admin-section-tab" data-admin-section-tab="ops">운영 입력/상태</button>
+        </nav>
+
+        <section class="admin-section-group active" data-admin-section="summary">
+          <section class="quick-panel admin-panel">
+            <div class="quick-panel-head">
+              <div>
+                <h2>운영 요약</h2>
+                <p class="hint">현재 작업 상태와 품질 흐름을 읽기 전용으로 확인합니다.</p>
+              </div>
+              <div class="issue-form-actions">
+                <button id="admin-refresh" class="action-button" type="button">새로고침</button>
+              </div>
             </div>
-            <div class="issue-form-actions">
-              <button id="admin-refresh" class="action-button" type="button">새로고침</button>
+            <div class="admin-grid">
+              <article class="admin-metric-card">
+                <h3>실행 상태</h3>
+                <dl class="admin-metric-list">
+                  <div><dt>전체 작업</dt><dd id="admin-runtime-total">0</dd></div>
+                  <div><dt>실행 중</dt><dd id="admin-runtime-running">0</dd></div>
+                  <div><dt>실패</dt><dd id="admin-runtime-failed">0</dd></div>
+                  <div><dt>리뷰 대상</dt><dd id="admin-runtime-reviewed">0</dd></div>
+                </dl>
+              </article>
+              <article class="admin-metric-card">
+                <h3>품질 요약</h3>
+                <dl class="admin-metric-list">
+                  <div><dt>평균 리뷰 점수</dt><dd id="admin-quality-overall">-</dd></div>
+                  <div><dt>평균 성숙도 점수</dt><dd id="admin-quality-maturity">-</dd></div>
+                  <div><dt>게이트 통과율</dt><dd id="admin-quality-gate-rate">-</dd></div>
+                </dl>
+              </article>
+              <article class="admin-metric-card">
+                <h3>메모리 요약</h3>
+                <dl class="admin-metric-list">
+                  <div><dt>메모리 워크스페이스</dt><dd id="admin-memory-workspaces">0</dd></div>
+                  <div><dt>Episodic</dt><dd id="admin-memory-episodic">0</dd></div>
+                  <div><dt>Decisions</dt><dd id="admin-memory-decisions">0</dd></div>
+                  <div><dt>피드백</dt><dd id="admin-memory-feedback">0</dd></div>
+                  <div><dt>Backlog 후보</dt><dd id="admin-memory-backlog">0</dd></div>
+                </dl>
+              </article>
+              <article class="admin-metric-card">
+                <h3>실행 흐름 채택</h3>
+                <dl class="admin-metric-list">
+                  <div><dt>기본 앱</dt><dd id="admin-workflow-default-apps">0</dd></div>
+                  <div><dt>적응형 앱</dt><dd id="admin-workflow-adaptive-apps">0</dd></div>
+                  <div><dt>기본 잡</dt><dd id="admin-workflow-default-jobs">0</dd></div>
+                  <div><dt>적응형 잡</dt><dd id="admin-workflow-adaptive-jobs">0</dd></div>
+                </dl>
+              </article>
             </div>
-          </div>
-          <div class="admin-grid">
-            <article class="admin-metric-card">
-              <h3>실행 상태</h3>
-              <dl class="admin-metric-list">
-                <div><dt>전체 작업</dt><dd id="admin-runtime-total">0</dd></div>
-                <div><dt>실행 중</dt><dd id="admin-runtime-running">0</dd></div>
-                <div><dt>실패</dt><dd id="admin-runtime-failed">0</dd></div>
-                <div><dt>리뷰 대상</dt><dd id="admin-runtime-reviewed">0</dd></div>
-              </dl>
-            </article>
-            <article class="admin-metric-card">
-              <h3>품질 요약</h3>
-              <dl class="admin-metric-list">
-                <div><dt>평균 리뷰 점수</dt><dd id="admin-quality-overall">-</dd></div>
-                <div><dt>평균 성숙도 점수</dt><dd id="admin-quality-maturity">-</dd></div>
-                <div><dt>게이트 통과율</dt><dd id="admin-quality-gate-rate">-</dd></div>
-              </dl>
-            </article>
-            <article class="admin-metric-card">
-              <h3>메모리 요약</h3>
-              <dl class="admin-metric-list">
-                <div><dt>메모리 워크스페이스</dt><dd id="admin-memory-workspaces">0</dd></div>
-                <div><dt>Episodic</dt><dd id="admin-memory-episodic">0</dd></div>
-                <div><dt>Decisions</dt><dd id="admin-memory-decisions">0</dd></div>
-                <div><dt>Feedback</dt><dd id="admin-memory-feedback">0</dd></div>
-                <div><dt>Backlog 후보</dt><dd id="admin-memory-backlog">0</dd></div>
-              </dl>
-            </article>
-            <article class="admin-metric-card">
-              <h3>Workflow 채택</h3>
-              <dl class="admin-metric-list">
-                <div><dt>기본 앱</dt><dd id="admin-workflow-default-apps">0</dd></div>
-                <div><dt>Adaptive 앱</dt><dd id="admin-workflow-adaptive-apps">0</dd></div>
-                <div><dt>기본 잡</dt><dd id="admin-workflow-default-jobs">0</dd></div>
-                <div><dt>Adaptive 잡</dt><dd id="admin-workflow-adaptive-jobs">0</dd></div>
-              </dl>
-            </article>
-          </div>
-          <p id="admin-last-updated" class="hint">어드민 지표 준비 중...</p>
+            <p id="admin-last-updated" class="hint">어드민 지표 준비 중...</p>
+          </section>
+
+          <section class="quick-panel admin-panel">
+            <div class="quick-panel-head">
+              <div>
+                <h2>분포와 추세</h2>
+                <p class="hint">개선 방향, 추세, 낮은 점수 구간과 복구 상태를 한 번에 확인합니다.</p>
+              </div>
+            </div>
+            <div class="admin-grid admin-grid-lists">
+              <article class="admin-list-card">
+                <h3>개선 전략 상위</h3>
+                <div id="admin-strategy-list" class="admin-list-body">불러오는 중...</div>
+              </article>
+              <article class="admin-list-card">
+                <h3>앱 분포</h3>
+                <div id="admin-app-list" class="admin-list-body">불러오는 중...</div>
+              </article>
+              <article class="admin-list-card">
+                <h3>단계 분포</h3>
+                <div id="admin-stage-list" class="admin-list-body">불러오는 중...</div>
+              </article>
+              <article class="admin-list-card">
+                <h3>트랙 분포</h3>
+                <div id="admin-track-list" class="admin-list-body">불러오는 중...</div>
+              </article>
+              <article class="admin-list-card">
+                <h3>실행 흐름 분포</h3>
+                <div id="admin-workflow-list" class="admin-list-body">불러오는 중...</div>
+              </article>
+              <article class="admin-list-card">
+                <h3>앱별 실행 흐름 채택</h3>
+                <div id="admin-app-workflow-list" class="admin-list-body">불러오는 중...</div>
+              </article>
+              <article class="admin-list-card">
+                <h3>품질 추세</h3>
+                <div id="admin-trend-list" class="admin-list-body">불러오는 중...</div>
+              </article>
+              <article class="admin-list-card">
+                <h3>성숙도 분포</h3>
+                <div id="admin-maturity-list" class="admin-list-body">불러오는 중...</div>
+              </article>
+              <article class="admin-list-card">
+                <h3>지속 저점 카테고리</h3>
+                <div id="admin-low-category-list" class="admin-list-body">불러오는 중...</div>
+              </article>
+              <article class="admin-list-card">
+                <h3>복구 상태</h3>
+                <div id="admin-recovery-list" class="admin-list-body">불러오는 중...</div>
+              </article>
+              <article class="admin-list-card">
+                <h3>재개 모드</h3>
+                <div id="admin-resume-list" class="admin-list-body">불러오는 중...</div>
+              </article>
+            </div>
+          </section>
+
+          <section class="quick-panel admin-panel">
+            <div class="quick-panel-head">
+              <div>
+                <h2>실행 흐름 일별 추이</h2>
+                <p class="hint">최근 7일 동안 기본 흐름과 적응형 흐름이 실제로 얼마나 실행됐는지 비교합니다.</p>
+              </div>
+            </div>
+            <div id="admin-workflow-timeline" class="admin-list-body">불러오는 중...</div>
+          </section>
         </section>
 
-        <section class="quick-panel admin-panel">
-          <div class="quick-panel-head">
-            <div>
-              <h2>품질 및 운영 분포</h2>
-              <p class="hint">개선 전략, 추세, 낮은 카테고리와 복구 상태를 한 번에 확인합니다.</p>
+        <section class="admin-section-group" data-admin-section="memory">
+          <section class="quick-panel admin-panel">
+            <div class="quick-panel-head">
+              <div>
+                <h2>메모리 상태와 실행 저장소</h2>
+                <p class="hint">메모리 상태와 실제 코드가 실행되는 저장소 범위를 확인합니다.</p>
+              </div>
             </div>
-          </div>
-          <div class="admin-grid admin-grid-lists">
-            <article class="admin-list-card">
-              <h3>개선 전략 상위</h3>
-              <div id="admin-strategy-list" class="admin-list-body">불러오는 중...</div>
-            </article>
-            <article class="admin-list-card">
-              <h3>앱 분포</h3>
-              <div id="admin-app-list" class="admin-list-body">불러오는 중...</div>
-            </article>
-            <article class="admin-list-card">
-              <h3>단계 분포</h3>
-              <div id="admin-stage-list" class="admin-list-body">불러오는 중...</div>
-            </article>
-            <article class="admin-list-card">
-              <h3>트랙 분포</h3>
-              <div id="admin-track-list" class="admin-list-body">불러오는 중...</div>
-            </article>
-            <article class="admin-list-card">
-              <h3>실행 Workflow 분포</h3>
-              <div id="admin-workflow-list" class="admin-list-body">불러오는 중...</div>
-            </article>
-            <article class="admin-list-card">
-              <h3>앱 Workflow 채택</h3>
-              <div id="admin-app-workflow-list" class="admin-list-body">불러오는 중...</div>
-            </article>
-            <article class="admin-list-card">
-              <h3>품질 추세</h3>
-              <div id="admin-trend-list" class="admin-list-body">불러오는 중...</div>
-            </article>
-            <article class="admin-list-card">
-              <h3>성숙도 분포</h3>
-              <div id="admin-maturity-list" class="admin-list-body">불러오는 중...</div>
-            </article>
-            <article class="admin-list-card">
-              <h3>지속 저점 카테고리</h3>
-              <div id="admin-low-category-list" class="admin-list-body">불러오는 중...</div>
-            </article>
-            <article class="admin-list-card">
-              <h3>복구 상태</h3>
-              <div id="admin-recovery-list" class="admin-list-body">불러오는 중...</div>
-            </article>
-            <article class="admin-list-card">
-              <h3>Resume 모드</h3>
-              <div id="admin-resume-list" class="admin-list-body">불러오는 중...</div>
-            </article>
-          </div>
+            <div class="admin-grid admin-grid-lists">
+              <article class="admin-list-card">
+                <h3>메모리 상태</h3>
+                <div id="admin-memory-state-list" class="admin-list-body">불러오는 중...</div>
+              </article>
+              <article class="admin-list-card">
+                <h3>실행 저장소</h3>
+                <div id="admin-execution-repo-list" class="admin-list-body">불러오는 중...</div>
+              </article>
+            </div>
+          </section>
+
+          <section class="quick-panel admin-panel">
+            <div class="quick-panel-head">
+              <div>
+                <h2>AI 진단 기록 비교</h2>
+                <p class="hint">AI 진단이 남긴 trace를 최근 작업 기준으로 비교합니다.</p>
+              </div>
+            </div>
+            <div class="admin-grid admin-grid-lists">
+              <article class="admin-list-card">
+                <h3>진단 범위 분포</h3>
+                <div id="admin-diagnosis-scope-list" class="admin-list-body">불러오는 중...</div>
+              </article>
+              <article class="admin-list-card">
+                <h3>도구 사용</h3>
+                <div id="admin-diagnosis-tool-list" class="admin-list-body">불러오는 중...</div>
+              </article>
+              <article class="admin-list-card">
+                <h3>실패 도구</h3>
+                <div id="admin-diagnosis-failed-tool-list" class="admin-list-body">불러오는 중...</div>
+              </article>
+              <article class="admin-list-card">
+                <h3>최근 진단 기록</h3>
+                <div id="admin-diagnosis-trace-list" class="admin-list-body">불러오는 중...</div>
+              </article>
+              <article class="admin-list-card">
+                <h3>선택한 진단 상세</h3>
+                <div id="admin-diagnosis-detail" class="admin-list-body">왼쪽에서 trace를 선택하세요.</div>
+              </article>
+              <article class="admin-list-card">
+                <h3>진단 차이 비교</h3>
+                <div id="admin-diagnosis-diff" class="admin-list-body">비교할 trace를 선택하세요.</div>
+              </article>
+            </div>
+          </section>
+
+          <section class="quick-panel admin-panel">
+            <div class="quick-panel-head">
+              <div>
+                <h2>메모리 검색/관리</h2>
+                <p class="hint">메모리 DB를 검색하고, 상태 이유와 수동 조정을 확인합니다.</p>
+              </div>
+            </div>
+            <form id="admin-memory-search-form" class="admin-memory-search-form">
+              <label for="admin-memory-search-query">
+                <span>검색어</span>
+                <input id="admin-memory-search-query" type="search" maxlength="200" placeholder="memory_id, 요약, 경로로 검색" />
+              </label>
+              <label for="admin-memory-search-state">
+                <span>상태</span>
+                <select id="admin-memory-search-state">
+                  <option value="">전체</option>
+                  <option value="promoted">promoted</option>
+                  <option value="active">active</option>
+                  <option value="decayed">decayed</option>
+                  <option value="candidate">candidate</option>
+                  <option value="banned">banned</option>
+                  <option value="archived">archived</option>
+                </select>
+              </label>
+              <label for="admin-memory-search-type">
+                <span>타입</span>
+                <select id="admin-memory-search-type">
+                  <option value="">전체</option>
+                  <option value="episodic">episodic</option>
+                  <option value="decision">decision</option>
+                  <option value="failure_pattern">failure_pattern</option>
+                  <option value="convention">convention</option>
+                </select>
+              </label>
+              <div class="admin-memory-actions">
+                <button id="admin-memory-search-submit" class="action-button" type="submit">검색</button>
+                <button id="admin-memory-search-reset" class="action-button" type="button">초기화</button>
+              </div>
+            </form>
+            <div class="admin-grid admin-grid-lists">
+              <article class="admin-list-card">
+                <h3>검색 결과</h3>
+                <div id="admin-memory-search-results" class="admin-list-body">검색 준비 중...</div>
+              </article>
+              <article class="admin-list-card">
+                <h3>메모리 상세</h3>
+                <div id="admin-memory-detail" class="admin-list-body">왼쪽에서 메모리를 선택하세요.</div>
+              </article>
+            </div>
+          </section>
+
+          <section class="quick-panel admin-panel">
+            <div class="quick-panel-head">
+              <div>
+                <h2>자동 개선 후보</h2>
+                <p class="hint">개선 산출물에서 생성된 backlog 후보를 확인하고 승인, 보류, 작업 생성으로 넘길 수 있습니다.</p>
+              </div>
+            </div>
+            <p id="admin-memory-backlog-result" class="hint"></p>
+            <div id="admin-memory-backlog-results" class="admin-list-body">불러오는 중...</div>
+          </section>
         </section>
 
-        <section class="quick-panel admin-panel">
-          <div class="quick-panel-head">
-            <div>
-              <h2>Workflow 일별 추이</h2>
-              <p class="hint">최근 7일 동안 기본 workflow와 adaptive workflow가 실제로 얼마나 실행됐는지 비교합니다.</p>
+        <section class="admin-section-group" data-admin-section="ops">
+          <section class="quick-panel admin-panel">
+            <div class="quick-panel-head">
+              <div>
+                <h2>운영자 입력 관리</h2>
+                <p class="hint">API 키, tenant id, 외부 서비스 설정처럼 나중에 제공할 입력을 요청 상태로 등록하고, 준비되면 안전하게 제공합니다.</p>
+              </div>
             </div>
-          </div>
-          <div id="admin-workflow-timeline" class="admin-list-body">불러오는 중...</div>
-        </section>
-
-        <section class="quick-panel admin-panel">
-          <div class="quick-panel-head">
-            <div>
-              <h2>메모리 랭킹 및 실행 저장소</h2>
-              <p class="hint">메모리 상태와 실제 코드가 실행되는 저장소 범위를 확인합니다.</p>
+            <div class="admin-runtime-input-draft-box">
+              <h3>입력 초안 추천</h3>
+              <p class="hint">작업 맥락이나 필요한 기능을 적으면, 운영자 승인용 입력 초안을 추천합니다. 초안은 자동 등록되지 않습니다.</p>
+              <form id="admin-runtime-input-draft-form" class="admin-runtime-input-form">
+                <label>
+                  <span>대상 작업 ID</span>
+                  <input id="admin-runtime-input-draft-job-id" type="text" maxlength="128" placeholder="선택 사항: job 기준 추천" />
+                </label>
+                <label class="admin-runtime-input-description">
+                  <span>필요한 기능 / 막힌 이유</span>
+                  <textarea id="admin-runtime-input-draft-context" rows="2" maxlength="2000" placeholder="예: Google Maps 지도와 장소 검색을 붙이려는데 API key가 필요해 보임"></textarea>
+                </label>
+                <div class="admin-memory-actions">
+                  <button id="admin-runtime-input-draft-submit" class="action-button" type="submit">초안 추천</button>
+                </div>
+              </form>
+              <p id="admin-runtime-input-draft-result" class="hint"></p>
+              <div id="admin-runtime-input-draft-list" class="admin-list-body">작업 ID 또는 기능 맥락을 입력하면 승인용 초안을 추천합니다.</div>
             </div>
-          </div>
-          <div class="admin-grid admin-grid-lists">
-            <article class="admin-list-card">
-              <h3>메모리 상태</h3>
-              <div id="admin-memory-state-list" class="admin-list-body">불러오는 중...</div>
-            </article>
-            <article class="admin-list-card">
-              <h3>실행 저장소</h3>
-              <div id="admin-execution-repo-list" class="admin-list-body">불러오는 중...</div>
-            </article>
-          </div>
-        </section>
-
-        <section class="quick-panel admin-panel">
-          <div class="quick-panel-head">
-            <div>
-              <h2>메모리 워크벤치</h2>
-              <p class="hint">memory runtime DB를 검색하고, ranking reason과 수동 override를 확인합니다.</p>
-            </div>
-          </div>
-          <form id="admin-memory-search-form" class="admin-memory-search-form">
-            <label for="admin-memory-search-query">
-              <span>검색어</span>
-              <input id="admin-memory-search-query" type="search" maxlength="200" placeholder="memory_id, summary, source path" />
-            </label>
-            <label for="admin-memory-search-state">
-              <span>상태</span>
-              <select id="admin-memory-search-state">
-                <option value="">전체</option>
-                <option value="promoted">promoted</option>
-                <option value="active">active</option>
-                <option value="decayed">decayed</option>
-                <option value="candidate">candidate</option>
-                <option value="banned">banned</option>
-                <option value="archived">archived</option>
+            <form id="admin-runtime-input-request-form" class="admin-runtime-input-form">
+            <label>
+              <span>범위</span>
+              <select id="admin-runtime-input-scope">
+                <option value="repository">저장소</option>
+                <option value="app">앱</option>
+                <option value="job">작업</option>
               </select>
             </label>
-            <label for="admin-memory-search-type">
-              <span>타입</span>
-              <select id="admin-memory-search-type">
-                <option value="">전체</option>
-                <option value="episodic">episodic</option>
-                <option value="decision">decision</option>
-                <option value="failure_pattern">failure_pattern</option>
-                <option value="convention">convention</option>
+            <label>
+              <span>저장소</span>
+              <input id="admin-runtime-input-repository" type="text" maxlength="200" placeholder="owner/repo" />
+            </label>
+            <label>
+              <span>앱 코드</span>
+              <input id="admin-runtime-input-app-code" type="text" maxlength="32" placeholder="default" />
+            </label>
+            <label>
+              <span>작업 ID</span>
+              <input id="admin-runtime-input-job-id" type="text" maxlength="128" placeholder="job scope일 때만" />
+            </label>
+            <label>
+              <span>키 이름</span>
+              <input id="admin-runtime-input-key" type="text" maxlength="80" placeholder="google_maps_api_key" />
+            </label>
+            <label>
+              <span>표시 이름</span>
+              <input id="admin-runtime-input-label" type="text" maxlength="120" placeholder="Google Maps API Key" />
+            </label>
+            <label>
+              <span>환경 변수</span>
+              <input id="admin-runtime-input-env" type="text" maxlength="80" placeholder="GOOGLE_MAPS_API_KEY" />
+            </label>
+            <label>
+              <span>입력 유형</span>
+              <select id="admin-runtime-input-type">
+                <option value="secret">보안 값</option>
+                <option value="text">일반 텍스트</option>
               </select>
+            </label>
+            <label>
+              <span>입력 안내 문구</span>
+              <input id="admin-runtime-input-placeholder" type="text" maxlength="200" placeholder="값은 나중에 입력" />
+            </label>
+            <label class="admin-runtime-input-description">
+              <span>설명</span>
+              <textarea id="admin-runtime-input-description" rows="2" maxlength="500" placeholder="왜 필요한지, 어떤 구현을 막고 있는지"></textarea>
             </label>
             <div class="admin-memory-actions">
-              <button id="admin-memory-search-submit" class="action-button" type="submit">검색</button>
-              <button id="admin-memory-search-reset" class="action-button" type="button">초기화</button>
+              <button id="admin-runtime-input-request-submit" class="action-button" type="submit">요청 등록</button>
             </div>
           </form>
-          <div class="admin-grid admin-grid-lists">
-            <article class="admin-list-card">
-              <h3>검색 결과</h3>
-              <div id="admin-memory-search-results" class="admin-list-body">검색 준비 중...</div>
-            </article>
-            <article class="admin-list-card">
-              <h3>메모리 상세</h3>
-              <div id="admin-memory-detail" class="admin-list-body">왼쪽에서 memory를 선택하세요.</div>
-            </article>
-          </div>
-        </section>
-
-        <section class="quick-panel admin-panel">
-          <div class="quick-panel-head">
-            <div>
-              <h2>자동 개선 백로그 큐</h2>
-              <p class="hint">improvement artifact, quality trend, strategy shadow에서 생성된 backlog 후보를 읽기 전용으로 확인합니다.</p>
+          <p id="admin-runtime-input-result" class="hint"></p>
+            <div class="admin-grid admin-grid-lists">
+              <article class="admin-list-card">
+                <h3>입력 요청 목록</h3>
+                <div id="admin-runtime-input-list" class="admin-list-body">불러오는 중...</div>
+              </article>
+              <article class="admin-list-card">
+                <h3>입력 제공 / 상세</h3>
+                <div id="admin-runtime-input-detail" class="admin-list-body">왼쪽에서 입력 요청을 선택하세요.</div>
+              </article>
             </div>
-          </div>
-          <div id="admin-memory-backlog-results" class="admin-list-body">불러오는 중...</div>
-        </section>
+          </section>
 
-        <section class="quick-panel admin-panel">
-          <div class="quick-panel-head">
-            <div>
-              <h2>Capability 및 Phase 상태</h2>
-              <p class="hint">현재 켜진 기능과 Phase 진행 상태를 읽기 전용으로 확인합니다.</p>
+          <section class="quick-panel admin-panel">
+            <div class="quick-panel-head">
+              <div>
+                <h2>기능 활성화와 단계 상태</h2>
+                <p class="hint">현재 켜진 기능과 단계별 진행 상태를 읽기 전용으로 확인합니다.</p>
+              </div>
             </div>
-          </div>
-          <div class="admin-grid admin-grid-lists">
-            <article class="admin-list-card">
-              <h3>Capability 상태</h3>
-              <div id="admin-capability-list" class="admin-list-body">불러오는 중...</div>
-            </article>
-            <article class="admin-list-card">
-              <h3>Phase 진행 상태</h3>
-              <div id="admin-phase-list" class="admin-list-body">불러오는 중...</div>
-            </article>
-            <article class="admin-list-card">
-              <h3>Retrieval 상태</h3>
-              <div id="admin-retrieval-status" class="admin-list-body">불러오는 중...</div>
-            </article>
-          </div>
+            <div class="admin-grid admin-grid-lists">
+              <article class="admin-list-card">
+                <h3>Capability 상태</h3>
+                <div id="admin-capability-list" class="admin-list-body">불러오는 중...</div>
+              </article>
+              <article class="admin-list-card">
+                <h3>Phase 진행 상태</h3>
+                <div id="admin-phase-list" class="admin-list-body">불러오는 중...</div>
+              </article>
+              <article class="admin-list-card">
+                <h3>Retrieval 상태</h3>
+                <div id="admin-retrieval-status" class="admin-list-body">불러오는 중...</div>
+              </article>
+            </div>
+          </section>
         </section>
       </section>
     </main>
@@ -1005,7 +1211,174 @@
         `;
       }
 
-      function renderAdminWorkflowTimeline(targetId, items, emptyText = "workflow 추이 데이터 없음") {
+      function renderAdminDiagnosisTraceList(targetId, payload, emptyText = "진단 기록 없음") {
+        const node = document.getElementById(targetId);
+        if (!node) return;
+        const items = Array.isArray(payload) ? payload : [];
+        if (items.length === 0) {
+          node.innerHTML = `<p class="hint">${esc(emptyText)}</p>`;
+          return;
+        }
+        node.innerHTML = `
+          <ul class="admin-status-list">
+            ${items.map((item) => {
+              const detailUrl = String(item?.detail_url || "").trim();
+              const jobId = String(item?.job_id || "-");
+              const header = detailUrl
+                ? `<button type="button" class="admin-diagnosis-select" data-diagnosis-job-id="${esc(jobId)}">${esc(jobId.slice(0, 8))}</button>`
+                : `<button type="button" class="admin-diagnosis-select" data-diagnosis-job-id="${esc(jobId)}">${esc(jobId.slice(0, 8))}</button>`;
+              const failedTools = Array.isArray(item?.failed_tools) ? item.failed_tools : [];
+              const tools = Array.isArray(item?.tools) ? item.tools : [];
+              const selected = String(item?.job_id || "").trim() === adminDiagnosisState.selectedJobId;
+              const compare = String(item?.job_id || "").trim() === adminDiagnosisState.compareJobId;
+              return `
+                <li${selected ? ` class="is-selected"` : compare ? ` class="is-compare"` : ""}>
+                  <div class="admin-status-head">
+                    <strong>${header}</strong>
+                    <span class="badge status-${failedTools.length ? "failed" : "done"}">${esc(String(item?.assistant_scope || "unknown"))}</span>
+                  </div>
+                  <p class="hint">
+                    ${esc(String(item?.app_code || "-"))} / ${esc(String(item?.stage || "-"))}
+                    · ${esc(formatKstDateTime(String(item?.generated_at || "")))}
+                    · tools ${esc(String(item?.tool_run_count || 0))}
+                    · failed ${esc(String(item?.failed_tool_count || 0))}
+                  </p>
+                  <p class="hint">${esc(String(item?.question || "-"))}</p>
+                  <p class="hint">tool chain: ${esc(tools.join(" -> ") || "-")}${failedTools.length ? ` / failed: ${esc(failedTools.join(", "))}` : ""}</p>
+                  <p class="hint">
+                    <button type="button" class="admin-diagnosis-compare" data-diagnosis-compare-job-id="${esc(jobId)}">비교 기준으로 선택</button>
+                    ${detailUrl ? ` · <a href="${esc(detailUrl)}">상세 열기</a>` : ""}
+                  </p>
+                </li>
+              `;
+            }).join("")}
+          </ul>
+        `;
+      }
+
+      function renderAdminDiagnosisTraceDetail(item) {
+        const node = document.getElementById("admin-diagnosis-detail");
+        if (!node) return;
+        const detail = item && typeof item === "object" ? item : null;
+        if (!detail) {
+          node.innerHTML = `<p class="hint">왼쪽에서 trace를 선택하세요.</p>`;
+          return;
+        }
+        const toolRuns = Array.isArray(detail.tool_runs) ? detail.tool_runs : [];
+        const toolHtml = toolRuns.length
+          ? toolRuns.map((run) => {
+              const ok = Boolean(run?.ok);
+              const toolName = esc(String(run?.tool || "-"));
+              const query = esc(String(run?.query || "-"));
+              const mode = esc(String(run?.mode || "-"));
+              const contextPath = esc(String(run?.context_path || "-"));
+              const resultPath = esc(String(run?.result_path || "-"));
+              const error = esc(String(run?.error || "-"));
+              return `
+                <li>
+                  <div class="admin-status-head">
+                    <strong>${toolName}</strong>
+                    <span class="badge status-${ok ? "done" : "failed"}">${ok ? "정상" : "실패"}</span>
+                  </div>
+                  <p class="hint">질문: ${query}</p>
+                  <p class="hint">모드: ${mode} · 컨텍스트: ${contextPath} · 결과: ${resultPath}</p>
+                  ${!ok || String(run?.error || "").trim() ? `<p class="hint">오류: ${error}</p>` : ""}
+                </li>
+              `;
+            }).join("")
+          : `<li>tool run 정보 없음</li>`;
+        const detailUrl = String(detail.detail_url || "").trim();
+        const jobLink = detailUrl
+          ? `<a href="${esc(detailUrl)}">${esc(String(detail.job_id || "").slice(0, 8))}</a>`
+          : esc(String(detail.job_id || "").slice(0, 8));
+        node.innerHTML = `
+          <ul class="admin-status-list">
+            <li>
+              <div class="admin-status-head">
+                <strong>${jobLink}</strong>
+                <span class="badge status-${Array.isArray(detail.failed_tools) && detail.failed_tools.length ? "failed" : "done"}">${esc(String(detail.assistant_scope || "unknown"))}</span>
+              </div>
+              <p class="hint">${esc(String(detail.app_code || "-"))} / ${esc(String(detail.stage || "-"))} / ${esc(String(detail.status || "-"))}</p>
+              <p class="hint">${esc(String(detail.question || "-"))}</p>
+              <p class="hint">trace 파일: ${esc(String(detail.trace_path || "-"))}</p>
+              <p class="hint">생성 시각: ${esc(formatKstDateTime(String(detail.generated_at || "")))} · 컨텍스트 ${esc(String(detail.combined_context_length || 0))}자</p>
+            </li>
+          </ul>
+          <ul class="admin-status-list">${toolHtml}</ul>
+        `;
+      }
+
+      function renderAdminDiagnosisTraceDiff(primaryItem, compareItem) {
+        const node = document.getElementById("admin-diagnosis-diff");
+        if (!node) return;
+        const primary = primaryItem && typeof primaryItem === "object" ? primaryItem : null;
+        const compare = compareItem && typeof compareItem === "object" ? compareItem : null;
+        if (!primary) {
+          node.innerHTML = `<p class="hint">비교할 기준 trace를 먼저 선택하세요.</p>`;
+          return;
+        }
+        if (!compare) {
+          node.innerHTML = `<p class="hint">비교 대상 trace를 선택하세요.</p>`;
+          return;
+        }
+
+        const primaryRuns = Array.isArray(primary.tool_runs) ? primary.tool_runs : [];
+        const compareRuns = Array.isArray(compare.tool_runs) ? compare.tool_runs : [];
+        const orderedTools = [];
+        for (const toolName of [...primaryRuns.map((item) => String(item?.tool || "").trim()), ...compareRuns.map((item) => String(item?.tool || "").trim())]) {
+          if (toolName && !orderedTools.includes(toolName)) orderedTools.push(toolName);
+        }
+        const runByTool = (runs, toolName) => runs.find((item) => String(item?.tool || "").trim() === toolName) || null;
+        const toolDiffHtml = orderedTools.length
+          ? orderedTools.map((toolName) => {
+              const primaryRun = runByTool(primaryRuns, toolName);
+              const compareRun = runByTool(compareRuns, toolName);
+              const primaryQuery = String(primaryRun?.query || "-");
+              const compareQuery = String(compareRun?.query || "-");
+              const primaryState = primaryRun ? (primaryRun.ok ? "ok" : "failed") : "missing";
+              const compareState = compareRun ? (compareRun.ok ? "ok" : "failed") : "missing";
+              const queryChanged = primaryQuery !== compareQuery;
+              const stateChanged = primaryState !== compareState;
+              return `
+                <li>
+                  <div class="admin-status-head">
+                    <strong>${esc(toolName)}</strong>
+                    <span class="badge status-${stateChanged ? "running" : "done"}">${stateChanged ? "changed" : "same"}</span>
+                  </div>
+                  <p class="hint">기준: ${esc(primaryState)} · ${esc(primaryQuery)}</p>
+                  <p class="hint">비교: ${esc(compareState)} · ${esc(compareQuery)}</p>
+                  ${queryChanged ? `<p class="hint">질문 차이 있음</p>` : ""}
+                </li>
+              `;
+            }).join("")
+          : "<li>도구 실행 정보 없음</li>";
+
+        const chainPrimary = Array.isArray(primary.tools) ? primary.tools.join(" -> ") : "-";
+        const chainCompare = Array.isArray(compare.tools) ? compare.tools.join(" -> ") : "-";
+        node.innerHTML = `
+          <ul class="admin-status-list">
+            <li>
+              <div class="admin-status-head">
+                <strong>기준 ${esc(String(primary.job_id || "").slice(0, 8))}</strong>
+                <span class="badge status-done">${esc(String(primary.assistant_scope || "unknown"))}</span>
+              </div>
+              <p class="hint">${esc(String(primary.question || "-"))}</p>
+              <p class="hint">도구 흐름: ${esc(chainPrimary || "-")} / 실패 도구 ${esc(String(primary.failed_tool_count || 0))}</p>
+            </li>
+            <li>
+              <div class="admin-status-head">
+                <strong>비교 ${esc(String(compare.job_id || "").slice(0, 8))}</strong>
+                <span class="badge status-${String(primary.assistant_scope || "") === String(compare.assistant_scope || "") ? "done" : "running"}">${esc(String(compare.assistant_scope || "unknown"))}</span>
+              </div>
+              <p class="hint">${esc(String(compare.question || "-"))}</p>
+              <p class="hint">도구 흐름: ${esc(chainCompare || "-")} / 실패 도구 ${esc(String(compare.failed_tool_count || 0))}</p>
+            </li>
+          </ul>
+          <ul class="admin-status-list">${toolDiffHtml}</ul>
+        `;
+      }
+
+      function renderAdminWorkflowTimeline(targetId, items, emptyText = "실행 흐름 추이 데이터 없음") {
         const node = document.getElementById(targetId);
         if (!node) return;
         if (!Array.isArray(items) || items.length === 0) {
@@ -1027,7 +1400,7 @@
                 <div class="admin-timeline-row">
                   <div class="admin-timeline-head">
                     <strong>${esc(String(item?.day || "-").slice(5))}</strong>
-                    <span class="admin-timeline-meta">total ${esc(String(totalCount))} · default ${esc(String(defaultCount))} · adaptive ${esc(String(adaptiveCount))}</span>
+                    <span class="admin-timeline-meta">전체 ${esc(String(totalCount))} · 기본 ${esc(String(defaultCount))} · 적응형 ${esc(String(adaptiveCount))}</span>
                   </div>
                   <div class="admin-timeline-bars">
                     <span class="admin-timeline-bar admin-timeline-bar-default" style="width:${defaultWidth}%"></span>
@@ -1041,12 +1414,20 @@
         `;
       }
 
+      const adminDiagnosisState = {
+        selectedJobId: "",
+        compareJobId: "",
+      };
+
       function renderAdminMetrics(payload) {
+        window.__agenthubLastAdminMetrics = payload || {};
         const system = payload?.system || {};
         const runtime = payload?.runtime || {};
         const quality = payload?.quality || {};
         const memory = payload?.memory || {};
         const summary = runtime?.job_summary || {};
+        const diagnosis = payload?.assistant_diagnosis || {};
+        const recentDiagnosisTraces = Array.isArray(diagnosis?.recent_traces) ? diagnosis.recent_traces : [];
 
         const assign = (id, value) => {
           const node = document.getElementById(id);
@@ -1090,6 +1471,28 @@
         renderAdminCountList("admin-recovery-list", runtime.recovery_counts, "복구 이력 없음", "recovery_status");
         renderAdminCountList("admin-resume-list", runtime.resume_mode_counts, "resume 이력 없음", "q");
         renderAdminCountList("admin-memory-state-list", memory.ranking_state_counts, "메모리 랭킹 없음");
+        renderAdminCountList("admin-diagnosis-scope-list", payload?.assistant_diagnosis?.scope_counts, "diagnosis scope 없음");
+        renderAdminCountList("admin-diagnosis-tool-list", payload?.assistant_diagnosis?.tool_counts, "diagnosis tool 없음");
+        renderAdminCountList("admin-diagnosis-failed-tool-list", payload?.assistant_diagnosis?.failed_tool_counts, "실패 tool 없음");
+        const hasSelectedDiagnosis = adminDiagnosisState.selectedJobId
+          && recentDiagnosisTraces.some((item) => String(item?.job_id || "").trim() === adminDiagnosisState.selectedJobId);
+        if (!hasSelectedDiagnosis) {
+          adminDiagnosisState.selectedJobId = recentDiagnosisTraces.length ? String(recentDiagnosisTraces[0]?.job_id || "").trim() : "";
+        }
+        const hasCompareDiagnosis = adminDiagnosisState.compareJobId
+          && recentDiagnosisTraces.some((item) => String(item?.job_id || "").trim() === adminDiagnosisState.compareJobId)
+          && adminDiagnosisState.compareJobId !== adminDiagnosisState.selectedJobId;
+        if (!hasCompareDiagnosis) {
+          const fallbackCompare = recentDiagnosisTraces.find((item) => String(item?.job_id || "").trim() !== adminDiagnosisState.selectedJobId) || null;
+          adminDiagnosisState.compareJobId = fallbackCompare ? String(fallbackCompare.job_id || "").trim() : "";
+        }
+        renderAdminDiagnosisTraceList("admin-diagnosis-trace-list", recentDiagnosisTraces, "diagnosis trace 없음");
+        const selectedDiagnosisTrace =
+          recentDiagnosisTraces.find((item) => String(item?.job_id || "").trim() === adminDiagnosisState.selectedJobId) || null;
+        const compareDiagnosisTrace =
+          recentDiagnosisTraces.find((item) => String(item?.job_id || "").trim() === adminDiagnosisState.compareJobId) || null;
+        renderAdminDiagnosisTraceDetail(selectedDiagnosisTrace);
+        renderAdminDiagnosisTraceDiff(selectedDiagnosisTrace, compareDiagnosisTrace);
         renderAdminTextList("admin-execution-repo-list", system.execution_repositories, "실행 저장소 없음");
         renderAdminWorkflowTimeline("admin-workflow-timeline", payload?.workflow_adoption?.timeline, "workflow 추이 데이터 없음");
         renderAdminStatusList("admin-capability-list", payload?.capabilities || [], "capability 데이터 없음");
@@ -1209,34 +1612,34 @@
             </div>
 
             <p class="admin-memory-summary">${esc(String(entry?.summary || "-"))}</p>
-            <p class="hint">reason: ${esc(String(entry?.state_reason || "-"))}</p>
+            <p class="hint">상태 이유: ${esc(String(entry?.state_reason || "-"))}</p>
 
             <dl class="admin-memory-detail-grid">
-              <div><dt>Score</dt><dd>${esc(formatAdminValue(entry?.score))}</dd></div>
-              <div><dt>Confidence</dt><dd>${esc(formatAdminValue(entry?.confidence))}</dd></div>
-              <div><dt>Effectiveness</dt><dd>${esc(formatAdminValue(entry?.effectiveness))}</dd></div>
-              <div><dt>Staleness</dt><dd>${esc(formatAdminValue(entry?.staleness_penalty))}</dd></div>
-              <div><dt>Positive / Negative</dt><dd>${esc(String(entry?.positive_count ?? 0))} / ${esc(String(entry?.negative_count ?? 0))}</dd></div>
-              <div><dt>Usage / Retrieval</dt><dd>${esc(String(entry?.usage_count ?? 0))} / ${esc(String(entry?.retrieval_count ?? 0))}</dd></div>
-              <div><dt>Execution Repo</dt><dd>${esc(String(entry?.execution_repository || "-"))}</dd></div>
-              <div><dt>Updated</dt><dd>${esc(formatKstDateTime(entry?.updated_at || entry?.created_at || ""))}</dd></div>
+              <div><dt>점수</dt><dd>${esc(formatAdminValue(entry?.score))}</dd></div>
+              <div><dt>신뢰도</dt><dd>${esc(formatAdminValue(entry?.confidence))}</dd></div>
+              <div><dt>효과성</dt><dd>${esc(formatAdminValue(entry?.effectiveness))}</dd></div>
+              <div><dt>오래됨 패널티</dt><dd>${esc(formatAdminValue(entry?.staleness_penalty))}</dd></div>
+              <div><dt>긍정 / 부정</dt><dd>${esc(String(entry?.positive_count ?? 0))} / ${esc(String(entry?.negative_count ?? 0))}</dd></div>
+              <div><dt>사용 / 조회</dt><dd>${esc(String(entry?.usage_count ?? 0))} / ${esc(String(entry?.retrieval_count ?? 0))}</dd></div>
+              <div><dt>실행 저장소</dt><dd>${esc(String(entry?.execution_repository || "-"))}</dd></div>
+              <div><dt>업데이트 시각</dt><dd>${esc(formatKstDateTime(entry?.updated_at || entry?.created_at || ""))}</dd></div>
             </dl>
 
             <div>
-              <h4>수동 Override</h4>
-              <p class="hint">${esc(manualOverride ? `현재 ${manualOverride}${manualNote ? ` · ${manualNote}` : ""}` : "현재 override 없음")}</p>
+              <h4>수동 조정</h4>
+              <p class="hint">${esc(manualOverride ? `현재 ${manualOverride}${manualNote ? ` · ${manualNote}` : ""}` : "현재 수동 조정 없음")}</p>
               <div class="admin-memory-actions">
-                <button type="button" class="action-button" data-memory-override-state="promoted" data-memory-id="${esc(String(entry?.memory_id || ""))}">Promote</button>
-                <button type="button" class="action-button" data-memory-override-state="decayed" data-memory-id="${esc(String(entry?.memory_id || ""))}">Decay</button>
-                <button type="button" class="action-button" data-memory-override-state="banned" data-memory-id="${esc(String(entry?.memory_id || ""))}">Ban</button>
-                <button type="button" class="action-button" data-memory-override-state="archived" data-memory-id="${esc(String(entry?.memory_id || ""))}">Archive</button>
-                <button type="button" class="action-button" data-memory-override-state="" data-memory-id="${esc(String(entry?.memory_id || ""))}">Clear</button>
+                <button type="button" class="action-button" data-memory-override-state="promoted" data-memory-id="${esc(String(entry?.memory_id || ""))}">승격</button>
+                <button type="button" class="action-button" data-memory-override-state="decayed" data-memory-id="${esc(String(entry?.memory_id || ""))}">감쇠</button>
+                <button type="button" class="action-button" data-memory-override-state="banned" data-memory-id="${esc(String(entry?.memory_id || ""))}">차단</button>
+                <button type="button" class="action-button" data-memory-override-state="archived" data-memory-id="${esc(String(entry?.memory_id || ""))}">보관</button>
+                <button type="button" class="action-button" data-memory-override-state="" data-memory-id="${esc(String(entry?.memory_id || ""))}">해제</button>
               </div>
             </div>
 
             <div>
-              <h4>Evidence</h4>
-              ${evidence.length === 0 ? `<p class="hint">evidence 없음</p>` : `
+              <h4>근거</h4>
+              ${evidence.length === 0 ? `<p class="hint">근거 없음</p>` : `
                 <ul class="admin-memory-sublist">
                   ${evidence.map((item) => `
                     <li>
@@ -1252,8 +1655,8 @@
             </div>
 
             <div>
-              <h4>Feedback</h4>
-              ${feedback.length === 0 ? `<p class="hint">feedback 없음</p>` : `
+              <h4>피드백</h4>
+              ${feedback.length === 0 ? `<p class="hint">피드백 없음</p>` : `
                 <ul class="admin-memory-sublist">
                   ${feedback.map((item) => `
                     <li>
@@ -1262,7 +1665,7 @@
                         <code>${esc(formatKstDateTime(item?.generated_at || ""))}</code>
                       </div>
                       <p class="admin-memory-summary">
-                        delta ${esc(formatAdminValue(item?.score_delta))} · routes ${esc((Array.isArray(item?.routes) ? item.routes.join(", ") : "-") || "-")}
+                        변화량 ${esc(formatAdminValue(item?.score_delta))} · 경로 ${esc((Array.isArray(item?.routes) ? item.routes.join(", ") : "-") || "-")}
                       </p>
                     </li>
                   `).join("")}
@@ -1305,11 +1708,361 @@
                     ${recommendedNodeType ? `<code>${esc(recommendedNodeType)}</code>` : ""}
                     <code>${esc(formatKstDateTime(item?.updated_at || item?.created_at || ""))}</code>
                   </div>
+                  <div class="action-row compact-action-row">
+                    <button type="button" class="action-button small-button" data-backlog-action="approve" data-candidate-id="${esc(String(item?.candidate_id || ""))}">승인</button>
+                    <button type="button" class="action-button small-button" data-backlog-action="queue" data-candidate-id="${esc(String(item?.candidate_id || ""))}">작업 생성</button>
+                    <button type="button" class="action-button secondary-button small-button" data-backlog-action="dismiss" data-candidate-id="${esc(String(item?.candidate_id || ""))}">보류</button>
+                  </div>
                 </li>
               `;
             }).join("")}
           </ul>
         `;
+        node.querySelectorAll("[data-backlog-action][data-candidate-id]").forEach((button) => {
+          button.addEventListener("click", () => {
+            const candidateId = button.dataset.candidateId || "";
+            const action = button.dataset.backlogAction || "";
+            saveAdminBacklogAction(candidateId, action);
+          });
+        });
+      }
+
+      function setAdminBacklogResult(message = "", isError = false) {
+        const node = document.getElementById("admin-memory-backlog-result");
+        if (!node) return;
+        node.textContent = message;
+        node.classList.toggle("error-text", Boolean(isError));
+      }
+
+      function backlogActionLabel(action) {
+        const normalized = String(action || "").trim().toLowerCase();
+        if (normalized === "approve") return "승인";
+        if (normalized === "queue") return "작업 생성";
+        if (normalized === "dismiss") return "보류";
+        return normalized || "처리";
+      }
+
+      async function saveAdminBacklogAction(candidateId, action) {
+        const normalizedId = String(candidateId || "").trim();
+        const normalizedAction = String(action || "").trim().toLowerCase();
+        if (!normalizedId || !normalizedAction) return;
+        const actionLabel = backlogActionLabel(normalizedAction);
+        let note = "";
+        if (normalizedAction === "approve" || normalizedAction === "dismiss" || normalizedAction === "queue") {
+          const provided = window.prompt(`${actionLabel} 메모`, "");
+          if (provided === null) return;
+          note = provided.trim();
+        }
+        setAdminBacklogResult(`${actionLabel} 요청 중...`);
+        const response = await fetch(`/api/admin/memory/backlog/${encodeURIComponent(normalizedId)}/action`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: normalizedAction, note }),
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          setAdminBacklogResult(payload.detail || "백로그 작업 처리 실패", true);
+          return;
+        }
+        const queuedJobId = String(payload?.queued_job_id || "").trim();
+        const suffix = queuedJobId ? `, 작업 ${queuedJobId.slice(0, 8)}` : "";
+        setAdminBacklogResult(`${actionLabel} 완료${suffix}`);
+        await loadAdminMetrics();
+        await loadAdminBacklogCandidates();
+      }
+
+      const adminRuntimeInputState = {
+        items: [],
+        selectedId: "",
+      };
+      const adminRuntimeInputDraftState = {
+        items: [],
+      };
+
+      function runtimeInputBadgeClass(status) {
+        return String(status || "").trim().toLowerCase() === "provided" ? "done" : "queued";
+      }
+
+      function renderAdminRuntimeInputList(items) {
+        const node = document.getElementById("admin-runtime-input-list");
+        if (!node) return;
+        const rows = Array.isArray(items) ? items : [];
+        adminRuntimeInputState.items = rows;
+        if (!rows.length) {
+          node.innerHTML = `<p class="hint">등록된 입력 요청이 없습니다.</p>`;
+          return;
+        }
+        node.innerHTML = `
+          <ul class="admin-status-list">
+            ${rows.map((item) => {
+              const requestId = String(item?.request_id || "").trim();
+              const selected = requestId && requestId === adminRuntimeInputState.selectedId;
+              return `
+                <li${selected ? ` class="is-selected"` : ""}>
+                  <div class="admin-status-head">
+                    <strong>
+                      <button type="button" class="admin-runtime-input-select" data-runtime-input-id="${esc(requestId)}">
+                        ${esc(String(item?.label || item?.key || "-"))}
+                      </button>
+                    </strong>
+                    <span class="badge status-${runtimeInputBadgeClass(item?.status)}">${esc(String(item?.status || "requested"))}</span>
+                  </div>
+                  <p class="hint">${esc(String(item?.repository || "-"))} / ${esc(String(item?.app_code || "-") || "-")} / ${esc(String(item?.scope || "-"))}</p>
+                  <p class="hint">${esc(String(item?.env_var_name || "-"))} · ${esc(String(item?.value_type || "-"))}${item?.sensitive ? " · 보안값" : ""}</p>
+                  <p class="hint">${esc(String(item?.description || item?.placeholder || "-"))}</p>
+                </li>
+              `;
+            }).join("")}
+          </ul>
+        `;
+      }
+
+      function renderAdminRuntimeInputDetail(item) {
+        const node = document.getElementById("admin-runtime-input-detail");
+        if (!node) return;
+        const detail = item && typeof item === "object" ? item : null;
+        if (!detail) {
+          node.innerHTML = `<p class="hint">왼쪽에서 입력 요청을 선택하세요.</p>`;
+          return;
+        }
+        const requestId = String(detail?.request_id || "").trim();
+        node.innerHTML = `
+          <div class="admin-memory-detail">
+            <div class="admin-memory-detail-head">
+              <div>
+                <strong>${esc(String(detail?.label || detail?.key || "-"))}</strong>
+                <p class="hint">${esc(String(detail?.description || "-"))}</p>
+              </div>
+              <span class="badge status-${runtimeInputBadgeClass(detail?.status)}">${esc(String(detail?.status || "requested"))}</span>
+            </div>
+            <div class="admin-memory-meta">
+              <code>${esc(String(detail?.scope || "-"))}</code>
+              <code>${esc(String(detail?.repository || "-"))}</code>
+              ${detail?.app_code ? `<code>${esc(String(detail?.app_code || ""))}</code>` : ""}
+              ${detail?.job_id ? `<code>${esc(String(detail?.job_id || ""))}</code>` : ""}
+            </div>
+            <dl class="admin-memory-detail-grid">
+              <div><dt>키 이름</dt><dd>${esc(String(detail?.key || "-"))}</dd></div>
+              <div><dt>환경 변수</dt><dd>${esc(String(detail?.env_var_name || "-"))}</dd></div>
+              <div><dt>입력 유형</dt><dd>${esc(String(detail?.value_type || "-"))}${detail?.sensitive ? " / 보안값" : ""}</dd></div>
+              <div><dt>현재 값</dt><dd>${esc(String(detail?.display_value || "-"))}</dd></div>
+              <div><dt>요청 시각</dt><dd>${esc(formatKstDateTime(String(detail?.requested_at || "")))}</dd></div>
+              <div><dt>제공 시각</dt><dd>${esc(formatKstDateTime(String(detail?.provided_at || "")))}</dd></div>
+            </dl>
+            <label class="admin-runtime-input-description" for="admin-runtime-input-value">
+              <span>값 입력</span>
+              <input id="admin-runtime-input-value" type="${detail?.sensitive ? "password" : "text"}" maxlength="8000" placeholder="${esc(String(detail?.placeholder || detail?.env_var_name || detail?.key || ""))}" />
+            </label>
+            <label class="admin-runtime-input-description" for="admin-runtime-input-note">
+              <span>메모</span>
+              <textarea id="admin-runtime-input-note" rows="2" maxlength="300" placeholder="값 제공 맥락 또는 주의사항"></textarea>
+            </label>
+            <div class="admin-memory-actions">
+              <button type="button" class="action-button" data-runtime-input-provide="${esc(requestId)}">값 저장</button>
+              <button type="button" class="action-button secondary-button" data-runtime-input-clear="${esc(requestId)}">입력 대기 상태로 되돌리기</button>
+            </div>
+            <p class="hint">secret 입력은 목록/API에서 마스킹되고, 프롬프트에는 값 대신 env var 존재 여부만 노출됩니다.</p>
+          </div>
+        `;
+      }
+
+      function setAdminRuntimeInputResult(message = "", isError = false) {
+        const node = document.getElementById("admin-runtime-input-result");
+        if (!node) return;
+        node.textContent = message;
+        node.classList.toggle("error-text", Boolean(isError));
+      }
+
+      function setAdminRuntimeInputDraftResult(message = "", isError = false) {
+        const node = document.getElementById("admin-runtime-input-draft-result");
+        if (!node) return;
+        node.textContent = message;
+        node.classList.toggle("error-text", Boolean(isError));
+      }
+
+      function renderAdminRuntimeInputDrafts(items) {
+        const node = document.getElementById("admin-runtime-input-draft-list");
+        if (!node) return;
+        const rows = Array.isArray(items) ? items : [];
+        adminRuntimeInputDraftState.items = rows;
+        if (!rows.length) {
+          node.innerHTML = `<p class="hint">추천된 입력 초안이 없습니다. 다른 문맥이나 작업 ID로 다시 시도하세요.</p>`;
+          return;
+        }
+        node.innerHTML = `
+          <ul class="admin-memory-sublist">
+            ${rows.map((item, index) => {
+              const matchedKeywords = Array.isArray(item?.matched_keywords) ? item.matched_keywords : [];
+              const keywordChips = matchedKeywords.length
+                ? matchedKeywords.map((keyword) => `<code>${esc(String(keyword || ""))}</code>`).join("")
+                : `<code>빠른 템플릿</code>`;
+              return `
+                <li>
+                  <div class="admin-memory-subhead">
+                    <strong>${esc(String(item?.label || item?.key || "-"))}</strong>
+                    <div class="admin-memory-meta">
+                      <code>${esc(String(item?.scope || "-"))}</code>
+                      <code>${esc(String(item?.env_var_name || "-"))}</code>
+                      <code>${esc(String(item?.value_type || "-"))}</code>
+                    </div>
+                  </div>
+                  <p class="admin-memory-summary">${esc(String(item?.description || "-"))}</p>
+                  <p class="hint">${esc(String(item?.reason || "-"))}</p>
+                  <div class="admin-memory-meta">${keywordChips}</div>
+                  <div class="admin-memory-actions">
+                    <button type="button" class="action-button" data-runtime-input-draft-approve="${index}">이 초안으로 요청 등록</button>
+                  </div>
+                </li>
+              `;
+            }).join("")}
+          </ul>
+        `;
+      }
+
+      async function loadAdminRuntimeInputs({ preserveSelection = true } = {}) {
+        const response = await fetch("/api/admin/runtime-inputs?limit=20", { cache: "no-store" });
+        const payload = await response.json();
+        if (!response.ok) {
+          const node = document.getElementById("admin-runtime-input-list");
+          if (node) node.innerHTML = `<p class="hint">${esc(payload.detail || "runtime input 조회 실패")}</p>`;
+          return;
+        }
+        const items = Array.isArray(payload?.items) ? payload.items : [];
+        const hasSelected = preserveSelection
+          && adminRuntimeInputState.selectedId
+          && items.some((item) => String(item?.request_id || "").trim() === adminRuntimeInputState.selectedId);
+        if (!hasSelected) {
+          adminRuntimeInputState.selectedId = items.length ? String(items[0]?.request_id || "").trim() : "";
+        }
+        renderAdminRuntimeInputList(items);
+        const selected = items.find((item) => String(item?.request_id || "").trim() === adminRuntimeInputState.selectedId) || null;
+        renderAdminRuntimeInputDetail(selected);
+      }
+
+      async function requestAdminRuntimeInputDrafts(event) {
+        event?.preventDefault?.();
+        const payload = {
+          job_id: document.getElementById("admin-runtime-input-draft-job-id")?.value.trim() || "",
+          context_text: document.getElementById("admin-runtime-input-draft-context")?.value.trim() || "",
+        };
+        if (!payload.job_id && !payload.context_text) {
+          setAdminRuntimeInputDraftResult("작업 ID 또는 필요한 기능 설명을 입력하세요.", true);
+          renderAdminRuntimeInputDrafts([]);
+          return;
+        }
+        setAdminRuntimeInputDraftResult("초안 추천 중...");
+        const response = await fetch("/api/admin/runtime-inputs/draft", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const responsePayload = await response.json();
+        if (!response.ok) {
+          setAdminRuntimeInputDraftResult(responsePayload.detail || "입력 초안 추천 실패", true);
+          renderAdminRuntimeInputDrafts([]);
+          return;
+        }
+        renderAdminRuntimeInputDrafts(responsePayload.items || []);
+        setAdminRuntimeInputDraftResult(
+          responsePayload.count
+            ? `추천 초안 ${responsePayload.count}건`
+            : "추천 가능한 초안을 찾지 못했습니다.",
+          false,
+        );
+      }
+
+      async function saveAdminRuntimeInputRequest(event) {
+        event.preventDefault();
+        const payload = {
+          scope: document.getElementById("admin-runtime-input-scope")?.value || "repository",
+          repository: document.getElementById("admin-runtime-input-repository")?.value.trim() || "",
+          app_code: document.getElementById("admin-runtime-input-app-code")?.value.trim() || "",
+          job_id: document.getElementById("admin-runtime-input-job-id")?.value.trim() || "",
+          key: document.getElementById("admin-runtime-input-key")?.value.trim() || "",
+          label: document.getElementById("admin-runtime-input-label")?.value.trim() || "",
+          env_var_name: document.getElementById("admin-runtime-input-env")?.value.trim() || "",
+          value_type: document.getElementById("admin-runtime-input-type")?.value || "secret",
+          placeholder: document.getElementById("admin-runtime-input-placeholder")?.value.trim() || "",
+          description: document.getElementById("admin-runtime-input-description")?.value.trim() || "",
+          sensitive: (document.getElementById("admin-runtime-input-type")?.value || "secret") === "secret",
+        };
+        if (!payload.key) {
+          setAdminRuntimeInputResult("key를 입력하세요.", true);
+          return;
+        }
+        setAdminRuntimeInputResult("입력 요청 등록 중...");
+        const response = await fetch("/api/admin/runtime-inputs/request", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const responsePayload = await response.json();
+        if (!response.ok) {
+          setAdminRuntimeInputResult(responsePayload.detail || "runtime input 요청 등록 실패", true);
+          return;
+        }
+        adminRuntimeInputState.selectedId = String(responsePayload?.item?.request_id || "").trim();
+        setAdminRuntimeInputResult("입력 요청을 등록했습니다.");
+        const form = document.getElementById("admin-runtime-input-request-form");
+        if (form instanceof HTMLFormElement) form.reset();
+        await loadAdminRuntimeInputs({ preserveSelection: true });
+        await loadAdminMetrics();
+      }
+
+      async function approveAdminRuntimeInputDraft(index) {
+        const item = adminRuntimeInputDraftState.items[Number(index)] || null;
+        if (!item || typeof item !== "object") return;
+        setAdminRuntimeInputDraftResult("입력 요청으로 등록 중...");
+        const response = await fetch("/api/admin/runtime-inputs/request", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            repository: item.repository || "",
+            app_code: item.app_code || "",
+            job_id: item.job_id || "",
+            scope: item.scope || "repository",
+            key: item.key || "",
+            label: item.label || "",
+            description: item.description || "",
+            value_type: item.value_type || "text",
+            env_var_name: item.env_var_name || "",
+            sensitive: Boolean(item.sensitive),
+            placeholder: item.placeholder || "",
+            note: item.reason || "",
+            requested_by: item.requested_by || "assistant_draft",
+          }),
+        });
+        const responsePayload = await response.json();
+        if (!response.ok) {
+          setAdminRuntimeInputDraftResult(responsePayload.detail || "입력 초안 등록 실패", true);
+          return;
+        }
+        adminRuntimeInputState.selectedId = String(responsePayload?.item?.request_id || "").trim();
+        setAdminRuntimeInputDraftResult(`입력 요청 등록 완료: ${String(responsePayload?.item?.label || responsePayload?.item?.key || "-")}`);
+        renderAdminRuntimeInputDrafts(adminRuntimeInputDraftState.items.filter((_, itemIndex) => itemIndex !== Number(index)));
+        await loadAdminRuntimeInputs({ preserveSelection: true });
+        await loadAdminMetrics();
+      }
+
+      async function saveAdminRuntimeInputValue(requestId, value) {
+        const normalizedId = String(requestId || "").trim();
+        if (!normalizedId) return;
+        const note = document.getElementById("admin-runtime-input-note")?.value.trim() || "";
+        setAdminRuntimeInputResult(value ? "입력 값을 저장 중..." : "입력 요청 상태로 되돌리는 중...");
+        const response = await fetch(`/api/admin/runtime-inputs/${encodeURIComponent(normalizedId)}/provide`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ value, note }),
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          setAdminRuntimeInputResult(payload.detail || "runtime input 저장 실패", true);
+          return;
+        }
+        adminRuntimeInputState.selectedId = normalizedId;
+        setAdminRuntimeInputResult(value ? "입력 값을 저장했습니다." : "요청 상태로 되돌렸습니다.");
+        await loadAdminRuntimeInputs({ preserveSelection: true });
+        await loadAdminMetrics();
       }
 
       const adminMemorySearchState = {
@@ -1413,6 +2166,7 @@
 
       async function loadAdminPanel() {
         await loadAdminMetrics();
+        await loadAdminRuntimeInputs({ preserveSelection: true });
         await loadAdminMemorySearch({ preserveSelection: true });
         await loadAdminBacklogCandidates();
       }
@@ -1858,6 +2612,18 @@
         if (status) status.textContent = `${currentPage} / ${totalPages}`;
       }
 
+      function jobKindLabel(jobKind) {
+        const key = String(jobKind || "").trim().toLowerCase();
+        if (key === "followup_backlog") return "후속 개선";
+        return "이슈 작업";
+      }
+
+      function jobKindBadgeClass(jobKind) {
+        const key = String(jobKind || "").trim().toLowerCase();
+        if (key === "followup_backlog") return "running";
+        return "done";
+      }
+
       function renderJobs(jobs) {
         const body = document.getElementById("jobs-table-body");
         if (!jobs || jobs.length === 0) {
@@ -1871,49 +2637,69 @@
               : "-";
             const appCode = job.app_code || "default";
             const track = job.track || "enhance";
+            const jobKind = String(job.job_kind || "").trim().toLowerCase() || "issue";
+            const issueTitle = String(job.issue_title || job.title || "").trim() || "제목 없음";
             const runtime = job.runtime_signals && typeof job.runtime_signals === "object"
               ? job.runtime_signals
               : {};
             const hints = [
-              job.recovery_status ? `<div class="table-cell-hint">${esc(job.recovery_status)}</div>` : "",
+              `<div class="table-cell-hint"><span class="badge status-${jobKindBadgeClass(jobKind)}">${esc(jobKindLabel(jobKind))}</span></div>`,
+              job.recovery_status ? `<div class="table-cell-hint">복구 ${esc(job.recovery_status)}</div>` : "",
+              job.parent_job_id ? `<div class="table-cell-hint">부모 ${esc(String(job.parent_job_id).slice(0, 8))}</div>` : "",
               runtime.resume_mode && runtime.resume_mode !== "none"
-                ? `<div class="table-cell-hint">resume · ${esc(runtime.resume_mode)}</div>`
+                ? `<div class="table-cell-hint">재개 ${esc(runtime.resume_mode)}</div>`
                 : "",
               runtime.strategy
-                ? `<div class="table-cell-hint">strategy · ${esc(runtime.strategy)}</div>`
+                ? `<div class="table-cell-hint">전략 ${esc(runtime.strategy)}</div>`
                 : "",
               runtime.shadow_strategy
-                ? `<div class="table-cell-hint">shadow · ${esc(runtime.shadow_diverged ? `${runtime.strategy || "-"} -> ${runtime.shadow_strategy}` : runtime.shadow_strategy)}</div>`
+                ? `<div class="table-cell-hint">섀도 ${esc(runtime.shadow_diverged ? `${runtime.strategy || "-"} -> ${runtime.shadow_strategy}` : runtime.shadow_strategy)}</div>`
                 : "",
               runtime.review_overall !== undefined && runtime.review_overall !== null
-                ? `<div class="table-cell-hint">review · ${esc(String(runtime.review_overall))}/5</div>`
+                ? `<div class="table-cell-hint">리뷰 ${esc(String(runtime.review_overall))}/5</div>`
                 : "",
               runtime.maturity_level
-                ? `<div class="table-cell-hint">maturity · ${esc(runtime.maturity_level)}</div>`
+                ? `<div class="table-cell-hint">성숙도 ${esc(runtime.maturity_level)}</div>`
                 : "",
               runtime.quality_trend_direction
-                ? `<div class="table-cell-hint">trend · ${esc(runtime.quality_trend_direction)}</div>`
+                ? `<div class="table-cell-hint">추세 ${esc(runtime.quality_trend_direction)}</div>`
                 : "",
             ].join("");
             return `
             <tr>
-              <td><a class="job-id-pill" href="/jobs/${esc(job.job_id)}">${esc(String(job.job_id).slice(0, 8))}</a></td>
-              <td>
+              <td data-label="작업">
+                <div class="jobs-primary-cell">
+                  <a class="job-id-pill" href="/jobs/${esc(job.job_id)}">${esc(String(job.job_id).slice(0, 8))}</a>
+                  <div class="jobs-primary-meta">
+                    <strong class="jobs-primary-title">${esc(issueTitle)}</strong>
+                    <span class="table-cell-hint">${esc(job.repository || "-")}</span>
+                  </div>
+                </div>
+              </td>
+              <td data-label="앱/유형">
                 <div class="job-template-cell">
                   <span class="job-template-app">${esc(appCode)}</span>
                   <span class="job-template-sep">/</span>
                   <span class="job-template-track">${esc(track)}</span>
                 </div>
+                <div class="table-cell-hint">브랜치 ${esc(String(job.branch_name || "-"))}</div>
               </td>
-              <td>
+              <td data-label="상태">
                 <span class="badge status-${esc(job.status)}">${esc(job.status)}</span>
                 ${hints}
               </td>
-              <td>${esc(job.stage)}</td>
-              <td><a class="job-issue-link" href="${esc(job.issue_url)}" target="_blank" rel="noreferrer">#${esc(job.issue_number)}</a></td>
-              <td>${prCell}</td>
-              <td>${job.status === "failed" ? `<button type="button" class="action-button table-action-button job-requeue" data-job-id="${esc(job.job_id)}">재실행</button>` : "-"}</td>
-              <td>${esc(formatKstDateTime(job.created_at || job.updated_at))}</td>
+              <td data-label="단계">${esc(job.stage)}</td>
+              <td data-label="이슈"><a class="job-issue-link" href="${esc(job.issue_url)}" target="_blank" rel="noreferrer">#${esc(job.issue_number)}</a></td>
+              <td data-label="PR">${prCell}</td>
+              <td data-label="바로가기">
+                <div class="action-row compact-action-row">
+                  <a class="table-pill-link" href="/jobs/${esc(job.job_id)}">상세</a>
+                  <a class="table-pill-link" href="/logs/${esc(job.log_file)}?channel=user" target="_blank" rel="noreferrer">사용자 로그</a>
+                  <a class="table-pill-link" href="/logs/${esc(job.log_file)}?channel=debug" target="_blank" rel="noreferrer">디버그 로그</a>
+                  ${job.status === "failed" ? `<button type="button" class="action-button table-action-button job-requeue" data-job-id="${esc(job.job_id)}">재실행</button>` : ""}
+                </div>
+              </td>
+              <td data-label="생성 시각">${esc(formatKstDateTime(job.created_at || job.updated_at))}</td>
             </tr>`;
           })
           .join("");
@@ -1963,7 +2749,7 @@
         {
           role: "assistant",
           provider: "system",
-          content: "안녕하세요. AI 도우미입니다. 현재는 로그/운영 진단에 집중하며, Gemini 또는 Codex와 여러 턴으로 대화하면서 최근 실행 문제를 분석할 수 있습니다.",
+          content: "안녕하세요. AI 진단 화면입니다. 현재는 로그와 운영 문제 분석에 집중하며, Gemini 또는 Codex와 여러 턴으로 대화하면서 최근 실행 문제를 좁혀갈 수 있습니다.",
         },
       ];
       let assistantJobOptions = [];
@@ -1976,7 +2762,7 @@
         if (normalized === "claude") return "Codex";
         if (normalized === "copilot") return "Codex";
         if (normalized === "system") return "System";
-        return "AI 도우미";
+        return "AI 진단";
       }
 
       function setAssistantStatus(message, isError = false) {
@@ -1986,6 +2772,27 @@
         node.classList.toggle("text-error", isError);
       }
 
+      function renderAssistantDiagnosisTrace(trace) {
+        const payload = trace && typeof trace === "object" ? trace : {};
+        const toolRuns = Array.isArray(payload.tool_runs) ? payload.tool_runs : [];
+        if (!payload.enabled && !toolRuns.length) return "";
+        const toolSummary = toolRuns.length
+          ? toolRuns.map((item) => {
+              const toolName = esc(String(item?.tool || "-"));
+              const query = esc(String(item?.query || "-"));
+              const state = item?.ok ? "ok" : "failed";
+              const mode = esc(String(item?.mode || "-"));
+              return `<li><strong>${toolName}</strong> · ${query} · ${state} / ${mode}</li>`;
+            }).join("")
+          : "<li>tool run 정보 없음</li>";
+        return `
+          <div class="assistant-diagnosis-trace">
+            <p><strong>Diagnosis trace</strong>${payload.trace_path ? ` · ${esc(String(payload.trace_path))}` : ""}</p>
+            <ul>${toolSummary}</ul>
+          </div>
+        `;
+      }
+
       function renderAssistantMessages() {
         const box = document.getElementById("assistant-messages");
         if (!box) return;
@@ -1993,9 +2800,13 @@
           .map((item) => {
             const role = item.role === "user" ? "user" : "assistant";
             const label = role === "user" ? "사용자" : assistantProviderLabel(item.provider);
+            const diagnosisHtml = role === "assistant"
+              ? renderAssistantDiagnosisTrace(item.diagnosisTrace)
+              : "";
             return `<article class="assistant-message role-${role}">
               <header>${esc(label)}</header>
               <pre>${esc(item.content || "")}</pre>
+              ${diagnosisHtml}
             </article>`;
           })
           .join("");
@@ -2101,7 +2912,7 @@
         featureFlagsState.descriptions = payload?.descriptions || {};
         const entries = Object.entries(featureFlagsState.flags || {});
         if (entries.length === 0) {
-          box.innerHTML = `<p class="hint">설정된 feature flag 없음</p>`;
+          box.innerHTML = `<p class="hint">설정된 실험 기능 없음</p>`;
           return;
         }
         box.innerHTML = `
@@ -3551,6 +4362,28 @@
         });
       }
 
+      function setAdminSection(sectionName) {
+        const normalized = sectionName === "memory" || sectionName === "ops" ? sectionName : "summary";
+        document.querySelectorAll(".admin-section-tab").forEach((button) => {
+          button.classList.toggle("active", button.dataset.adminSectionTab === normalized);
+        });
+        document.querySelectorAll(".admin-section-group").forEach((section) => {
+          section.classList.toggle("active", section.dataset.adminSection === normalized);
+        });
+        localStorage.setItem("agenthub-admin-section", normalized);
+      }
+
+      function bindAdminSectionTabs() {
+        const saved = localStorage.getItem("agenthub-admin-section");
+        const initial = saved === "memory" || saved === "ops" ? saved : "summary";
+        setAdminSection(initial);
+        document.querySelectorAll(".admin-section-tab").forEach((button) => {
+          button.addEventListener("click", () => {
+            setAdminSection(button.dataset.adminSectionTab || "summary");
+          });
+        });
+      }
+
       function bindAssistantForm() {
         const form = document.getElementById("assistant-form");
         const input = document.getElementById("assistant-input");
@@ -3618,6 +4451,7 @@
               role: "assistant",
               provider: payload.provider || provider,
               content: payload.assistant || "",
+              diagnosisTrace: payload.diagnosis_trace || null,
             });
             setAssistantStatus("완료");
             renderAssistantMessages();
@@ -3896,6 +4730,8 @@
       function bindAdminControls() {
         const refreshButton = document.getElementById("admin-refresh");
         const panel = document.getElementById("panel-admin");
+        const runtimeInputForm = document.getElementById("admin-runtime-input-request-form");
+        const runtimeInputDraftForm = document.getElementById("admin-runtime-input-draft-form");
         refreshButton?.addEventListener("click", async () => {
           refreshButton.disabled = true;
           try {
@@ -3904,6 +4740,8 @@
             refreshButton.disabled = false;
           }
         });
+        runtimeInputForm?.addEventListener("submit", saveAdminRuntimeInputRequest);
+        runtimeInputDraftForm?.addEventListener("submit", requestAdminRuntimeInputDrafts);
         panel?.addEventListener("click", async (event) => {
           const target = event.target;
           const button = target instanceof Element ? target.closest(".admin-drilldown-button") : null;
@@ -3927,6 +4765,73 @@
           jobsFilterState.page = 1;
           applyJobsFilterStateToForm();
           await refreshJobs();
+        });
+        panel?.addEventListener("click", (event) => {
+          const target = event.target instanceof Element ? event.target.closest(".admin-diagnosis-select") : null;
+          if (!(target instanceof HTMLButtonElement)) return;
+          const jobId = String(target.getAttribute("data-diagnosis-job-id") || "").trim();
+          if (!jobId) return;
+          adminDiagnosisState.selectedJobId = jobId;
+          const selectedTrace = window.__agenthubLastAdminMetrics?.assistant_diagnosis?.recent_traces?.find(
+            (item) => String(item?.job_id || "").trim() === jobId
+          ) || null;
+          renderAdminDiagnosisTraceList(
+            "admin-diagnosis-trace-list",
+            window.__agenthubLastAdminMetrics?.assistant_diagnosis?.recent_traces || [],
+            "diagnosis trace 없음",
+          );
+          renderAdminDiagnosisTraceDetail(selectedTrace);
+          const compareTrace = window.__agenthubLastAdminMetrics?.assistant_diagnosis?.recent_traces?.find(
+            (item) => String(item?.job_id || "").trim() === adminDiagnosisState.compareJobId
+          ) || null;
+          renderAdminDiagnosisTraceDiff(selectedTrace, compareTrace);
+        });
+        panel?.addEventListener("click", (event) => {
+          const target = event.target instanceof Element ? event.target.closest(".admin-diagnosis-compare") : null;
+          if (!(target instanceof HTMLButtonElement)) return;
+          const jobId = String(target.getAttribute("data-diagnosis-compare-job-id") || "").trim();
+          if (!jobId || jobId === adminDiagnosisState.selectedJobId) return;
+          adminDiagnosisState.compareJobId = jobId;
+          const traces = window.__agenthubLastAdminMetrics?.assistant_diagnosis?.recent_traces || [];
+          const selectedTrace = traces.find(
+            (item) => String(item?.job_id || "").trim() === adminDiagnosisState.selectedJobId
+          ) || null;
+          const compareTrace = traces.find(
+            (item) => String(item?.job_id || "").trim() === jobId
+          ) || null;
+          renderAdminDiagnosisTraceList("admin-diagnosis-trace-list", traces, "diagnosis trace 없음");
+          renderAdminDiagnosisTraceDiff(selectedTrace, compareTrace);
+        });
+        panel?.addEventListener("click", async (event) => {
+          const draftTarget = event.target instanceof Element ? event.target.closest("[data-runtime-input-draft-approve]") : null;
+          if (draftTarget instanceof HTMLButtonElement) {
+            const index = String(draftTarget.getAttribute("data-runtime-input-draft-approve") || "").trim();
+            await approveAdminRuntimeInputDraft(index);
+            return;
+          }
+        });
+        panel?.addEventListener("click", async (event) => {
+          const target = event.target instanceof Element ? event.target.closest(".admin-runtime-input-select") : null;
+          if (!(target instanceof HTMLButtonElement)) return;
+          const requestId = String(target.getAttribute("data-runtime-input-id") || "").trim();
+          if (!requestId) return;
+          adminRuntimeInputState.selectedId = requestId;
+          renderAdminRuntimeInputList(adminRuntimeInputState.items);
+          const selected = adminRuntimeInputState.items.find((item) => String(item?.request_id || "").trim() === requestId) || null;
+          renderAdminRuntimeInputDetail(selected);
+        });
+        panel?.addEventListener("click", async (event) => {
+          const provideTarget = event.target instanceof Element ? event.target.closest("[data-runtime-input-provide]") : null;
+          if (provideTarget instanceof HTMLButtonElement) {
+            const requestId = String(provideTarget.getAttribute("data-runtime-input-provide") || "").trim();
+            const value = document.getElementById("admin-runtime-input-value")?.value || "";
+            await saveAdminRuntimeInputValue(requestId, value);
+            return;
+          }
+          const clearTarget = event.target instanceof Element ? event.target.closest("[data-runtime-input-clear]") : null;
+          if (!(clearTarget instanceof HTMLButtonElement)) return;
+          const requestId = String(clearTarget.getAttribute("data-runtime-input-clear") || "").trim();
+          await saveAdminRuntimeInputValue(requestId, "");
         });
       }
 
@@ -3977,6 +4882,7 @@
       initThemeToggle();
       bindMainTabs();
       bindSettingsTabs();
+      bindAdminSectionTabs();
       bindIssueForm();
       bindAppConfigForm();
       bindWorkflowSettings();

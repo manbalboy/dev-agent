@@ -85,6 +85,9 @@ class JobRecord:
     manual_resume_node_id: str = ""
     manual_resume_requested_at: Optional[str] = None
     manual_resume_note: str = ""
+    job_kind: str = ""
+    parent_job_id: str = ""
+    backlog_candidate_id: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize to a plain dictionary for JSON storage."""
@@ -123,6 +126,42 @@ class NodeRunRecord:
     @classmethod
     def from_dict(cls, payload: Dict[str, Any]) -> "NodeRunRecord":
         """Create a NodeRunRecord from stored JSON data."""
+
+        return cls(**payload)
+
+
+@dataclass
+class RuntimeInputRecord:
+    """Stored operator-provided runtime input request/value."""
+
+    request_id: str
+    repository: str
+    app_code: str
+    job_id: str
+    scope: str
+    key: str
+    label: str
+    description: str
+    value_type: str
+    env_var_name: str
+    sensitive: bool
+    status: str
+    value: str
+    placeholder: str = ""
+    note: str = ""
+    requested_by: str = "operator"
+    requested_at: str = ""
+    provided_at: Optional[str] = None
+    updated_at: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize to a plain dictionary for JSON storage."""
+
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: Dict[str, Any]) -> "RuntimeInputRecord":
+        """Create a RuntimeInputRecord from stored JSON data."""
 
         return cls(**payload)
 

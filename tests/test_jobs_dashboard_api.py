@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 import app.dashboard as dashboard
 from app.memory.runtime_store import MemoryRuntimeStore
 from app.models import JobRecord
+from app.workflow_resume import build_workflow_artifact_paths
 
 
 def _make_job(
@@ -465,6 +466,11 @@ def test_admin_metrics_api_aggregates_system_quality_and_memory_signals(app_comp
                     "convention_extraction": True,
                     "memory_scoring": True,
                     "strategy_shadow": True,
+                    "assistant_diagnosis_loop": False,
+                    "vector_memory_shadow": False,
+                    "vector_memory_retrieval": False,
+                    "langgraph_planner_shadow": False,
+                    "langgraph_recovery_shadow": False,
                 }
             },
             ensure_ascii=False,
@@ -492,20 +498,19 @@ def test_admin_metrics_api_aggregates_system_quality_and_memory_signals(app_comp
     )
     job.recovery_status = "auto_recovered"
     store.create_job(job)
-    store.create_job(
-        _make_job(
-            "job-admin-default",
-            issue_number=502,
-            issue_title="Default workflow baseline",
-            status="done",
-            stage="done",
-            app_code="default",
-            track="enhance",
-            created_at="2026-03-07T05:10:00+00:00",
-            updated_at="2026-03-07T05:40:00+00:00",
-            workflow_id="wf-default",
-        )
+    default_job = _make_job(
+        "job-admin-default",
+        issue_number=502,
+        issue_title="Default workflow baseline",
+        status="done",
+        stage="done",
+        app_code="default",
+        track="enhance",
+        created_at="2026-03-07T05:10:00+00:00",
+        updated_at="2026-03-07T05:40:00+00:00",
+        workflow_id="wf-default",
     )
+    store.create_job(default_job)
 
     docs_dir = settings.repository_workspace_path(job.repository, job.app_code) / "_docs"
     docs_dir.mkdir(parents=True, exist_ok=True)
@@ -612,6 +617,50 @@ def test_admin_metrics_api_aggregates_system_quality_and_memory_signals(app_comp
         + "\n",
         encoding="utf-8",
     )
+    build_workflow_artifact_paths(docs_dir.parent)["assistant_diagnosis_trace"].write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-03-10T05:21:00+00:00",
+                "enabled": True,
+                "job_id": job.job_id,
+                "assistant_scope": "log_analysis",
+                "question": "최근 실패 원인 분석",
+                "combined_context_length": 320,
+                "tool_runs": [
+                    {"tool": "log_lookup", "ok": True, "mode": "internal"},
+                    {"tool": "repo_search", "ok": True, "mode": "internal"},
+                    {"tool": "memory_search", "ok": False, "mode": "error"},
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    default_docs_dir = settings.repository_workspace_path(default_job.repository, default_job.app_code) / "_docs"
+    default_docs_dir.mkdir(parents=True, exist_ok=True)
+    build_workflow_artifact_paths(default_docs_dir.parent)["assistant_diagnosis_trace"].write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-03-10T05:05:00+00:00",
+                "enabled": True,
+                "job_id": default_job.job_id,
+                "assistant_scope": "chat",
+                "question": "이전 실패 요약",
+                "combined_context_length": 180,
+                "tool_runs": [
+                    {"tool": "log_lookup", "ok": True, "mode": "internal"},
+                    {"tool": "memory_search", "ok": True, "mode": "internal"},
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     response = client.get("/api/admin/metrics")
 
@@ -651,7 +700,12 @@ def test_admin_metrics_api_aggregates_system_quality_and_memory_signals(app_comp
     assert capability_map["memory_retrieval"]["enabled"] is False
     assert capability_map["memory_scoring"]["enabled"] is True
     assert capability_map["strategy_shadow"]["enabled"] is True
+    assert capability_map["assistant_diagnosis_loop"]["enabled"] is False
     assert capability_map["mcp_tools_shadow"]["enabled"] is False
+    assert capability_map["vector_memory_shadow"]["enabled"] is False
+    assert capability_map["vector_memory_retrieval"]["enabled"] is False
+    assert capability_map["langgraph_planner_shadow"]["enabled"] is False
+    assert capability_map["langgraph_recovery_shadow"]["enabled"] is False
     phase_map = {item["phase"]: item for item in payload["phase_status"]}
     assert phase_map["Phase 1"]["status"] == "closed"
     assert phase_map["Phase 2-F"]["status"] == "implemented"
@@ -661,6 +715,17 @@ def test_admin_metrics_api_aggregates_system_quality_and_memory_signals(app_comp
     assert payload["shadow"]["divergence_count"] == 1
     assert payload["runtime"]["shadow_strategy_counts"][0]["name"] == "feature_expansion"
     assert payload["runtime"]["shadow_decision_counts"][0]["name"] == "memory_divergence"
+    assert payload["assistant_diagnosis"]["trace_count"] == 2
+    assert payload["assistant_diagnosis"]["active"] is True
+    assert payload["assistant_diagnosis"]["latest_generated_at"] == "2026-03-10T05:21:00+00:00"
+    assert {item["name"] for item in payload["assistant_diagnosis"]["scope_counts"]} == {"log_analysis", "chat"}
+    assert payload["assistant_diagnosis"]["tool_counts"][0]["name"] == "log_lookup"
+    assert payload["assistant_diagnosis"]["failed_tool_counts"][0]["name"] == "memory_search"
+    assert payload["assistant_diagnosis"]["recent_traces"][0]["job_id"] == job.job_id
+    assert payload["assistant_diagnosis"]["recent_traces"][0]["failed_tool_count"] == 1
+    assert payload["assistant_diagnosis"]["recent_traces"][0]["combined_context_length"] == 320
+    assert payload["assistant_diagnosis"]["recent_traces"][0]["tool_runs"][2]["tool"] == "memory_search"
+    assert payload["assistant_diagnosis"]["recent_traces"][0]["tool_runs"][2]["ok"] is False
 
 
 def test_admin_memory_search_detail_and_override_api(app_components):
@@ -796,6 +861,251 @@ def test_admin_memory_backlog_api_returns_candidates(app_components):
     assert payload["items"][0]["payload"]["source_kind"] == "strategy_shadow"
 
 
+def test_admin_memory_backlog_action_api_queues_followup_job_and_artifact(app_components):
+    settings, store, app = app_components
+    client = TestClient(app)
+    runtime_store = MemoryRuntimeStore(settings.resolved_memory_dir / "memory_runtime.db")
+
+    source_job = _make_job(
+        "job-backlog-source",
+        issue_number=701,
+        issue_title="Original backlog source issue",
+        status="done",
+        stage="done",
+        app_code="default",
+        track="enhance",
+        created_at="2026-03-12T01:00:00+00:00",
+        updated_at="2026-03-12T01:10:00+00:00",
+        workflow_id="wf-default",
+    )
+    store.create_job(source_job)
+
+    candidate_id = "next_improvement_task:job-backlog-source:next_1"
+    runtime_store.upsert_backlog_candidate(
+        {
+            "candidate_id": candidate_id,
+            "repository": "owner/repo",
+            "execution_repository": "owner/repo",
+            "app_code": "default",
+            "workflow_id": "wf-default",
+            "title": "회귀 테스트 보강",
+            "summary": "실패 재현 케이스를 고정한다",
+            "priority": "P1",
+            "state": "candidate",
+            "payload": {
+                "source_kind": "next_improvement_task",
+                "job_id": source_job.job_id,
+                "issue_number": source_job.issue_number,
+                "issue_title": source_job.issue_title,
+                "recommended_node_type": "coder_fix_from_test_report",
+                "action": "failing regression을 먼저 고정한다",
+            },
+            "created_at": "2026-03-12T01:11:00+00:00",
+            "updated_at": "2026-03-12T01:11:00+00:00",
+        }
+    )
+
+    approve_response = client.post(
+        f"/api/admin/memory/backlog/{candidate_id}/action",
+        json={"action": "approve", "note": "valid next step"},
+    )
+    assert approve_response.status_code == 200
+    assert approve_response.json()["candidate"]["state"] == "approved"
+
+    queue_response = client.post(
+        f"/api/admin/memory/backlog/{candidate_id}/action",
+        json={"action": "queue", "note": "run next loop"},
+    )
+    assert queue_response.status_code == 200
+    queue_payload = queue_response.json()
+    queued_job_id = queue_payload["queued_job_id"]
+
+    queued_job = store.get_job(queued_job_id)
+    assert queued_job is not None
+    assert queued_job.status == "queued"
+    assert queued_job.issue_number == source_job.issue_number
+    assert queued_job.issue_title.startswith("[Follow-up] ")
+    assert queued_job.workflow_id == "wf-default"
+    assert queued_job.job_kind == "followup_backlog"
+    assert queued_job.parent_job_id == source_job.job_id
+    assert queued_job.backlog_candidate_id == candidate_id
+
+    updated_candidate = runtime_store.get_backlog_candidate(candidate_id)
+    assert updated_candidate is not None
+    assert updated_candidate["state"] == "queued"
+    assert updated_candidate["payload"]["queued_job_id"] == queued_job_id
+    assert updated_candidate["payload"]["queued_job_kind"] == "followup_backlog"
+    assert updated_candidate["payload"]["parent_job_id"] == source_job.job_id
+
+    followup_artifact = settings.repository_workspace_path("owner/repo", "default") / "_docs" / "FOLLOWUP_BACKLOG_TASK.json"
+    assert followup_artifact.exists()
+    artifact_payload = json.loads(followup_artifact.read_text(encoding="utf-8"))
+    assert artifact_payload["candidate_id"] == candidate_id
+    assert artifact_payload["queued_job_id"] == queued_job_id
+    assert artifact_payload["job_contract"]["kind"] == "followup_backlog"
+    assert artifact_payload["parent_job_id"] == source_job.job_id
+    assert artifact_payload["recommended_node_type"] == "coder_fix_from_test_report"
+
+
+def test_admin_memory_backlog_action_api_dismisses_candidate(app_components):
+    settings, _, app = app_components
+    client = TestClient(app)
+    runtime_store = MemoryRuntimeStore(settings.resolved_memory_dir / "memory_runtime.db")
+    candidate_id = "quality_trend_persistent_low:job-dismiss:test_coverage"
+    runtime_store.upsert_backlog_candidate(
+        {
+            "candidate_id": candidate_id,
+            "repository": "owner/repo",
+            "execution_repository": "owner/repo",
+            "app_code": "default",
+            "workflow_id": "wf-default",
+            "title": "지속 저점 개선: test_coverage",
+            "summary": "최근 3회 리뷰에서 저점이 지속됨",
+            "priority": "P1",
+            "state": "candidate",
+            "payload": {"source_kind": "quality_trend_persistent_low", "job_id": "job-dismiss"},
+            "created_at": "2026-03-12T01:20:00+00:00",
+            "updated_at": "2026-03-12T01:20:00+00:00",
+        }
+    )
+
+    response = client.post(
+        f"/api/admin/memory/backlog/{candidate_id}/action",
+        json={"action": "dismiss", "note": "noise candidate"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["candidate"]["state"] == "dismissed"
+    assert payload["candidate"]["payload"]["operator_note"] == "noise candidate"
+
+
+def test_admin_runtime_inputs_request_list_and_provide_api(app_components):
+    _, store, app = app_components
+    client = TestClient(app)
+
+    job = _make_job(
+        "job-runtime-input",
+        issue_number=715,
+        issue_title="Runtime input target job",
+        status="queued",
+        stage="queued",
+        app_code="maps",
+        track="enhance",
+        created_at="2026-03-12T02:00:00+00:00",
+        updated_at="2026-03-12T02:01:00+00:00",
+    )
+    store.create_job(job)
+
+    create_response = client.post(
+        "/api/admin/runtime-inputs/request",
+        json={
+            "scope": "job",
+            "job_id": job.job_id,
+            "key": "google_maps_api_key",
+            "label": "Google Maps API Key",
+            "description": "지도 SDK 초기화에 필요",
+            "value_type": "secret",
+            "env_var_name": "GOOGLE_MAPS_API_KEY",
+            "placeholder": "추후 입력",
+        },
+    )
+
+    assert create_response.status_code == 200
+    created = create_response.json()["item"]
+    request_id = created["request_id"]
+    assert created["repository"] == "owner/repo"
+    assert created["app_code"] == "maps"
+    assert created["job_id"] == job.job_id
+    assert created["status"] == "requested"
+    assert created["sensitive"] is True
+    assert created["display_value"] == ""
+
+    list_response = client.get("/api/admin/runtime-inputs", params={"scope": "job", "job_id": job.job_id})
+    assert list_response.status_code == 200
+    list_payload = list_response.json()
+    assert list_payload["count"] == 1
+    assert list_payload["items"][0]["request_id"] == request_id
+
+    provide_response = client.post(
+        f"/api/admin/runtime-inputs/{request_id}/provide",
+        json={"value": "secret-value-123", "note": "operator provided"},
+    )
+    assert provide_response.status_code == 200
+    provided = provide_response.json()["item"]
+    assert provided["status"] == "provided"
+    assert provided["has_value"] is True
+    assert provided["value"] == ""
+    assert "*" in provided["display_value"]
+
+    metrics_response = client.get("/api/admin/metrics")
+    assert metrics_response.status_code == 200
+    metrics_payload = metrics_response.json()
+    assert metrics_payload["runtime_inputs"]["total"] == 1
+    assert metrics_payload["runtime_inputs"]["requested"] == 0
+    assert metrics_payload["runtime_inputs"]["provided"] == 1
+    capability_map = {item["id"]: item for item in metrics_payload["capabilities"]}
+    assert capability_map["operator_runtime_inputs"]["enabled"] is True
+
+
+def test_admin_runtime_input_draft_api_uses_job_context_without_persisting(app_components):
+    _, store, app = app_components
+    client = TestClient(app)
+
+    job = _make_job(
+        "job-runtime-draft",
+        issue_number=716,
+        issue_title="Google Maps 장소 검색 화면 만들기",
+        status="queued",
+        stage="queued",
+        app_code="maps",
+        track="enhance",
+        created_at="2026-03-12T02:10:00+00:00",
+        updated_at="2026-03-12T02:11:00+00:00",
+    )
+    store.create_job(job)
+
+    response = client.post(
+        "/api/admin/runtime-inputs/draft",
+        json={"job_id": job.job_id},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count"] >= 1
+    assert payload["items"][0]["key"] == "google_maps_api_key"
+    assert payload["items"][0]["scope"] == "job"
+    assert payload["items"][0]["requested_by"] == "assistant_draft"
+    assert store.list_runtime_inputs() == []
+
+
+def test_admin_runtime_inputs_request_api_accepts_assistant_draft_origin(app_components):
+    _, store, app = app_components
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/admin/runtime-inputs/request",
+        json={
+            "scope": "repository",
+            "repository": "owner/repo",
+            "key": "stripe_secret_key",
+            "label": "Stripe Secret Key",
+            "description": "결제 연동에 필요",
+            "value_type": "secret",
+            "env_var_name": "STRIPE_SECRET_KEY",
+            "requested_by": "assistant_draft",
+            "note": "문맥에서 stripe 결제 요구 감지",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["item"]
+    assert payload["requested_by"] == "assistant_draft"
+    stored = store.get_runtime_input(payload["request_id"])
+    assert stored is not None
+    assert stored.requested_by == "assistant_draft"
+
+
 def test_jobs_api_query_matches_runtime_quality_signals(app_components):
     settings, store, app = app_components
     client = TestClient(app)
@@ -916,7 +1226,12 @@ def test_roles_api_default_catalog_hides_legacy_provider_roles(app_components, m
     assert "log-analyzer-claude" not in role_codes
     assert "log-analyzer-copilot" not in role_codes
     helper_templates = {item["code"]: item.get("template_key", "") for item in payload["roles"]}
+    helper_tools = {item["code"]: item.get("allowed_tools", []) for item in payload["roles"]}
     assert helper_templates["ai-helper"] == "codex_helper"
     assert helper_templates["incident-analyst"] == "codex_helper"
     assert helper_templates["orchestration-helper"] == "codex_helper"
     assert helper_templates["data-ai-engineer"] == "codex_helper"
+    assert helper_tools["ai-helper"] == ["log_lookup", "repo_search", "memory_search"]
+    assert helper_tools["incident-analyst"] == ["log_lookup", "repo_search", "memory_search"]
+    assert helper_tools["orchestration-helper"] == ["log_lookup", "repo_search", "memory_search"]
+    assert helper_tools["data-ai-engineer"] == ["log_lookup", "repo_search", "memory_search"]

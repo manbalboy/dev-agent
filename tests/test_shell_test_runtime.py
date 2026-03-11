@@ -38,6 +38,7 @@ def _build_runtime(
     *,
     shell_executor,
     shell_executor_accepts_heartbeat: bool = False,
+    shell_executor_accepts_env: bool = False,
     is_long_track=None,
     actor_log_messages=None,
 ):
@@ -54,6 +55,7 @@ def _build_runtime(
         settings=settings,
         shell_executor=shell_executor,
         shell_executor_accepts_heartbeat=shell_executor_accepts_heartbeat,
+        shell_executor_accepts_env=shell_executor_accepts_env,
         touch_job_heartbeat=lambda *args, **kwargs: None,
         actor_log_writer=actor_log_writer,
         infer_actor_from_command=lambda command, purpose: "SHELL",
@@ -184,3 +186,34 @@ def test_shell_test_runtime_stage_run_tests_writes_failure_reason_for_failed_rep
     assert "Tests failed at stage 'test_after_implement'." in failure_reason
     assert (tmp_path / "TEST_REPORT_TEST_AFTER_IMPLEMENT.md").exists()
     assert (tmp_path / "TEST_REPORT_TEST_AFTER_IMPLEMENT_GEMINI.md").exists()
+
+
+def test_shell_test_runtime_passes_extra_env_when_supported(app_components, tmp_path: Path) -> None:
+    settings, _, _ = app_components
+    captured: dict[str, object] = {}
+
+    def fake_shell(**kwargs):
+        captured.update(kwargs)
+        return CommandResult(
+            command=kwargs["command"],
+            exit_code=0,
+            stdout="",
+            stderr="",
+            duration_seconds=0.0,
+        )
+
+    runtime = _build_runtime(
+        settings,
+        shell_executor=fake_shell,
+        shell_executor_accepts_env=True,
+    )
+    runtime.extra_env = {"GOOGLE_MAPS_API_KEY": "secret-value"}  # type: ignore[attr-defined]
+
+    runtime.run_shell(
+        command="echo env",
+        cwd=tmp_path,
+        log_path=tmp_path / "runtime.log",
+        purpose="runtime env smoke",
+    )
+
+    assert captured["extra_env"] == {"GOOGLE_MAPS_API_KEY": "secret-value"}

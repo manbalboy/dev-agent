@@ -339,7 +339,7 @@ def test_memory_runtime_ingest_populates_entries_feedback_and_retrieval_runs(tmp
         "evidence": 2,
         "feedback": 2,
         "retrieval_runs": 3,
-        "backlog_candidates": 0,
+        "backlog_candidates": 1,
     }
 
     entry_map = {item["memory_id"]: item for item in store.list_entries()}
@@ -373,6 +373,11 @@ def test_memory_runtime_ingest_populates_entries_feedback_and_retrieval_runs(tmp
         "conv_pytest_file_pattern",
     ]
     assert retrieval_runs["reviewer"]["context"][0]["id"] == "persistent_low:test_coverage"
+
+    backlog_candidates = store.list_backlog_candidates(repository=job.repository, limit=10)
+    assert len(backlog_candidates) == 1
+    assert backlog_candidates[0]["candidate_id"] == "failure_pattern_cluster:job-memory-runtime:persistent_low_test_coverage"
+    assert backlog_candidates[0]["payload"]["count"] == 3
 
 
 def test_memory_runtime_ingest_populates_backlog_candidates_from_improvement_artifacts(tmp_path: Path) -> None:
@@ -458,6 +463,28 @@ def test_memory_runtime_ingest_populates_backlog_candidates_from_improvement_art
         + "\n",
         encoding="utf-8",
     )
+    paths["failure_patterns"].write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-03-11T01:04:00+00:00",
+                "items": [
+                    {
+                        "pattern_id": "loop_guard:repeated_issue",
+                        "pattern_type": "loop_guard",
+                        "category": "",
+                        "trigger": "repeated_issue_limit_hit",
+                        "count": 3,
+                        "last_seen_at": "2026-03-11T01:04:00+00:00",
+                        "recommended_actions": ["핵심 흐름 회귀 테스트를 추가"],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     counts = ingest_memory_runtime_artifacts(
         store,
@@ -466,14 +493,15 @@ def test_memory_runtime_ingest_populates_backlog_candidates_from_improvement_art
         paths=paths,
     )
 
-    assert counts["backlog_candidates"] == 5
+    assert counts["backlog_candidates"] == 6
     candidates = store.list_backlog_candidates(repository=job.repository, limit=10)
-    assert [item["priority"] for item in candidates] == ["P1", "P1", "P1", "P1", "P2"]
+    assert [item["priority"] for item in candidates] == ["P1", "P1", "P1", "P1", "P1", "P2"]
     candidate_map = {item["candidate_id"]: item for item in candidates}
     assert candidate_map["improvement_backlog:job-memory-backlog:tests_regression"]["payload"]["source_kind"] == "improvement_backlog"
     assert candidate_map["next_improvement_task:job-memory-backlog:next_1"]["payload"]["recommended_node_type"] == "coder_fix_from_test_report"
     assert candidate_map["quality_trend_persistent_low:job-memory-backlog:test_coverage"]["payload"]["category"] == "test_coverage"
     assert candidate_map["quality_trend_stagnant:job-memory-backlog:maintainability"]["payload"]["category"] == "maintainability"
+    assert candidate_map["failure_pattern_cluster:job-memory-backlog:loop_guard_repeated_issue"]["payload"]["count"] == 3
     assert candidate_map["strategy_shadow:job-memory-backlog:feature_expansion"]["payload"]["diverged"] is True
 
 
@@ -682,3 +710,42 @@ def test_memory_runtime_store_manual_override_persists_across_refresh(tmp_path: 
     assert cleared["manual_state_override"] == ""
     assert cleared["state"] == "promoted"
     assert cleared["state_reason"] == "high cumulative score"
+
+
+def test_memory_runtime_store_updates_backlog_candidate_state_with_payload_merge(tmp_path: Path) -> None:
+    store = MemoryRuntimeStore(tmp_path / "memory" / "memory_runtime.db")
+    store.upsert_backlog_candidate(
+        {
+            "candidate_id": "next_improvement_task:job-1:task_1",
+            "repository": "owner/repo",
+            "execution_repository": "owner/repo",
+            "app_code": "web",
+            "workflow_id": "wf-memory",
+            "title": "Follow-up test hardening",
+            "summary": "회귀 테스트 보강",
+            "priority": "P1",
+            "state": "candidate",
+            "payload": {
+                "source_kind": "next_improvement_task",
+                "job_id": "job-1",
+                "recommended_node_type": "coder_fix_from_test_report",
+            },
+            "created_at": "2026-03-12T00:00:00+00:00",
+            "updated_at": "2026-03-12T00:00:00+00:00",
+        }
+    )
+
+    updated = store.set_backlog_candidate_state(
+        "next_improvement_task:job-1:task_1",
+        state="queued",
+        payload_updates={
+            "queued_job_id": "job-followup",
+            "operator_note": "ship the retry loop fix",
+        },
+    )
+
+    assert updated is not None
+    assert updated["state"] == "queued"
+    assert updated["payload"]["source_kind"] == "next_improvement_task"
+    assert updated["payload"]["queued_job_id"] == "job-followup"
+    assert updated["payload"]["operator_note"] == "ship the retry loop fix"

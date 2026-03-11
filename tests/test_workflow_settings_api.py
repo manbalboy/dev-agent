@@ -105,6 +105,10 @@ def test_feature_flags_api_returns_defaults_when_config_missing(app_components, 
     assert payload["flags"]["memory_retrieval"] is True
     assert payload["flags"]["strategy_shadow"] is True
     assert payload["flags"]["mcp_tools_shadow"] is False
+    assert payload["flags"]["vector_memory_shadow"] is False
+    assert payload["flags"]["vector_memory_retrieval"] is False
+    assert payload["flags"]["langgraph_planner_shadow"] is False
+    assert payload["flags"]["langgraph_recovery_shadow"] is False
 
 
 def test_feature_flags_api_persists_updated_values(app_components, monkeypatch, tmp_path: Path):
@@ -123,6 +127,10 @@ def test_feature_flags_api_persists_updated_values(app_components, monkeypatch, 
                 "convention_extraction": True,
                 "memory_scoring": False,
                 "strategy_shadow": False,
+                "vector_memory_shadow": True,
+                "vector_memory_retrieval": True,
+                "langgraph_planner_shadow": True,
+                "langgraph_recovery_shadow": True,
             }
         },
     )
@@ -132,6 +140,10 @@ def test_feature_flags_api_persists_updated_values(app_components, monkeypatch, 
     assert payload["saved"] is True
     assert payload["flags"]["memory_retrieval"] is False
     assert payload["flags"]["memory_scoring"] is False
+    assert payload["flags"]["vector_memory_shadow"] is True
+    assert payload["flags"]["vector_memory_retrieval"] is True
+    assert payload["flags"]["langgraph_planner_shadow"] is True
+    assert payload["flags"]["langgraph_recovery_shadow"] is True
     saved = json.loads(feature_flags_path.read_text(encoding="utf-8"))
     assert saved["flags"]["strategy_shadow"] is False
 

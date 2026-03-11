@@ -8,8 +8,10 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 import app.dashboard as dashboard
-from app.models import JobRecord, JobStage, JobStatus, NodeRunRecord, utc_now_iso
+from app.memory.runtime_store import MemoryRuntimeStore
+from app.models import JobRecord, JobStage, JobStatus, NodeRunRecord, RuntimeInputRecord, utc_now_iso
 from app.workflow_design import default_workflow_template
+from app.workflow_resume import build_workflow_artifact_paths
 
 
 def _make_job(job_id: str) -> JobRecord:
@@ -467,3 +469,214 @@ def test_job_detail_api_includes_manual_retry_options(app_components):
     assert payload["manual_retry_options"]["can_resume_failed_node"] is True
     assert payload["manual_retry_options"]["failed_node_id"] == "n16"
     assert any(item["id"] == "n16" for item in payload["manual_retry_options"]["safe_nodes"])
+
+
+def test_job_detail_api_includes_job_lineage_and_log_summary(app_components):
+    settings, store, app = app_components
+    client = TestClient(app)
+
+    parent_job = _make_job("job-lineage-parent")
+    parent_job.workflow_id = "wf-default"
+    parent_job.backlog_candidate_id = "next_improvement_task:job-lineage-parent:next_1"
+    store.create_job(parent_job)
+
+    child_job = _make_job("job-lineage-child")
+    child_job.job_kind = "followup_backlog"
+    child_job.parent_job_id = parent_job.job_id
+    child_job.backlog_candidate_id = parent_job.backlog_candidate_id
+    child_job.issue_title = "[Follow-up] regression hardening"
+    store.create_job(child_job)
+
+    runtime_store = MemoryRuntimeStore(settings.resolved_memory_dir / "memory_runtime.db")
+    runtime_store.upsert_backlog_candidate(
+        {
+            "candidate_id": parent_job.backlog_candidate_id,
+            "repository": "owner/repo",
+            "execution_repository": "owner/repo",
+            "app_code": "default",
+            "workflow_id": "wf-default",
+            "title": "회귀 테스트 보강",
+            "summary": "반복 실패 케이스를 follow-up으로 고정",
+            "priority": "P1",
+            "state": "queued",
+            "payload": {
+                "source_kind": "next_improvement_task",
+                "queued_job_id": child_job.job_id,
+                "recommended_node_type": "coder_fix_from_test_report",
+            },
+            "created_at": "2026-03-12T02:00:00+00:00",
+            "updated_at": "2026-03-12T02:05:00+00:00",
+        }
+    )
+
+    docs_dir = settings.repository_workspace_path(parent_job.repository, parent_job.app_code) / "_docs"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    (docs_dir / "FOLLOWUP_BACKLOG_TASK.json").write_text(
+        json.dumps(
+            {
+                "candidate_id": parent_job.backlog_candidate_id,
+                "queued_job_id": child_job.job_id,
+                "source_job_id": parent_job.job_id,
+                "recommended_node_type": "coder_fix_from_test_report",
+                "job_contract": {"kind": "followup_backlog", "version": "v1"},
+                "generated_at": "2026-03-12T02:06:00+00:00",
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    build_workflow_artifact_paths(docs_dir.parent)["assistant_diagnosis_trace"].write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-03-12T02:07:00+00:00",
+                "enabled": True,
+                "job_id": parent_job.job_id,
+                "assistant_scope": "log_analysis",
+                "question": "최근 실패 원인 분석",
+                "combined_context_length": 248,
+                "tool_runs": [
+                    {
+                        "tool": "log_lookup",
+                        "query": "heartbeat stale detected",
+                        "ok": True,
+                        "mode": "internal",
+                        "context_path": str(docs_dir / "ASSISTANT_LOG_LOOKUP_CONTEXT.md"),
+                        "result_path": str(docs_dir / "ASSISTANT_LOG_LOOKUP_RESULT.json"),
+                        "error": "",
+                    },
+                    {
+                        "tool": "repo_search",
+                        "query": "implement codex exec implement",
+                        "ok": False,
+                        "mode": "error",
+                        "context_path": "",
+                        "result_path": "",
+                        "error": "repo path missing",
+                    },
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    debug_log_path = settings.logs_dir / "debug" / parent_job.log_file
+    debug_log_path.parent.mkdir(parents=True, exist_ok=True)
+    debug_log_path.write_text(
+        "\n".join(
+            [
+                "[2026-03-12T02:10:00+00:00] [RUN] codex exec implement",
+                "[2026-03-12T02:10:02+00:00] [STDERR] regression test failed",
+                "[2026-03-12T02:10:04+00:00] [DONE] exit_code=1 elapsed=2.40s",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    user_log_path = settings.logs_dir / "user" / parent_job.log_file
+    user_log_path.parent.mkdir(parents=True, exist_ok=True)
+    user_log_path.write_text("[2026-03-12T02:10:00+00:00] user-visible line\n", encoding="utf-8")
+
+    response = client.get(f"/api/jobs/{parent_job.job_id}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    lineage = payload["job_lineage"]
+    assert lineage["job_kind"] == "issue"
+    assert lineage["backlog_candidate"]["candidate_id"] == parent_job.backlog_candidate_id
+    assert lineage["child_count"] == 1
+    assert lineage["child_jobs"][0]["job_id"] == child_job.job_id
+    assert lineage["followup_artifact"]["queued_job_id"] == child_job.job_id
+    assert lineage["followup_artifact"]["recommended_node_type"] == "coder_fix_from_test_report"
+
+    log_summary = payload["log_summary"]
+    assert log_summary["event_count"] == 3
+    assert log_summary["error_count"] == 2
+    assert log_summary["nonzero_done_count"] == 1
+    assert log_summary["latest_command"]["message"] == "codex exec implement"
+    assert log_summary["latest_error"]["message"] == "[DONE] exit_code=1 elapsed=2.40s"
+    assert log_summary["channels"]["debug"]["exists"] is True
+    assert log_summary["channels"]["user"]["exists"] is True
+
+    diagnosis_trace = payload["assistant_diagnosis_trace"]
+    assert diagnosis_trace["enabled"] is True
+    assert diagnosis_trace["assistant_scope"] == "log_analysis"
+    assert diagnosis_trace["question"] == "최근 실패 원인 분석"
+    assert diagnosis_trace["combined_context_length"] == 248
+    assert diagnosis_trace["trace_path"].endswith("ASSISTANT_DIAGNOSIS_TRACE.json")
+    assert len(diagnosis_trace["tool_runs"]) == 2
+    assert diagnosis_trace["tool_runs"][0]["tool"] == "log_lookup"
+    assert diagnosis_trace["tool_runs"][1]["error"] == "repo path missing"
+
+
+def test_job_detail_api_includes_operator_inputs(app_components):
+    settings, store, app = app_components
+    client = TestClient(app)
+
+    job = _make_job("job-detail-operator-inputs")
+    job.app_code = "maps"
+    store.create_job(job)
+    store.upsert_runtime_input(
+        RuntimeInputRecord(
+            request_id="runtime-input-ready",
+            repository=job.repository,
+            app_code=job.app_code,
+            job_id=job.job_id,
+            scope="job",
+            key="google_maps_api_key",
+            label="Google Maps API Key",
+            description="지도 구현에 필요",
+            value_type="secret",
+            env_var_name="GOOGLE_MAPS_API_KEY",
+            sensitive=True,
+            status="provided",
+            value="secret-value-123",
+            placeholder="",
+            note="provided",
+            requested_by="operator",
+            requested_at="2026-03-12T03:00:00+00:00",
+            provided_at="2026-03-12T03:01:00+00:00",
+            updated_at="2026-03-12T03:01:00+00:00",
+        )
+    )
+    store.upsert_runtime_input(
+        RuntimeInputRecord(
+            request_id="runtime-input-pending",
+            repository=job.repository,
+            app_code=job.app_code,
+            job_id=job.job_id,
+            scope="job",
+            key="google_places_dataset",
+            label="Google Places Dataset",
+            description="장소 autocomplete 고도화용",
+            value_type="text",
+            env_var_name="GOOGLE_PLACES_DATASET",
+            sensitive=False,
+            status="requested",
+            value="",
+            placeholder="dataset id",
+            note="",
+            requested_by="operator",
+            requested_at="2026-03-12T03:02:00+00:00",
+            provided_at=None,
+            updated_at="2026-03-12T03:02:00+00:00",
+        )
+    )
+
+    response = client.get(f"/api/jobs/{job.job_id}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    operator_inputs = payload["operator_inputs"]
+    assert operator_inputs["available_count"] == 1
+    assert operator_inputs["pending_count"] == 1
+    assert operator_inputs["available_env_vars"] == ["GOOGLE_MAPS_API_KEY"]
+    assert operator_inputs["artifact_path"].endswith("OPERATOR_INPUTS.json")
+    assert operator_inputs["resolved_inputs"][0]["env_var_name"] == "GOOGLE_MAPS_API_KEY"
+    assert operator_inputs["resolved_inputs"][0]["value"] == ""
+    assert operator_inputs["resolved_inputs"][0]["display_value"] != ""
+    assert operator_inputs["pending_inputs"][0]["env_var_name"] == "GOOGLE_PLACES_DATASET"

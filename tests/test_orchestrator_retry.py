@@ -14,6 +14,8 @@ from app.command_runner import CommandExecutionError
 from app.memory.runtime_store import MemoryRuntimeStore
 from app.models import JobRecord, JobStage, JobStatus, NodeRunRecord, utc_now_iso
 from app.orchestrator import IssueDetails, Orchestrator
+from app.models import RuntimeInputRecord
+from app.workflow_resume import build_workflow_artifact_paths
 
 
 class FakeTemplateRunner:
@@ -135,6 +137,60 @@ def test_orchestrator_passes_heartbeat_hooks_to_shell_executor(app_components, t
     assert captured["heartbeat_interval_seconds"] == 10.0
 
 
+def test_orchestrator_resolves_runtime_inputs_into_env_and_prompt_safe_artifact(app_components) -> None:
+    settings, store, _ = app_components
+    job = _make_job("job-runtime-input-orchestrator")
+    store.create_job(job)
+    store.upsert_runtime_input(
+        RuntimeInputRecord(
+            request_id="runtime-input-secret",
+            repository=job.repository,
+            app_code=job.app_code,
+            job_id=job.job_id,
+            scope="job",
+            key="google_maps_api_key",
+            label="Google Maps API Key",
+            description="지도 기능 구현용",
+            value_type="secret",
+            env_var_name="GOOGLE_MAPS_API_KEY",
+            sensitive=True,
+            status="provided",
+            value="secret-value-123",
+            placeholder="",
+            note="provided",
+            requested_by="operator",
+            requested_at=utc_now_iso(),
+            provided_at=utc_now_iso(),
+            updated_at=utc_now_iso(),
+        )
+    )
+
+    orchestrator = Orchestrator(
+        settings=settings,
+        store=store,
+        command_templates=FakeTemplateRunner(),
+    )
+    orchestrator._set_active_runtime_input_environment(job)
+
+    assert orchestrator.command_templates.extra_env["GOOGLE_MAPS_API_KEY"] == "secret-value-123"
+
+    repository_path = settings.repository_workspace_path(job.repository, job.app_code)
+    repository_path.mkdir(parents=True, exist_ok=True)
+    paths = build_workflow_artifact_paths(repository_path)
+    variables = orchestrator._build_template_variables(
+        job,
+        paths,
+        repository_path / "_docs" / "PROMPT.md",
+    )
+
+    artifact_path = Path(variables["operator_inputs_path"])
+    payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+    assert payload["available_env_vars"] == ["GOOGLE_MAPS_API_KEY"]
+    assert payload["resolved_inputs"][0]["env_var_name"] == "GOOGLE_MAPS_API_KEY"
+    assert payload["resolved_inputs"][0]["value"] == ""
+    assert payload["resolved_inputs"][0]["display_value"] != ""
+
+
 def _improvement_paths(repository_path: Path) -> dict[str, Path]:
     return {
         "product_review": Orchestrator._docs_file(repository_path, "PRODUCT_REVIEW.json"),
@@ -152,6 +208,7 @@ def _improvement_paths(repository_path: Path) -> dict[str, Path]:
         "memory_selection": Orchestrator._docs_file(repository_path, "MEMORY_SELECTION.json"),
         "memory_context": Orchestrator._docs_file(repository_path, "MEMORY_CONTEXT.json"),
         "memory_trace": Orchestrator._docs_file(repository_path, "MEMORY_TRACE.json"),
+        "vector_shadow_index": Orchestrator._docs_file(repository_path, "VECTOR_SHADOW_INDEX.json"),
         "memory_feedback": Orchestrator._docs_file(repository_path, "MEMORY_FEEDBACK.json"),
         "memory_rankings": Orchestrator._docs_file(repository_path, "MEMORY_RANKINGS.json"),
         "strategy_shadow_report": Orchestrator._docs_file(repository_path, "STRATEGY_SHADOW_REPORT.json"),
@@ -1652,6 +1709,122 @@ def test_memory_retrieval_artifacts_build_route_specific_context(app_components)
     assert any(item["kind"] == "convention" for item in trace_payload["routes"]["planner"]["selected_items"])
 
 
+def test_memory_retrieval_writes_disabled_vector_shadow_manifest_by_default(app_components):
+    settings, store, _ = app_components
+    job = _make_job("job-vector-shadow-disabled")
+    store.create_job(job)
+
+    repository_path = settings.repository_workspace_path(job.repository, job.app_code)
+    repository_path.mkdir(parents=True, exist_ok=True)
+    paths = _improvement_paths(repository_path)
+
+    orchestrator = Orchestrator(settings, store, FakeTemplateRunner())
+    orchestrator._write_memory_retrieval_artifacts(job=job, repository_path=repository_path, paths=paths)
+
+    payload = json.loads(paths["vector_shadow_index"].read_text(encoding="utf-8"))
+    assert payload["enabled"] is False
+    assert payload["status"] == "disabled"
+    assert payload["candidate_count"] == 0
+    assert payload["candidates"] == []
+    assert payload["transport"]["configured"] is False
+    assert payload["transport"]["detail"] == "not_configured"
+
+
+def test_memory_retrieval_writes_vector_shadow_manifest_when_enabled(app_components, tmp_path: Path):
+    settings, store, _ = app_components
+    job = _make_job("job-vector-shadow-enabled")
+    job.workflow_id = "wf-default"
+    store.create_job(job)
+
+    repository_path = settings.repository_workspace_path(job.repository, job.app_code)
+    repository_path.mkdir(parents=True, exist_ok=True)
+    paths = _improvement_paths(repository_path)
+
+    runtime_store = MemoryRuntimeStore(settings.resolved_memory_dir / "memory_runtime.db")
+    runtime_store.upsert_entry(
+        {
+            "memory_id": "failure_pattern:job-vector-shadow-enabled:stale-heartbeat",
+            "memory_type": "failure_pattern",
+            "repository": job.repository,
+            "execution_repository": job.repository,
+            "app_code": job.app_code,
+            "workflow_id": job.workflow_id,
+            "job_id": job.job_id,
+            "title": "stale heartbeat during codex run",
+            "summary": "heartbeat stale detected during implement_with_codex",
+            "source_path": "_docs/FAILURE_PATTERNS.json",
+            "score": 2.4,
+            "confidence": 0.86,
+            "baseline_score": 2.4,
+            "baseline_confidence": 0.86,
+            "state": "promoted",
+            "updated_at": "2026-03-12T02:00:00+00:00",
+        }
+    )
+
+    feature_flags_path = tmp_path / "config" / "feature_flags.json"
+    feature_flags_path.parent.mkdir(parents=True, exist_ok=True)
+    feature_flags_path.write_text(
+        json.dumps(
+            {
+                "flags": {
+                    "memory_logging": True,
+                    "memory_retrieval": True,
+                    "convention_extraction": True,
+                    "memory_scoring": True,
+                    "strategy_shadow": True,
+                    "vector_memory_shadow": True,
+                }
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    orchestrator = Orchestrator(settings, store, FakeTemplateRunner())
+    orchestrator.feature_flags_path = feature_flags_path
+    orchestrator._qdrant_shadow_transport = type(
+        "FakeShadowTransport",
+        (),
+        {
+            "sync_manifest": staticmethod(
+                lambda manifest: type(
+                    "TransportResult",
+                    (),
+                    {
+                        "to_dict": lambda self: {
+                            "configured": True,
+                            "attempted": True,
+                            "ok": True,
+                            "detail": "upsert_ok",
+                            "collection": "agenthub_memory_shadow",
+                            "point_count": len(manifest.get("candidates", [])),
+                            "vector_size": 64,
+                            "collection_status_code": 200,
+                            "upsert_status_code": 200,
+                        },
+                        "ok": True,
+                        "attempted": True,
+                        "configured": True,
+                    },
+                )()
+            )
+        },
+    )()
+    orchestrator._write_memory_retrieval_artifacts(job=job, repository_path=repository_path, paths=paths)
+
+    payload = json.loads(paths["vector_shadow_index"].read_text(encoding="utf-8"))
+    assert payload["enabled"] is True
+    assert payload["status"] == "transported"
+    assert payload["provider"] == "qdrant"
+    assert payload["candidate_count"] >= 1
+    assert payload["candidates"][0]["memory_id"].startswith("failure_pattern:")
+    assert payload["transport"]["ok"] is True
+    assert payload["transport"]["detail"] == "upsert_ok"
+
+
 def test_memory_retrieval_skips_banned_memory_entries(app_components):
     settings, store, _ = app_components
     job = _make_job("job-memory-retrieval-banned")
@@ -1998,6 +2171,49 @@ def test_planner_prompt_includes_memory_context_snapshot(app_components):
     assert "Memory Selection" in prompt_text
     assert "Memory Context" in prompt_text
     assert "strategy=test_hardening" in prompt_text
+
+
+def test_planner_prompt_includes_followup_backlog_task_snapshot(app_components):
+    settings, store, _ = app_components
+    job = _make_job("job-planner-followup-prompt")
+    store.create_job(job)
+
+    repository_path = settings.repository_workspace_path(job.repository, job.app_code)
+    repository_path.mkdir(parents=True, exist_ok=True)
+    log_path = settings.logs_debug_dir / job.log_file
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text("", encoding="utf-8")
+
+    paths = _improvement_paths(repository_path)
+    paths["spec"] = Orchestrator._docs_file(repository_path, "SPEC.md")
+    paths["plan"] = Orchestrator._docs_file(repository_path, "PLAN.md")
+    paths["review"] = Orchestrator._docs_file(repository_path, "REVIEW.md")
+    paths["spec"].write_text("# SPEC\n", encoding="utf-8")
+    paths["review"].write_text("# REVIEW\n", encoding="utf-8")
+    paths["followup_backlog_task"] = Orchestrator._docs_file(repository_path, "FOLLOWUP_BACKLOG_TASK.json")
+    paths["followup_backlog_task"].write_text(
+        json.dumps(
+            {
+                "candidate_id": "next_improvement_task:job-planner-followup-prompt:next_1",
+                "title": "회귀 테스트 보강",
+                "summary": "실패 재현 케이스를 먼저 고정한다",
+                "recommended_node_type": "coder_fix_from_test_report",
+                "recommended_action": "regression test를 먼저 추가한다",
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    orchestrator = Orchestrator(settings, store, FakeTemplateRunner())
+    orchestrator._run_planner_legacy_one_shot(job, repository_path, paths, log_path)
+
+    prompt_text = (repository_path / "_docs" / "PLANNER_PROMPT.md").read_text(encoding="utf-8")
+    assert "Follow-up Backlog Task" in prompt_text
+    assert "회귀 테스트 보강" in prompt_text
+    assert "coder_fix_from_test_report" in prompt_text
 
 
 def test_improvement_stage_writes_strategy_shadow_report_with_memory_divergence(app_components):

@@ -36,7 +36,7 @@
 | Strategy shadow | `PARTIAL` | `STRATEGY_SHADOW_REPORT.json` 생성, memory-aware strategy 비교 | shadow 결과를 backlog와 rollout 의사결정으로 묶는 계층 부족 |
 | Memory storage backend | `PARTIAL` | SQLite-based `memory_runtime.db`, canonical tables, DB-first retrieval, autonomous backlog candidate table | richer retrieval query layer, backlog approval workflow, cross-workspace health metrics 부족 |
 | Artifact -> DB ingest | `PARTIAL` | job 종료 시 artifact ingest skeleton이 `memory_runtime.db`로 episodic/decision/failure/convention/retrieval/feedback/backlog candidate를 적재 | backfill, migration, ingest health metrics 부족 |
-| Autonomous dev companion loop | `PARTIAL` | next tasks / improvement artifacts를 DB backlog candidate queue로 적재 | recurring failure clustering, self-initiated improvement queue, operator approve->execution bridge 없음 |
+| Autonomous dev companion loop | `PARTIAL` | next tasks / improvement artifacts + recurring failure pattern을 DB backlog candidate queue로 적재, operator approve/queue bridge의 첫 슬라이스 존재 | self-initiated improvement queue, richer operator UX, dedicated follow-up contract rollout 부족 |
 | Operator memory tooling | `PARTIAL` | feature flag UI, admin metrics, job detail retrieval source/trace visibility, memory search/detail, promote/ban UI, backlog queue visibility | retrieval trace filter/search, memory source artifact drilldown, backlog approval controls 부족 |
 
 ## 5. What Is Already Implemented
@@ -102,7 +102,7 @@
   - improvement 단계 종료 후 artifact가 `memory_runtime.db`에 자동 반영된다.
 - 한계:
   - retrieval source는 DB 우선으로 전환됐지만 아직 fallback을 유지하는 혼합 단계다.
-  - backlog candidate는 적재되지만 승인/실행 큐까지 이어지지는 않는다.
+- backlog candidate는 적재되고, 첫 approve/queue bridge까지는 연결됐지만 아직 운영 UX와 후속 계약이 얇다.
 
 ### 5.6 DB-Backed Retrieval Exists
 - `app/orchestrator.py`의 retrieval 생성은 이제 `memory_runtime.db`를 우선 조회하고, 후보가 없을 때만 file artifact로 fallback한다.
@@ -130,8 +130,8 @@
   - improvement 결과가 file artifact에만 남지 않고 DB 후보 큐로 연결된다.
   - operator는 admin 화면에서 현재 repo/app/workflow 기준 backlog 후보를 읽기 전용으로 확인할 수 있다.
 - 한계:
-  - backlog candidate는 아직 `candidate` 상태로만 적재된다.
-  - approve / dismiss / execute 같은 운영 action은 아직 없다.
+- backlog candidate는 이제 `candidate/approved/queued/dismissed`까지 상태 전이가 가능하다.
+- operator approve / dismiss / queue bridge는 생겼지만, richer approval UX와 self-initiated queue는 아직 없다.
 
 ## 6. What Phase 3 Must Deliver
 

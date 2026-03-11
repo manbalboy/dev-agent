@@ -883,6 +883,60 @@ class MemoryRuntimeStore:
             item["payload"] = item.pop("payload_json", {})
         return decoded_rows
 
+    def get_backlog_candidate(self, candidate_id: str) -> Dict[str, Any] | None:
+        normalized_id = str(candidate_id or "").strip()
+        if not normalized_id:
+            return None
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM memory_backlog_candidates WHERE candidate_id = ?",
+                (normalized_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        payload = self._decode_row(row, json_fields={"payload_json"})
+        payload["payload"] = payload.pop("payload_json", {})
+        return payload
+
+    def set_backlog_candidate_state(
+        self,
+        candidate_id: str,
+        *,
+        state: str,
+        payload_updates: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any] | None:
+        normalized_id = str(candidate_id or "").strip()
+        normalized_state = self._normalize_backlog_state(state)
+        if not normalized_id or not normalized_state:
+            return None
+
+        existing = self.get_backlog_candidate(normalized_id)
+        if existing is None:
+            return None
+
+        next_payload = dict(existing.get("payload", {}) or {})
+        if isinstance(payload_updates, dict):
+            next_payload.update(payload_updates)
+
+        updated_at = utc_now_iso()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE memory_backlog_candidates
+                SET state = ?,
+                    payload_json = ?,
+                    updated_at = ?
+                WHERE candidate_id = ?
+                """,
+                (
+                    normalized_state,
+                    self._json_dumps(next_payload),
+                    updated_at,
+                    normalized_id,
+                ),
+            )
+        return self.get_backlog_candidate(normalized_id)
+
     def list_feedback(self, *, memory_id: str = "") -> List[Dict[str, Any]]:
         query = "SELECT * FROM memory_feedback"
         params: tuple[object, ...] = ()
@@ -1046,5 +1100,12 @@ class MemoryRuntimeStore:
     def _normalize_backlog_priority(value: Any) -> str:
         normalized = str(value or "").strip().upper()
         if normalized in {"", "P0", "P1", "P2", "P3"}:
+            return normalized
+        return ""
+
+    @staticmethod
+    def _normalize_backlog_state(value: Any) -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized in {"candidate", "approved", "queued", "done", "dismissed"}:
             return normalized
         return ""

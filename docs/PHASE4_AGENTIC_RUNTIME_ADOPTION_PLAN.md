@@ -1,31 +1,67 @@
-# Phase 4 Agentic Runtime Adoption Plan
+# Phase 4 Self-Growing Agentic Runtime Plan
 
-## 1. Purpose
-- 이 문서의 목적은 현재 시스템에 이미 있는 `비선형 workflow / memory runtime / resume-recovery` 기반 위에, 부족한 `도구 사용 / semantic retrieval / agent subgraph runtime`을 외부 프레임워크로 작은 단위부터 도입하는 계획을 정리하는 것이다.
-- 핵심 원칙은 `전면 교체`가 아니라 `영향 범위를 제한한 점진 도입`이다.
-- 현재 orchestrator, job store, workflow editor, dashboard, node_runs 계약은 유지한다.
+## 1. North Star
+- Phase 4의 목표는 이 시스템을 `주어진 issue를 처리하는 자동 실행기`에서 `알아서 성장하는 프로그램 개발자 동료`로 한 단계 더 끌어올리는 것이다.
+- 그 상태의 시스템은 아래를 동시에 수행해야 한다.
+  - 현재 repo와 workflow 상태를 이해한다.
+  - 필요한 도구를 안전하게 사용한다.
+  - 과거 memory를 semantic retrieval로 참고한다.
+  - 선형 파이프라인이 아니라 비선형 graph/subgraph로 적절한 경로를 선택한다.
+  - 다음 개선 과제를 스스로 제안하고, 운영자 승인 아래 다음 작업으로 연결한다.
 
-## 2. Current State Snapshot
+## 2. Scope Of Phase 4
+- Phase 4는 아래 3개 축을 한 번에 묶는 phase다.
+  - `도구 사용 런타임`
+  - `벡터 DB 기반 semantic retrieval`
+  - `비선형/상태형 agent runtime`
+- 이 phase는 top-level orchestrator를 외부 프레임워크로 갈아엎는 phase가 아니다.
+- 현재 job queue, store, dashboard, workflow editor, node_runs 계약은 유지한다.
+
+## 3. Non-Negotiable Principles
+
+### 3.1 점진적 개발
+- 한 번에 큰 구조를 바꾸지 않는다.
+- 항상 `shadow -> opt-in -> default` 순서로 간다.
+- 새 framework path는 feature flag로 즉시 끌 수 있어야 한다.
+
+### 3.2 소규모 단위 작업
+- 한 슬라이스는 한 가지 책임만 도입한다.
+- 한 슬라이스는 되도록 한 화면, 한 API, 한 runtime adapter, 한 trace 파일 수준으로 자른다.
+- 새 framework 도입은 항상 기존 계약을 감싸는 adapter 형태로만 시작한다.
+
+### 3.3 테스트 우선
+- 모든 슬라이스는 아래 3종 테스트를 기본으로 가진다.
+  - unit test
+  - contract/regression test
+  - feature-flag off-path test
+- 전체 회귀(`PYTHONPATH=. .venv/bin/pytest -q`)를 항상 마지막에 돈다.
+- shadow path는 `기존 결과 불변`을 테스트로 보장해야 한다.
+
+### 3.4 운영 가시성
+- 새 기능은 trace가 없으면 넣지 않는다.
+- operator는 최소한 아래를 봐야 한다.
+  - 어떤 tool/runtime이 primary 인지
+  - 어떤 tool/runtime이 shadow 인지
+  - primary와 shadow가 어떻게 달랐는지
+
+## 4. Current State Snapshot
 
 | Area | Status | Already Exists | Missing |
 | --- | --- | --- | --- |
-| Non-linear workflow runtime | `DONE` | edge-driven workflow, `if_label_match`, `loop_until_pass`, node_runs, resume/manual retry | external graph runtime, subgraph composition |
-| Tool usage runtime | `PARTIAL` | planner `TOOL_REQUEST`, role `skills`, role `allowed_tools`, `research_search` only | shared tool registry, multi-tool execution, tool trace standardization |
-| Memory runtime backend | `PARTIAL` | SQLite `memory_runtime.db`, DB-first retrieval, feedback/ranking, backlog candidates | semantic vector retrieval, richer similarity search |
-| Agent framework adoption | `NOT STARTED` | internal planner graph MVP, internal workflow executor | LangGraph runtime, MCP tool layer, vector DB integration |
+| Non-linear workflow core | `DONE` | edge-driven workflow, `if_label_match`, `loop_until_pass`, node_runs, failed-safe resume, manual resume | external graph runtime, reusable subgraph abstraction |
+| Tool boundary normalization | `PARTIAL` | `ToolRequest`, `ToolResult`, `ToolRuntime`, registry-style `research_search` path | more internal tools, typed tool arguments, per-tool policy surface |
+| MCP shadow integration | `PARTIAL` | `MCPToolClient`, `mcp_tools_shadow` feature flag, `_docs/MCP_TOOL_SHADOW.jsonl` trace | real server wiring, listed tool validation in live env, operator view |
+| Internal tool catalog | `PARTIAL` | `research_search` primary path, internal `log_lookup`, `repo_search`, `memory_search` primary handlers, role `skills`, role `allowed_tools` | live operator action wiring, MCP server wrapper promotion |
+| Memory DB runtime | `PARTIAL` | SQLite `memory_runtime.db`, DB-first retrieval, feedback/ranking, backlog candidates, `memory_search` opt-in vector fallback path | wider semantic retrieval rollout, operator comparison UX |
+| Vector DB | `PARTIAL` | SQLite source of truth, `VECTOR_SHADOW_INDEX.json` shadow manifest, vector candidate payload selection, optional Qdrant shadow upsert transport, optional semantic embedding provider adapter, `memory_search` vector query path with metadata filter + threshold | shadow retrieval comparison, broader vector read-path rollout |
+| LangGraph/subgraph runtime | `PARTIAL` | internal planner graph MVP, internal workflow executor, optional `LANGGRAPH_PLANNER_SHADOW.json`, optional `LANGGRAPH_RECOVERY_SHADOW.json` traces behind feature flag | durable subgraph runtime, graph checkpoints, operator comparison view, broader rollout |
+| UI quality / operator inputs | `PARTIAL` | planner/coder prompt guardrails, admin runtime input registry, prompt-safe `OPERATOR_INPUTS.json`, shell/template env bridge, job detail visibility, AI/템플릿 기반 request draft recommendation + operator approval path | benchmark artifact, richer template library, assistant/job-context 연결 강화 |
 
-## 3. Decision
-- `비선형 workflow`는 이미 있으므로 상위 job orchestrator를 지금 당장 외부 프레임워크로 갈아엎지 않는다.
-- `도구 사용`은 `MCP`를 기준 인터페이스로 도입한다.
-- `semantic retrieval`은 `Qdrant`를 우선 도입한다.
-- `agent subgraph runtime`은 `LangGraph`를 부분 도입한다.
-- 도입 순서는 항상 `shadow -> opt-in -> default`로 간다.
+## 5. What Already Exists
 
-## 4. What Already Exists
-
-### 4.1 Non-linear Workflow
-- 현재 workflow executor는 success/failure/always edge를 따라 이동한다.
-- control node:
+### 5.1 비선형 구조는 이미 있다
+- success/failure/always edge 기반 workflow executor가 있다.
+- control-flow node:
   - `if_label_match`
   - `loop_until_pass`
 - resume/recovery:
@@ -33,206 +69,306 @@
   - manual resume
   - node run persistence
 
-### 4.2 Limited Tool Usage
-- planner는 `TOOL_REQUEST`를 통해 제한적으로 도구를 요청할 수 있다.
+### 5.2 도구 사용은 아직 제한적이지만 첫 internal tool이 붙었다
+- planner는 `TOOL_REQUEST`를 통해 도구를 요청할 수 있다.
 - role에는 `skills`, `allowed_tools` 메타가 있다.
-- 현재 실제 허용 도구는 사실상 `research_search` 중심이다.
+- 현재 primary tool path는 `research_search`, `log_lookup`, `repo_search`, `memory_search`까지 늘어났지만, planner prompt는 아직 `research_search`만 직접 요청한다.
+- `log_lookup`, `repo_search`, `memory_search`는 helper/admin opt-in 성격의 internal handler로 먼저 붙였다.
 
-### 4.3 Memory Runtime Without Vector Search
-- current source of truth:
+### 5.3 memory runtime은 있지만 semantic retrieval은 아직 좁은 surface에만 있다
+- canonical source of truth:
   - SQLite `memory_runtime.db`
-- current retrieval:
-  - metadata filter + score/confidence/freshness 기반
+- retrieval:
+  - metadata filter
+  - score/confidence/freshness
   - DB-first, file fallback
-- 아직 임베딩/ANN/vector similarity는 없다.
+- `memory_search` route 한정으로만 vector retrieval opt-in 실험이 있다.
+- planner/reviewer/coder primary retrieval은 아직 embedding/vector similarity를 쓰지 않는다.
 
-## 5. Gaps To Close
+## 6. Why Phase 4 Exists
+- Phase 3이 `memory를 durable runtime으로 올리는 단계`였다면,
+- Phase 4는 `memory + tool + graph runtime`이 실제로 다음 행동을 더 잘 만들게 하는 단계다.
+- 즉, Phase 4부터 비로소 아래 느낌이 나온다.
+  - 로그를 읽고
+  - repo를 찾고
+  - memory를 semantic하게 참고하고
+  - 선형이 아닌 경로로 조사/수정/검증을 반복하는
+  - `개발자 동료다운` 실행
 
-### 5.1 Tool Layer Gap
-- 현재 구조는 `planner -> research_search` 단일 경로에 가깝다.
-- 부족한 것:
-  - 공통 tool registry
-  - standard tool request/result schema
-  - per-role tool trace
-  - internal/external tool adapter 계층
+## 7. Framework Decision
 
-### 5.2 Vector Retrieval Gap
-- 현재 retrieval은 keyword/metadata/ranking 중심이다.
-- 부족한 것:
-  - memory summary embedding
-  - semantic nearest-neighbor retrieval
-  - filter + vector hybrid query
-  - shadow precision/recall evaluation
+### 7.1 MCP For Tool Runtime
+- 역할:
+  - tool transport
+  - tool registry boundary
+  - internal/external tool 공통 인터페이스
+- 도입 이유:
+  - 현재 role `allowed_tools` 구조를 살릴 수 있다.
+  - shadow mode로 붙이기 쉽다.
 
-### 5.3 Agent Runtime Gap
-- planner graph MVP는 있지만, external stateful graph runtime은 없다.
-- 부족한 것:
-  - subgraph abstraction
-  - durable graph checkpoints
-  - graph-level trace/view
-  - reusable agent loop runtime
+### 7.2 Qdrant For Vector Retrieval
+- 역할:
+  - semantic memory retrieval
+  - metadata + vector hybrid query
+- 도입 이유:
+  - SQLite source-of-truth를 유지하면서 vector search만 분리할 수 있다.
+  - dev/local과 운영 전환이 비교적 단순하다.
 
-## 6. Framework Decision
+### 7.3 LangGraph For Stateful Subgraphs
+- 역할:
+  - planner subgraph
+  - recovery subgraph
+  - 이후 tool-using diagnosis loops
+- 도입 이유:
+  - top-level orchestrator를 유지하면서 내부 loop만 교체하기 쉽다.
+  - long-running, stateful, checkpointed subgraph에 맞다.
 
-### 6.1 MCP For Tool Runtime
-- Why:
-  - tool interface를 표준화하기 쉽다.
-  - internal tool과 external tool을 같은 모델로 다룰 수 있다.
-  - 현재 role `allowed_tools` 구조를 거의 그대로 살릴 수 있다.
-- Scope:
-  - first use as `tool transport and registry layer`
-  - do not hand over top-level orchestration to MCP
+## 8. Phase 4 Architecture Direction
 
-### 6.2 Qdrant For Vector Retrieval
-- Why:
-  - 현재 SQLite canonical memory를 유지하면서 vector search만 별도 계층으로 붙이기 쉽다.
-  - local/dev 모드와 Docker 운영 모드를 둘 다 가져가기 쉽다.
-  - metadata filter + semantic search 혼합이 잘 맞는다.
-- Scope:
-  - first use only for `memory_search`
-  - SQLite stays source of truth
+### 8.1 Keep
+- `Orchestrator.process_job()`
+- `JobStore`
+- `workflow JSON schema`
+- `node_runs`
+- dashboard/job detail contracts
 
-### 6.3 LangGraph For Subgraph Runtime
-- Why:
-  - 현재 내부 workflow를 전부 교체하지 않고 planner/recovery/tool loop부터 옮기기 좋다.
-  - long-running, stateful, checkpointed agent subgraph에 맞다.
-- Scope:
-  - first use only for `planner subgraph` and `recovery subgraph`
-  - current job queue / store / dashboard / node_runs stay unchanged
+### 8.2 Add
+- tool adapter layer
+- MCP shadow/primary clients
+- vector index sync layer
+- LangGraph subgraph adapters
 
-## 7. Adoption Principles
-- top-level `Orchestrator.process_job()`는 유지한다.
-- `JobStore`, `node_runs`, `resume_state`, workflow JSON schema는 유지한다.
-- 새 프레임워크는 항상 adapter 뒤에 붙인다.
-- rollout은 feature flag와 shadow mode로 시작한다.
-- 기존 파일 artifact 계약(`MEMORY_SELECTION.json`, `MEMORY_CONTEXT.json`, `SEARCH_CONTEXT.md`)은 초기 단계에서 유지한다.
+### 8.3 Do Not Do Yet
+- top-level queue를 LangGraph로 교체
+- SQLite source-of-truth 제거
+- vector retrieval을 모든 route에 즉시 확대
+- self-issued autonomous PR / automerge
 
-## 8. Low-Impact Rollout Plan
+## 9. Work Packages
 
 ### Phase 4-A. Tool Boundary Normalization
 - Goal:
-  - 현재 흩어진 tool 호출 경로를 한 군데로 모은다.
-- Small Slice:
-  - `ToolRequest` / `ToolResult` 공통 dataclass
-  - orchestrator 내부 tool execution entrypoint 하나로 통합
-  - `research_search`를 registry 등록형으로 전환
-- No Big Change:
-  - 실제 도구는 여전히 기존 스크립트를 호출한다.
-- Success:
-  - 새 tool 추가가 orchestrator 본문 수정 없이 가능하다.
+  - 흩어진 tool 경로를 공통 runtime으로 모은다.
+- Small Slices:
+  - `ToolRequest` / `ToolResult`
+  - `ToolRuntime`
+  - `research_search` registry 전환
+- Current Status:
+  - `PARTIAL`
+- Done:
+  - primary `research_search` path가 registry 기반으로 정리되었다.
+- Remaining:
+  - internal tool 2~3개 추가
+  - typed payload/argument contract
 
-### Phase 4-B. MCP Client Shadow Adapter
+### Phase 4-B. MCP Shadow Adapter
 - Goal:
-  - MCP를 실제 runtime에 붙이되, 기존 실행 결과는 바꾸지 않는다.
-- Small Slice:
-  - `MCPToolClient` adapter 추가
-  - feature flag: `mcp_tools_shadow`
-  - 같은 요청을 internal tool과 MCP shadow 둘 다 실행하고 결과 비교만 기록
-- No Big Change:
-  - planner는 여전히 기존 `research_search` 결과를 사용한다.
-- Success:
-  - shadow trace가 남고, main execution path는 동일하다.
+  - primary 결과는 유지한 채 MCP shadow trace만 붙인다.
+- Small Slices:
+  - `MCPToolClient`
+  - feature flag `mcp_tools_shadow`
+  - `_docs/MCP_TOOL_SHADOW.jsonl`
+- Current Status:
+  - `PARTIAL`
+- Done:
+  - shadow adapter와 trace 파일이 추가되었다.
+- Remaining:
+  - 실제 MCP server와 연결된 live validation
+  - dashboard trace visibility
 
-### Phase 4-C. Internal Tools As MCP Servers
+### Phase 4-C. Internal Tool Catalog
 - Goal:
-  - 내부 도구를 MCP 방식으로 감싼다.
+  - internal tools를 작은 단위부터 primary registry에 추가한다.
 - First Tools:
-  - `repo_search`
   - `log_lookup`
+  - `repo_search`
   - `memory_search`
-- No Big Change:
-  - initially dashboard/admin only or planner opt-in only
-- Success:
-  - internal tools가 registry + allowlist 기준으로 호출된다.
+- Principle:
+  - 처음부터 planner 전체에 개방하지 않는다.
+  - dashboard/admin or helper role opt-in부터 시작한다.
+- Current Status:
+  - `PARTIAL`
+- Done:
+  - `log_lookup` internal primary handler 추가
+  - helper role 기본 allowlist에 `log_lookup` 연결
+  - `repo_search` internal primary handler 추가
+  - helper role 기본 allowlist에 `repo_search` 연결
+  - `memory_search` internal primary handler 추가
+  - helper role 기본 allowlist에 `memory_search` 연결
+- Remaining:
+  - dashboard/operator action wiring
+  - 이후 MCP server wrapper는 별도 슬라이스로 분리
+
+### Phase 4-C2. Operator Runtime Inputs
+- Goal:
+  - tool/vector/graph runtime이 실제 외부 서비스 의존 기능을 안전하게 수행할 수 있게 operator input을 연결한다.
+- Small Slices:
+  - runtime input request/value store
+  - admin request/provide UI
+  - prompt-safe artifact
+  - shell/template env bridge
+- Constraint:
+  - secret 값은 prompt/log/UI에 평문 노출 금지
+  - 자동 request generation은 operator approval 전까지 금지
+- Status:
+  - `PARTIAL`
 
 ### Phase 4-D. Qdrant Shadow Index
 - Goal:
-  - semantic retrieval 인덱스를 쓰기 시작하되 read path는 아직 유지한다.
-- Small Slice:
-  - `memory_entries` summary/title/payload 핵심 필드를 embedding
-  - Qdrant collection sync job
-  - shadow retrieval 결과만 trace에 기록
-- No Big Change:
-  - actual prompt injection은 기존 DB retrieval 유지
-- Success:
-  - candidate overlap / divergence를 job trace로 비교할 수 있다.
+  - semantic retrieval 인덱스를 쓰기 시작하되 primary read path는 아직 유지한다.
+- Small Slices:
+  - embedding payload selection
+  - Qdrant collection sync
+  - shadow retrieval trace only
+- Current Status:
+  - `PARTIAL`
+- Done:
+  - feature flag `vector_memory_shadow`
+  - `_docs/VECTOR_SHADOW_INDEX.json`
+  - SQLite memory DB -> vector candidate payload selection
+  - optional Qdrant shadow collection upsert trace
+  - optional semantic embedding provider adapter (`hash` default, `openai` opt-in)
+- Remaining:
+  - shadow retrieval comparison trace
+  - vector read-path rollout
 
 ### Phase 4-E. Qdrant Read Path For `memory_search`
 - Goal:
-  - semantic retrieval을 가장 좁은 영역에만 켠다.
-- Small Slice:
-  - `memory_search` route에만 vector retrieval 적용
-  - metadata filter + top-k + score threshold
-  - feature flag: `vector_memory_retrieval`
-- No Big Change:
-  - planner/coder/reviewer 전체 경로로 바로 확장하지 않는다.
-- Success:
-  - retrieval precision 문제를 memory_search 한정으로 먼저 조정할 수 있다.
+  - 가장 좁은 영역에서만 vector retrieval을 primary로 켠다.
+- Small Slices:
+  - `memory_search` route only
+  - metadata filter + top-k + threshold
+  - feature flag `vector_memory_retrieval`
+- Current Status:
+  - `PARTIAL`
+- Done:
+  - feature flag `vector_memory_retrieval`
+  - `memory_search` route only vector query path
+  - metadata filter + top-k + threshold
+  - `MEMORY_SEARCH_RESULT.json` source/fallback 표시
+- Remaining:
+  - operator comparison view
+  - vector result quality shadow comparison
+  - broader rollout decision
 
 ### Phase 4-F. LangGraph Planner Subgraph
 - Goal:
   - planner graph MVP를 LangGraph subgraph로 교체한다.
-- Small Slice:
-  - nodes:
-    - draft_plan
-    - evaluate_plan
-    - optional_tool_request
-    - refine_plan
-  - output contract:
-    - existing `PLAN.md`
-    - existing `PLAN_QUALITY.json`
-- No Big Change:
-  - stage 이름, 로그 산출물, dashboard 계약은 유지한다.
-- Success:
-  - planner graph 내부만 교체되고 상위 orchestration은 그대로 유지된다.
+- Nodes:
+  - draft_plan
+  - evaluate_plan
+  - optional_tool_request
+  - refine_plan
+- Contract:
+  - existing `PLAN.md`
+  - existing `PLAN_QUALITY.json`
+- Current Status:
+  - `PARTIAL`
+- Done:
+  - feature flag `langgraph_planner_shadow`
+  - `_docs/LANGGRAPH_PLANNER_SHADOW.json`
+  - draft/evaluate/optional_tool_request/refine loop shadow trace
+  - existing `PLAN.md`, `PLAN_QUALITY.json` contract 유지
+- Remaining:
+  - operator comparison view
+  - primary planner graph와 LangGraph shadow divergence analysis
+  - broader rollout decision
 
 ### Phase 4-G. LangGraph Recovery Subgraph
 - Goal:
-  - 현재 `hard gate / recovery / fix retry` 묶음을 LangGraph subgraph로 올린다.
-- Small Slice:
-  - nodes:
-    - run_tests
-    - analyze_failure
-    - decide_recoverable
-    - fix_once
-    - retest
-  - output contract:
-    - same failure markdown
-    - same stage transitions
-- No Big Change:
-  - current recovery policy와 error messages 유지
-- Success:
-  - recovery runtime만 graph로 옮겨도 job/store/UI 계약은 깨지지 않는다.
+  - `run_tests -> analyze_failure -> decide_recoverable -> fix_once -> retest` 묶음을 LangGraph로 올린다.
+- Contract:
+  - existing failure markdown
+  - existing stage transitions
+  - existing recovery policies
+- Current Status:
+  - `PARTIAL`
+- Done:
+  - feature flag `langgraph_recovery_shadow`
+  - `_docs/LANGGRAPH_RECOVERY_SHADOW.json`
+  - analyze_failure/decide_recoverable/fix_once/retest shadow trace
+  - existing retry policy 유지
+- Remaining:
+  - operator comparison view
+  - primary recovery policy와 LangGraph shadow divergence analysis
+  - broader rollout decision
 
-## 9. Recommended Execution Order
-1. `4-A Tool Boundary Normalization`
-2. `4-B MCP Client Shadow Adapter`
-3. `4-C Internal Tools As MCP Servers`
-4. `4-D Qdrant Shadow Index`
-5. `4-E Qdrant Read Path For memory_search`
-6. `4-F LangGraph Planner Subgraph`
-7. `4-G LangGraph Recovery Subgraph`
+### Phase 4-H. Self-Growing Companion Bridge
+- Goal:
+  - tool + vector retrieval + graph runtime이 실제 다음 행동을 더 잘 만들게 한다.
+- Scope:
+  - approved backlog -> next job enqueue bridge
+  - recurring problem clustering input
+  - tool-using diagnosis loops
+- Current Status:
+  - `PARTIAL`
+- Done:
+  - candidate `approve / queue / dismiss` operator action API
+  - queued follow-up job 생성
+  - `_docs/FOLLOWUP_BACKLOG_TASK.json` artifact
+  - planner prompt가 follow-up backlog artifact를 최우선 next action으로 읽도록 연결
+  - follow-up job contract 메타(`job_kind`, `parent_job_id`, `backlog_candidate_id`) 분리
+  - `FAILURE_PATTERNS.json`의 반복 count 기반 backlog candidate ingest
+- Remaining:
+  - operator comparison/approval UX 고도화
+  - diagnosis trace 장기 효과성/빈도 상관관계 고도화
+- Done (latest slice):
+  - feature flag `assistant_diagnosis_loop`
+  - `_docs/ASSISTANT_DIAGNOSIS_TRACE.json`
+  - assistant log-analysis 전에 `log_lookup -> repo_search -> memory_search` 순차 evidence pack 생성
+  - assistant chat에도 동일한 diagnosis loop와 trace 응답 연결
+  - job detail debug tab과 assistant panel에서 diagnosis trace 노출
+  - admin panel에서 diagnosis trace scope/tool/recent trace 비교 뷰 제공
+  - admin panel에서 selected/compare trace diff와 tool query/status 차이 노출
+- Note:
+  - 이는 Phase 3 backlog/runtime 위에 올라간다.
+  - Phase 5 전에 해결하면 좋은 마지막 연결고리다. 운영 안정화 전에 `다음 행동 연결`을 먼저 닫아야 self-growing companion 목적이 선명해진다.
 
-## 10. First Implementation Target
-- 첫 구현은 `4-A Tool Boundary Normalization`이다.
-- 이유:
-  - 현재 구조를 거의 안 건드리고 도입할 수 있다.
-  - MCP/Qdrant/LangGraph 모두 tool/result contract가 먼저 있어야 붙이기 쉽다.
-  - planner의 `research_search`를 registry 기반으로 바꾸는 것만으로도 다음 단계 연결점이 생긴다.
+## 10. Recommended Execution Order
+1. `4-A` 마감
+2. `4-B` 가시화
+3. `4-D` Qdrant shadow index
+4. `4-E` vector read path for `memory_search`
+5. `4-F` LangGraph planner subgraph
+6. `4-G` LangGraph recovery subgraph
+7. `4-H` self-growing companion bridge
 
-## 11. Non-Goals
-- top-level job queue를 LangGraph로 즉시 교체하지 않는다.
-- SQLite source-of-truth를 바로 없애지 않는다.
-- vector retrieval을 모든 route에 한 번에 켜지 않는다.
-- 자율 실행/automerge/self-issued PR까지 바로 가지 않는다.
+## 11. Small-Slice Rule
+- 각 슬라이스는 아래를 넘지 않는다.
+  - runtime adapter 1개
+  - feature flag 1개
+  - trace artifact 1개
+  - UI 변경 1개 이하
+- 한 슬라이스에서 framework 2개를 동시에 primary path에 올리지 않는다.
+- shadow mode로 먼저 들어간 path는 다음 슬라이스에서만 opt-in으로 승격할 수 있다.
 
-## 12. Acceptance Criteria
-- 운영자는 어떤 영역이 internal runtime이고 어떤 영역이 external framework인지 trace에서 구분할 수 있다.
-- 새 framework 도입 후에도 existing workflow/job detail/node_runs UI가 깨지지 않는다.
-- feature flag로 framework path를 즉시 off 할 수 있다.
-- 첫 도입 단계는 테스트 회귀와 산출물 계약을 유지한다.
+## 12. Test Discipline
 
-## 13. Official References
+### 12.1 Every Slice Must Add Tests
+- unit test 추가 필수
+- 기존 contract regression test 유지 필수
+- feature-flag off-path test 필수
+
+### 12.2 Every Slice Must End With Full Regression
+- minimum:
+  - focused pytest
+  - `python3 -m py_compile` for changed python modules
+  - template/script syntax check when UI/js changed
+  - full `PYTHONPATH=. .venv/bin/pytest -q`
+
+### 12.3 What Must Be Proven
+- primary path 결과가 안 바뀌었는지
+- shadow path가 trace만 남기고 있는지
+- feature flag off일 때 완전히 inert한지
+- dashboard/job detail contracts가 깨지지 않는지
+
+## 13. Acceptance Criteria
+- operator는 어떤 path가 `primary`이고 어떤 path가 `shadow`인지 trace에서 구분할 수 있다.
+- vector retrieval 도입 후에도 SQLite source-of-truth는 유지된다.
+- LangGraph 도입 후에도 기존 job/store/node_runs UI 계약은 유지된다.
+- Phase 4는 항상 작은 단위와 테스트 우선 원칙을 지킨다.
+
+## 14. Official References
 - LangGraph:
   - https://docs.langchain.com/oss/python/langgraph
   - https://docs.langchain.com/oss/python/langgraph/use-graph-api

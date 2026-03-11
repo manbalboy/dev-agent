@@ -17,7 +17,12 @@ DEFAULT_FEATURE_FLAGS: Dict[str, bool] = {
     "convention_extraction": True,
     "memory_scoring": True,
     "strategy_shadow": True,
+    "assistant_diagnosis_loop": False,
     "mcp_tools_shadow": False,
+    "vector_memory_shadow": False,
+    "vector_memory_retrieval": False,
+    "langgraph_planner_shadow": False,
+    "langgraph_recovery_shadow": False,
 }
 
 FEATURE_FLAG_LABELS: Dict[str, str] = {
@@ -26,7 +31,12 @@ FEATURE_FLAG_LABELS: Dict[str, str] = {
     "convention_extraction": "Convention Extraction",
     "memory_scoring": "Memory Quality Scoring",
     "strategy_shadow": "Adaptive Strategy Shadow",
+    "assistant_diagnosis_loop": "Assistant Diagnosis Loop",
     "mcp_tools_shadow": "MCP Tool Shadow",
+    "vector_memory_shadow": "Vector Memory Shadow",
+    "vector_memory_retrieval": "Vector Memory Retrieval",
+    "langgraph_planner_shadow": "LangGraph Planner Shadow",
+    "langgraph_recovery_shadow": "LangGraph Recovery Shadow",
 }
 
 FEATURE_FLAG_DESCRIPTIONS: Dict[str, str] = {
@@ -35,7 +45,12 @@ FEATURE_FLAG_DESCRIPTIONS: Dict[str, str] = {
     "convention_extraction": "repo 구조/매니페스트/테스트 패턴에서 conventions를 추출합니다.",
     "memory_scoring": "memory feedback/rankings를 계산해 promote/decay/banned 상태를 갱신합니다.",
     "strategy_shadow": "실제 전략은 유지한 채 memory-aware shadow strategy를 비교 기록합니다.",
+    "assistant_diagnosis_loop": "assistant log-analysis 전에 log/repo/memory tool을 순차 호출해 진단용 evidence pack과 trace를 기록합니다.",
     "mcp_tools_shadow": "기존 도구 실행 결과는 유지한 채 MCP shadow client를 병행 호출해 trace만 기록합니다.",
+    "vector_memory_shadow": "SQLite memory DB는 그대로 유지한 채 vector index 후보 payload를 shadow artifact로만 기록합니다.",
+    "vector_memory_retrieval": "memory_search 한정으로 Qdrant vector retrieval을 opt-in 실험하고, 실패 시 SQLite 검색으로 fallback 합니다.",
+    "langgraph_planner_shadow": "planner primary loop는 유지한 채 LangGraph subgraph shadow trace만 기록합니다.",
+    "langgraph_recovery_shadow": "recovery primary policy는 유지한 채 LangGraph subgraph shadow trace만 기록합니다.",
 }
 
 

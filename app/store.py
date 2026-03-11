@@ -16,7 +16,7 @@ from typing import Dict, Iterator, List, Optional
 import fcntl
 
 from app.config import AppSettings
-from app.models import JobRecord, NodeRunRecord, utc_now_iso
+from app.models import JobRecord, NodeRunRecord, RuntimeInputRecord, utc_now_iso
 
 
 class JobStore(ABC):
@@ -58,6 +58,18 @@ class JobStore(ABC):
     def list_node_runs(self, job_id: str) -> List[NodeRunRecord]:
         """Return workflow node execution records for one job."""
 
+    @abstractmethod
+    def upsert_runtime_input(self, runtime_input: RuntimeInputRecord) -> None:
+        """Insert or update one operator runtime input request/value."""
+
+    @abstractmethod
+    def get_runtime_input(self, request_id: str) -> Optional[RuntimeInputRecord]:
+        """Fetch one runtime input record by ID."""
+
+    @abstractmethod
+    def list_runtime_inputs(self) -> List[RuntimeInputRecord]:
+        """Return runtime input records sorted by newest first."""
+
 
 class JsonJobStore(JobStore):
     """JSON-backed JobStore implementation with file locking.
@@ -71,14 +83,17 @@ class JsonJobStore(JobStore):
         jobs_file: Path,
         queue_file: Path,
         node_runs_file: Path | None = None,
+        runtime_inputs_file: Path | None = None,
     ) -> None:
         self.jobs_file = jobs_file
         self.queue_file = queue_file
         self.node_runs_file = node_runs_file or jobs_file.parent / "node_runs.json"
+        self.runtime_inputs_file = runtime_inputs_file or jobs_file.parent / "runtime_inputs.json"
 
         self.jobs_file.parent.mkdir(parents=True, exist_ok=True)
         self.queue_file.parent.mkdir(parents=True, exist_ok=True)
         self.node_runs_file.parent.mkdir(parents=True, exist_ok=True)
+        self.runtime_inputs_file.parent.mkdir(parents=True, exist_ok=True)
 
         if not self.jobs_file.exists():
             self._write_json_atomic(self.jobs_file, {})
@@ -86,6 +101,8 @@ class JsonJobStore(JobStore):
             self._write_json_atomic(self.queue_file, [])
         if not self.node_runs_file.exists():
             self._write_json_atomic(self.node_runs_file, {})
+        if not self.runtime_inputs_file.exists():
+            self._write_json_atomic(self.runtime_inputs_file, {})
 
     def create_job(self, job: JobRecord) -> None:
         """Insert a new job record.
@@ -192,6 +209,39 @@ class JsonJobStore(JobStore):
         )
         return records
 
+    def upsert_runtime_input(self, runtime_input: RuntimeInputRecord) -> None:
+        """Insert or update one runtime input record."""
+
+        with self._locked_json(self.runtime_inputs_file, default={}) as runtime_inputs_data:
+            runtime_inputs = self._ensure_runtime_input_map(runtime_inputs_data)
+            runtime_inputs[runtime_input.request_id] = runtime_input.to_dict()
+
+    def get_runtime_input(self, request_id: str) -> Optional[RuntimeInputRecord]:
+        """Return one runtime input by ID, or None if it does not exist."""
+
+        with self._locked_json(self.runtime_inputs_file, default={}) as runtime_inputs_data:
+            runtime_inputs = self._ensure_runtime_input_map(runtime_inputs_data)
+            payload = runtime_inputs.get(request_id)
+            if payload is None:
+                return None
+            return RuntimeInputRecord.from_dict(payload)
+
+    def list_runtime_inputs(self) -> List[RuntimeInputRecord]:
+        """List runtime inputs sorted by newest first."""
+
+        with self._locked_json(self.runtime_inputs_file, default={}) as runtime_inputs_data:
+            runtime_inputs = self._ensure_runtime_input_map(runtime_inputs_data)
+            records = [RuntimeInputRecord.from_dict(item) for item in runtime_inputs.values()]
+
+        records.sort(
+            key=lambda record: (
+                record.updated_at or record.provided_at or record.requested_at,
+                record.request_id,
+            ),
+            reverse=True,
+        )
+        return records
+
     @contextmanager
     def _locked_json(self, file_path: Path, default: object) -> Iterator[object]:
         """Lock a JSON file, load data, then save data on exit.
@@ -274,6 +324,14 @@ class JsonJobStore(JobStore):
             return raw_payload
         return {}
 
+    @staticmethod
+    def _ensure_runtime_input_map(raw_payload: object) -> Dict[str, Dict[str, object]]:
+        """Validate that runtime-input file content is a dictionary."""
+
+        if isinstance(raw_payload, dict):
+            return raw_payload
+        return {}
+
 
 class SQLiteJobStore(JobStore):
     """SQLite-backed JobStore implementation."""
@@ -296,7 +354,7 @@ class SQLiteJobStore(JobStore):
                     finished_at, app_code, track, workflow_id, source_repository, heartbeat_at,
                     recovery_status, recovery_reason, recovery_count, last_recovered_at,
                     manual_resume_mode, manual_resume_node_id, manual_resume_requested_at,
-                    manual_resume_note
+                    manual_resume_note, job_kind, parent_job_id, backlog_candidate_id
                 )
                 VALUES (
                     :job_id, :repository, :issue_number, :issue_title, :issue_url,
@@ -305,7 +363,7 @@ class SQLiteJobStore(JobStore):
                     :finished_at, :app_code, :track, :workflow_id, :source_repository, :heartbeat_at,
                     :recovery_status, :recovery_reason, :recovery_count, :last_recovered_at,
                     :manual_resume_mode, :manual_resume_node_id, :manual_resume_requested_at,
-                    :manual_resume_note
+                    :manual_resume_note, :job_kind, :parent_job_id, :backlog_candidate_id
                 )
                     """,
                     payload,
@@ -372,7 +430,10 @@ class SQLiteJobStore(JobStore):
                     manual_resume_mode=:manual_resume_mode,
                     manual_resume_node_id=:manual_resume_node_id,
                     manual_resume_requested_at=:manual_resume_requested_at,
-                    manual_resume_note=:manual_resume_note
+                    manual_resume_note=:manual_resume_note,
+                    job_kind=:job_kind,
+                    parent_job_id=:parent_job_id,
+                    backlog_candidate_id=:backlog_candidate_id
                 WHERE job_id=:job_id
                 """,
                 payload,
@@ -441,6 +502,66 @@ class SQLiteJobStore(JobStore):
             ).fetchall()
             return [self._row_to_node_run(row) for row in rows]
 
+    def upsert_runtime_input(self, runtime_input: RuntimeInputRecord) -> None:
+        payload = runtime_input.to_dict()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO runtime_inputs (
+                    request_id, repository, app_code, job_id, scope, key,
+                    label, description, value_type, env_var_name, sensitive,
+                    status, value, placeholder, note, requested_by,
+                    requested_at, provided_at, updated_at
+                )
+                VALUES (
+                    :request_id, :repository, :app_code, :job_id, :scope, :key,
+                    :label, :description, :value_type, :env_var_name, :sensitive,
+                    :status, :value, :placeholder, :note, :requested_by,
+                    :requested_at, :provided_at, :updated_at
+                )
+                ON CONFLICT(request_id) DO UPDATE SET
+                    repository=excluded.repository,
+                    app_code=excluded.app_code,
+                    job_id=excluded.job_id,
+                    scope=excluded.scope,
+                    key=excluded.key,
+                    label=excluded.label,
+                    description=excluded.description,
+                    value_type=excluded.value_type,
+                    env_var_name=excluded.env_var_name,
+                    sensitive=excluded.sensitive,
+                    status=excluded.status,
+                    value=excluded.value,
+                    placeholder=excluded.placeholder,
+                    note=excluded.note,
+                    requested_by=excluded.requested_by,
+                    requested_at=excluded.requested_at,
+                    provided_at=excluded.provided_at,
+                    updated_at=excluded.updated_at
+                """,
+                payload,
+            )
+
+    def get_runtime_input(self, request_id: str) -> Optional[RuntimeInputRecord]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM runtime_inputs WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            return self._row_to_runtime_input(row)
+
+    def list_runtime_inputs(self) -> List[RuntimeInputRecord]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM runtime_inputs
+                ORDER BY updated_at DESC, request_id DESC
+                """
+            ).fetchall()
+            return [self._row_to_runtime_input(row) for row in rows]
+
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_file, timeout=30)
         conn.row_factory = sqlite3.Row
@@ -480,7 +601,10 @@ class SQLiteJobStore(JobStore):
                     manual_resume_mode TEXT NOT NULL DEFAULT '',
                     manual_resume_node_id TEXT NOT NULL DEFAULT '',
                     manual_resume_requested_at TEXT,
-                    manual_resume_note TEXT NOT NULL DEFAULT ''
+                    manual_resume_note TEXT NOT NULL DEFAULT '',
+                    job_kind TEXT NOT NULL DEFAULT '',
+                    parent_job_id TEXT NOT NULL DEFAULT '',
+                    backlog_candidate_id TEXT NOT NULL DEFAULT ''
                 )
                 """
             )
@@ -526,6 +650,18 @@ class SQLiteJobStore(JobStore):
                 conn.execute(
                     "ALTER TABLE jobs ADD COLUMN manual_resume_note TEXT NOT NULL DEFAULT ''"
                 )
+            if "job_kind" not in columns:
+                conn.execute(
+                    "ALTER TABLE jobs ADD COLUMN job_kind TEXT NOT NULL DEFAULT ''"
+                )
+            if "parent_job_id" not in columns:
+                conn.execute(
+                    "ALTER TABLE jobs ADD COLUMN parent_job_id TEXT NOT NULL DEFAULT ''"
+                )
+            if "backlog_candidate_id" not in columns:
+                conn.execute(
+                    "ALTER TABLE jobs ADD COLUMN backlog_candidate_id TEXT NOT NULL DEFAULT ''"
+                )
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS queue (
@@ -557,6 +693,37 @@ class SQLiteJobStore(JobStore):
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_node_runs_job_started ON node_runs(job_id, started_at ASC)"
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS runtime_inputs (
+                    request_id TEXT PRIMARY KEY,
+                    repository TEXT NOT NULL,
+                    app_code TEXT NOT NULL DEFAULT '',
+                    job_id TEXT NOT NULL DEFAULT '',
+                    scope TEXT NOT NULL DEFAULT 'repository',
+                    key TEXT NOT NULL,
+                    label TEXT NOT NULL DEFAULT '',
+                    description TEXT NOT NULL DEFAULT '',
+                    value_type TEXT NOT NULL DEFAULT 'text',
+                    env_var_name TEXT NOT NULL DEFAULT '',
+                    sensitive INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'requested',
+                    value TEXT NOT NULL DEFAULT '',
+                    placeholder TEXT NOT NULL DEFAULT '',
+                    note TEXT NOT NULL DEFAULT '',
+                    requested_by TEXT NOT NULL DEFAULT 'operator',
+                    requested_at TEXT NOT NULL DEFAULT '',
+                    provided_at TEXT,
+                    updated_at TEXT NOT NULL DEFAULT ''
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_runtime_inputs_updated ON runtime_inputs(updated_at DESC)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_runtime_inputs_scope ON runtime_inputs(repository, app_code, job_id, scope)"
             )
 
     @staticmethod
@@ -592,6 +759,9 @@ class SQLiteJobStore(JobStore):
             manual_resume_node_id=str(row["manual_resume_node_id"] or ""),
             manual_resume_requested_at=row["manual_resume_requested_at"],
             manual_resume_note=str(row["manual_resume_note"] or ""),
+            job_kind=str(row["job_kind"] or ""),
+            parent_job_id=str(row["parent_job_id"] or ""),
+            backlog_candidate_id=str(row["backlog_candidate_id"] or ""),
         )
 
     @staticmethod
@@ -609,6 +779,30 @@ class SQLiteJobStore(JobStore):
             finished_at=row["finished_at"],
             error_message=row["error_message"],
             agent_profile=str(row["agent_profile"] or "primary"),
+        )
+
+    @staticmethod
+    def _row_to_runtime_input(row: sqlite3.Row) -> RuntimeInputRecord:
+        return RuntimeInputRecord(
+            request_id=str(row["request_id"]),
+            repository=str(row["repository"]),
+            app_code=str(row["app_code"] or ""),
+            job_id=str(row["job_id"] or ""),
+            scope=str(row["scope"] or "repository"),
+            key=str(row["key"]),
+            label=str(row["label"] or ""),
+            description=str(row["description"] or ""),
+            value_type=str(row["value_type"] or "text"),
+            env_var_name=str(row["env_var_name"] or ""),
+            sensitive=bool(row["sensitive"]),
+            status=str(row["status"] or "requested"),
+            value=str(row["value"] or ""),
+            placeholder=str(row["placeholder"] or ""),
+            note=str(row["note"] or ""),
+            requested_by=str(row["requested_by"] or "operator"),
+            requested_at=str(row["requested_at"] or ""),
+            provided_at=row["provided_at"],
+            updated_at=str(row["updated_at"] or ""),
         )
 
 
@@ -630,6 +824,8 @@ def create_job_store(settings: AppSettings) -> JobStore:
                     continue
                 for node_run in json_store.list_node_runs(job.job_id):
                     sqlite_store.upsert_node_run(node_run)
+            for runtime_input in json_store.list_runtime_inputs():
+                sqlite_store.upsert_runtime_input(runtime_input)
             queue_payload = JsonJobStore._read_json(settings.queue_file, default=[])
             for queued in JsonJobStore._ensure_queue_list(queue_payload):
                 sqlite_store.enqueue_job(queued)

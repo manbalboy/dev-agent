@@ -18,7 +18,7 @@
   <body>
     <main class="container">
       <header class="page-head">
-        <p class="back-link"><a href="/">&larr; 목록으로</a></p>
+        <p class="back-link"><a href="/">&larr; 작업 현황으로</a></p>
         <div class="page-head-row">
           <h1>작업 상세 · {{ job.job_id }}</h1>
           <div class="row">
@@ -32,37 +32,77 @@
             </button>
           </div>
         </div>
+        <p class="hint">현재 상태, 재개 흐름, 운영 입력, 로그를 한 화면에서 확인합니다.</p>
         <p id="stop-state" class="hint"></p>
       </header>
 
-      <dl class="meta-grid">
-        <dt>상태</dt><dd id="job-status">{{ job.status }}</dd>
-        <dt>단계</dt><dd id="job-stage">{{ job.stage }}</dd>
-        <dt>앱</dt><dd id="job-app">{{ job.app_code or "default" }}</dd>
-        <dt>트랙</dt><dd id="job-track">{{ job.track or "enhance" }}</dd>
-        <dt>워크플로우</dt><dd id="job-workflow-id">{{ job.workflow_id or "-" }}</dd>
-        <dt>선택 소스</dt><dd id="job-workflow-source">-</dd>
-        <dt>시도 횟수</dt><dd id="job-attempt">{{ job.attempt }} / {{ job.max_attempts }}</dd>
-        <dt>저장소</dt><dd id="job-repo">{{ job.repository }}</dd>
-        <dt>이슈</dt><dd id="job-issue"><a href="{{ job.issue_url }}" target="_blank" rel="noreferrer">#{{ job.issue_number }} - {{ job.issue_title }}</a></dd>
-        <dt>브랜치</dt><dd id="job-branch">{{ job.branch_name }}</dd>
-        <dt>PR</dt>
-        <dd id="job-pr">
-          {% if job.pr_url %}
-          <a href="{{ job.pr_url }}" target="_blank" rel="noreferrer">{{ job.pr_url }}</a>
-          {% else %}
-          아직 없음
-          {% endif %}
-        </dd>
-        <dt>오류</dt><dd id="job-error">{{ job.error_message or "-" }}</dd>
-        <dt>로그</dt><dd><a href="/logs/{{ job.log_file }}" target="_blank" rel="noreferrer">{{ job.log_file }}</a></dd>
-        <dt>생성</dt><dd id="job-created" class="js-time" data-utc="{{ job.created_at }}">{{ job.created_at }}</dd>
-        <dt>시작</dt><dd id="job-started" class="js-time" data-utc="{{ job.started_at or '' }}">{{ job.started_at or "-" }}</dd>
-        <dt>종료</dt><dd id="job-finished" class="js-time" data-utc="{{ job.finished_at or '' }}">{{ job.finished_at or "-" }}</dd>
-        <dt>하트비트</dt><dd id="job-heartbeat" class="js-time" data-utc="{{ job.heartbeat_at or '' }}">{{ job.heartbeat_at or "-" }}</dd>
-        <dt>복구 상태</dt><dd id="job-recovery-status">{{ job.recovery_status or "-" }}</dd>
-        <dt>복구 사유</dt><dd id="job-recovery-reason">{{ job.recovery_reason or "-" }}</dd>
-      </dl>
+      <section class="panel detail-summary-panel">
+        <div class="panel-head">
+          <h2>핵심 요약</h2>
+          <p class="hint">먼저 이 4개 카드만 보면 현재 작업 상태를 빠르게 파악할 수 있습니다.</p>
+        </div>
+        <div class="detail-summary-grid">
+          <article class="detail-summary-card">
+            <h3>현재 상태</h3>
+            <p id="job-summary-status" class="detail-summary-value">{{ job.status }}</p>
+            <p id="job-summary-status-note" class="hint">단계 {{ job.stage }}</p>
+          </article>
+          <article class="detail-summary-card">
+            <h3>진행 흐름</h3>
+            <p id="job-summary-progress" class="detail-summary-value">{{ job.stage }}</p>
+            <p id="job-summary-progress-note" class="hint">시도 {{ job.attempt }} / {{ job.max_attempts }}</p>
+          </article>
+          <article class="detail-summary-card">
+            <h3>연결된 작업</h3>
+            <p id="job-summary-links" class="detail-summary-value">이슈 연결됨</p>
+            <p id="job-summary-links-note" class="hint">PR 상태 확인</p>
+          </article>
+          <article class="detail-summary-card">
+            <h3>운영 입력 / 로그</h3>
+            <p id="job-summary-inputs" class="detail-summary-value">확인 중</p>
+            <p id="job-summary-inputs-note" class="hint">로그 채널 확인</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="panel detail-meta-panel">
+        <div class="panel-head">
+          <h2>세부 메타 정보</h2>
+          <p class="hint">저장소, 브랜치, 복구 상태, 부모 작업 같은 운영 정보를 확인합니다.</p>
+        </div>
+        <dl class="meta-grid">
+          <dt>상태</dt><dd id="job-status">{{ job.status }}</dd>
+          <dt>단계</dt><dd id="job-stage">{{ job.stage }}</dd>
+          <dt>앱</dt><dd id="job-app">{{ job.app_code or "default" }}</dd>
+          <dt>트랙</dt><dd id="job-track">{{ job.track or "enhance" }}</dd>
+          <dt>작업 유형</dt><dd id="job-kind">-</dd>
+          <dt>실행 흐름</dt><dd id="job-workflow-id">{{ job.workflow_id or "-" }}</dd>
+          <dt>선택 기준</dt><dd id="job-workflow-source">-</dd>
+          <dt>시도 횟수</dt><dd id="job-attempt">{{ job.attempt }} / {{ job.max_attempts }}</dd>
+          <dt>저장소</dt><dd id="job-repo">{{ job.repository }}</dd>
+          <dt>이슈</dt><dd id="job-issue"><a href="{{ job.issue_url }}" target="_blank" rel="noreferrer">#{{ job.issue_number }} - {{ job.issue_title }}</a></dd>
+          <dt>부모 작업</dt><dd id="job-parent">-</dd>
+          <dt>Backlog 후보</dt><dd id="job-backlog">-</dd>
+          <dt>운영자 입력</dt><dd id="job-operator-inputs">-</dd>
+          <dt>브랜치</dt><dd id="job-branch">{{ job.branch_name }}</dd>
+          <dt>PR</dt>
+          <dd id="job-pr">
+            {% if job.pr_url %}
+            <a href="{{ job.pr_url }}" target="_blank" rel="noreferrer">{{ job.pr_url }}</a>
+            {% else %}
+            아직 없음
+            {% endif %}
+          </dd>
+          <dt>오류</dt><dd id="job-error">{{ job.error_message or "-" }}</dd>
+          <dt>로그 채널</dt><dd id="job-logs">-</dd>
+          <dt>생성</dt><dd id="job-created" class="js-time" data-utc="{{ job.created_at }}">{{ job.created_at }}</dd>
+          <dt>시작</dt><dd id="job-started" class="js-time" data-utc="{{ job.started_at or '' }}">{{ job.started_at or "-" }}</dd>
+          <dt>종료</dt><dd id="job-finished" class="js-time" data-utc="{{ job.finished_at or '' }}">{{ job.finished_at or "-" }}</dd>
+          <dt>하트비트</dt><dd id="job-heartbeat" class="js-time" data-utc="{{ job.heartbeat_at or '' }}">{{ job.heartbeat_at or "-" }}</dd>
+          <dt>복구 상태</dt><dd id="job-recovery-status">{{ job.recovery_status or "-" }}</dd>
+          <dt>복구 사유</dt><dd id="job-recovery-reason">{{ job.recovery_reason or "-" }}</dd>
+        </dl>
+      </section>
 
       <section class="panel runtime-health-panel">
         <div class="panel-head">
@@ -74,18 +114,20 @@
 
       <section class="panel">
         <div class="panel-head">
-          <h2>로그 뷰</h2>
+          <h2>실행 로그와 문제 분석</h2>
           <p id="terminal-updated" class="hint">마지막 갱신: -</p>
         </div>
         <div class="sub-tabs detail-tabs">
-          <button type="button" class="sub-tab active" data-detail-tab="user">사용자 로그</button>
-          <button type="button" class="sub-tab" data-detail-tab="debug">시스템 디버그</button>
-          <button type="button" class="sub-tab" data-detail-tab="workflow">워크플로우</button>
+          <button type="button" class="sub-tab active" data-detail-tab="user">실행 로그</button>
+          <button type="button" class="sub-tab" data-detail-tab="debug">문제 진단</button>
+          <button type="button" class="sub-tab" data-detail-tab="workflow">흐름 / 재개</button>
         </div>
         <section id="detail-tab-user" class="detail-tab-panel active">
           <div id="user-log-board" class="task-log-board">사용자 로그를 준비 중...</div>
         </section>
         <section id="detail-tab-debug" class="detail-tab-panel">
+          <div id="log-ops-board" class="failure-summary"></div>
+          <div id="assistant-diagnosis-board" class="failure-summary"></div>
           <div id="failure-summary" class="failure-summary"></div>
           <div id="debug-flow-summary" class="failure-summary"></div>
           <div class="terminal-wrap">
@@ -101,6 +143,8 @@
         <section id="detail-tab-workflow" class="detail-tab-panel">
           <div id="workflow-config-board" class="failure-summary"></div>
           <div id="workflow-fallback-board" class="failure-summary"></div>
+          <div id="workflow-lineage-board" class="failure-summary"></div>
+          <div id="workflow-operator-inputs-board" class="failure-summary"></div>
           <div id="workflow-resume-board" class="failure-summary"></div>
           <div id="workflow-memory-board" class="failure-summary"></div>
           <section id="workflow-manual-panel" class="workflow-manual-panel">
@@ -165,6 +209,10 @@
       let workflowRuntimeCache = null;
       let runtimeSignalsCache = null;
       let memoryTraceCache = null;
+      let assistantDiagnosisTraceCache = null;
+      let jobLineageCache = null;
+      let logSummaryCache = null;
+      let operatorInputsCache = null;
       let manualRetryOptionsCache = null;
       let currentJobAttempt = 1;
       let currentStageCode = "queued";
@@ -258,6 +306,17 @@
         document.getElementById("job-heartbeat").textContent = formatKstDateTime(job.heartbeat_at);
         document.getElementById("job-recovery-status").textContent = job.recovery_status || "-";
         document.getElementById("job-recovery-reason").textContent = job.recovery_reason || "-";
+        const summaryStatus = document.getElementById("job-summary-status");
+        if (summaryStatus) summaryStatus.textContent = String(job.status || "-");
+        const summaryStatusNote = document.getElementById("job-summary-status-note");
+        if (summaryStatusNote) {
+          const recovery = job.recovery_status ? ` · 복구 ${job.recovery_status}` : "";
+          summaryStatusNote.textContent = `단계 ${job.stage || "-"}${recovery}`;
+        }
+        const summaryProgress = document.getElementById("job-summary-progress");
+        if (summaryProgress) summaryProgress.textContent = String(job.stage || "-");
+        const summaryProgressNote = document.getElementById("job-summary-progress-note");
+        if (summaryProgressNote) summaryProgressNote.textContent = `시도 ${job.attempt} / ${job.max_attempts}`;
 
         const issue = document.getElementById("job-issue");
         issue.innerHTML = `<a href="${esc(job.issue_url)}" target="_blank" rel="noreferrer">#${esc(job.issue_number)} - ${esc(job.issue_title)}</a>`;
@@ -268,6 +327,14 @@
         } else {
           pr.textContent = "아직 없음";
         }
+        const summaryLinks = document.getElementById("job-summary-links");
+        if (summaryLinks) summaryLinks.textContent = job.pr_url ? "이슈 + PR 연결됨" : "이슈만 연결됨";
+        const summaryLinksNote = document.getElementById("job-summary-links-note");
+        if (summaryLinksNote) {
+          summaryLinksNote.textContent = job.pr_url
+            ? `PR 있음 · ${String(job.pr_url).slice(0, 42)}`
+            : `이슈 #${job.issue_number || "-"} 진행 중`;
+        }
 
         const stopButton = document.getElementById("job-stop");
         if (stopButton) {
@@ -277,9 +344,9 @@
 
       function workflowResolutionSourceLabel(source) {
         const value = String(source || "").trim().toLowerCase();
-        if (value === "job") return "job override";
-        if (value === "app") return "app mapping";
-        if (value === "default") return "default";
+        if (value === "job") return "작업에서 직접 지정";
+        if (value === "app") return "앱 기본 매핑";
+        if (value === "default") return "전역 기본값";
         return value || "-";
       }
 
@@ -291,6 +358,83 @@
         if (workflowIdNode) workflowIdNode.textContent = resolvedWorkflowId || "-";
         const workflowSourceNode = document.getElementById("job-workflow-source");
         if (workflowSourceNode) workflowSourceNode.textContent = workflowResolutionSourceLabel(runtime.resolution_source);
+        const summaryProgress = document.getElementById("job-summary-progress");
+        if (summaryProgress) summaryProgress.textContent = resolvedWorkflowId || currentStageCode || "-";
+        const summaryProgressNote = document.getElementById("job-summary-progress-note");
+        if (summaryProgressNote) {
+          const sourceText = workflowResolutionSourceLabel(runtime.resolution_source);
+          summaryProgressNote.textContent = `단계 ${currentStageCode || "-"} · ${sourceText}`;
+        }
+      }
+
+      function jobKindLabel(jobKind) {
+        const key = String(jobKind || "").trim().toLowerCase();
+        if (key === "followup_backlog") return "후속 개선 작업";
+        return "이슈 기반 작업";
+      }
+
+      function jobKindBadgeClass(jobKind) {
+        const key = String(jobKind || "").trim().toLowerCase();
+        if (key === "followup_backlog") return "running";
+        return "done";
+      }
+
+      function renderJobMetaPanels(job, lineage, logSummary, operatorInputs) {
+        const jobKindNode = document.getElementById("job-kind");
+        const parentNode = document.getElementById("job-parent");
+        const backlogNode = document.getElementById("job-backlog");
+        const operatorInputsNode = document.getElementById("job-operator-inputs");
+        const logsNode = document.getElementById("job-logs");
+        const safeLineage = lineage && typeof lineage === "object" ? lineage : {};
+        const safeSummary = logSummary && typeof logSummary === "object" ? logSummary : {};
+        const safeOperatorInputs = operatorInputs && typeof operatorInputs === "object" ? operatorInputs : {};
+        const normalizedJobKind = String(safeLineage.job_kind || job?.job_kind || "issue").trim().toLowerCase() || "issue";
+        const parentJob = safeLineage.parent_job && typeof safeLineage.parent_job === "object" ? safeLineage.parent_job : null;
+        const backlogCandidate = safeLineage.backlog_candidate && typeof safeLineage.backlog_candidate === "object"
+          ? safeLineage.backlog_candidate
+          : null;
+        const channels = safeSummary.channels && typeof safeSummary.channels === "object" ? safeSummary.channels : {};
+        const debugChannel = channels.debug && typeof channels.debug === "object" ? channels.debug : {};
+        const userChannel = channels.user && typeof channels.user === "object" ? channels.user : {};
+        const availableCount = Number(safeOperatorInputs.available_count || 0);
+        const pendingCount = Number(safeOperatorInputs.pending_count || 0);
+        const logStateSummary = `로그 ${debugChannel.exists ? "debug" : "-"} / ${userChannel.exists ? "user" : "-"}`;
+
+        if (jobKindNode) {
+          jobKindNode.innerHTML = `<span class="badge status-${jobKindBadgeClass(normalizedJobKind)}">${esc(jobKindLabel(normalizedJobKind))}</span>`;
+        }
+        if (parentNode) {
+          parentNode.innerHTML = parentJob
+            ? `<a href="${esc(String(parentJob.detail_url || `/jobs/${parentJob.job_id}`))}">${esc(String(parentJob.job_id || "").slice(0, 8))}</a> · ${esc(String(parentJob.status || "-"))} / ${esc(String(parentJob.stage || "-"))}`
+            : "-";
+        }
+        if (backlogNode) {
+          backlogNode.innerHTML = backlogCandidate
+            ? `<code>${esc(String(backlogCandidate.candidate_id || "-"))}</code> · <span class="badge status-${memoryStateBadgeClass(String(backlogCandidate.state || "candidate"))}">${esc(String(backlogCandidate.state || "candidate"))}</span>`
+            : "-";
+        }
+        if (operatorInputsNode) {
+          operatorInputsNode.innerHTML = `${availableCount ? `<span class="badge status-done">준비 ${esc(String(availableCount))}</span>` : `<span class="badge status-queued">준비 0</span>`} ${pendingCount ? `· <span class="badge status-running">대기 ${esc(String(pendingCount))}</span>` : ""}`;
+          const summaryInputs = document.getElementById("job-summary-inputs");
+          if (summaryInputs) {
+            summaryInputs.textContent = pendingCount ? `입력 대기 ${pendingCount}건` : `입력 준비 ${availableCount}건`;
+          }
+          const summaryInputsNote = document.getElementById("job-summary-inputs-note");
+          if (summaryInputsNote) {
+            summaryInputsNote.textContent = pendingCount
+              ? `준비됨 ${availableCount}건 · 아직 필요한 값 있음 · ${logStateSummary}`
+              : `준비됨 ${availableCount}건 · 바로 실행 가능 · ${logStateSummary}`;
+          }
+        }
+        if (logsNode) {
+          const debugLink = debugChannel.url
+            ? `<a href="${esc(String(debugChannel.url))}" target="_blank" rel="noreferrer">debug</a>${debugChannel.exists ? "" : " (없음)"}`
+            : "debug";
+          const userLink = userChannel.url
+            ? `<a href="${esc(String(userChannel.url))}" target="_blank" rel="noreferrer">user</a>${userChannel.exists ? "" : " (없음)"}`
+            : "user";
+          logsNode.innerHTML = `${debugLink} · ${userLink}`;
+        }
       }
 
       function renderRuntimeHealth(runtimeSignals) {
@@ -1260,6 +1404,243 @@
         `;
       }
 
+      function renderWorkflowLineageBoard(jobLineage) {
+        const board = document.getElementById("workflow-lineage-board");
+        if (!board) return;
+
+        const lineage = jobLineage && typeof jobLineage === "object" ? jobLineage : {};
+        const parentJob = lineage.parent_job && typeof lineage.parent_job === "object" ? lineage.parent_job : null;
+        const childJobs = Array.isArray(lineage.child_jobs) ? lineage.child_jobs : [];
+        const backlogCandidate = lineage.backlog_candidate && typeof lineage.backlog_candidate === "object"
+          ? lineage.backlog_candidate
+          : null;
+        const followupArtifact = lineage.followup_artifact && typeof lineage.followup_artifact === "object"
+          ? lineage.followup_artifact
+          : null;
+        const jobKind = String(lineage.job_kind || "issue").trim().toLowerCase() || "issue";
+        const candidatePayload = backlogCandidate?.payload && typeof backlogCandidate.payload === "object"
+          ? backlogCandidate.payload
+          : {};
+        const childHtml = childJobs.length
+          ? childJobs.map((item) => `
+              <li class="failure-item">
+                <span class="failure-type">${esc(String(item.job_kind_label || jobKindLabel(item.job_kind || "issue")))}</span>
+                <span class="failure-text"><a href="${esc(String(item.detail_url || `/jobs/${item.job_id}`))}">${esc(String(item.job_id || "").slice(0, 8))}</a> · ${esc(String(item.status || "-"))} / ${esc(String(item.stage || "-"))}</span>
+              </li>
+            `).join("")
+          : `<li class="failure-item"><span class="failure-type">child</span><span class="failure-text">후속 작업 없음</span></li>`;
+
+        board.innerHTML = `
+          <h3>작업 Lineage</h3>
+          <ul class="failure-list">
+            <li class="failure-item">
+              <span class="failure-type">종류</span>
+              <span class="failure-text"><span class="badge status-${jobKindBadgeClass(jobKind)}">${esc(jobKindLabel(jobKind))}</span></span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">부모</span>
+              <span class="failure-text">${parentJob ? `<a href="${esc(String(parentJob.detail_url || `/jobs/${parentJob.job_id}`))}">${esc(String(parentJob.job_id || "").slice(0, 8))}</a> · ${esc(String(parentJob.issue_title || "-"))}` : "없음"}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">Backlog</span>
+              <span class="failure-text">${backlogCandidate ? `<code>${esc(String(backlogCandidate.candidate_id || "-"))}</code> · <span class="badge status-${memoryStateBadgeClass(String(backlogCandidate.state || "candidate"))}">${esc(String(backlogCandidate.state || "candidate"))}</span> · ${esc(String(candidatePayload.source_kind || "-"))}` : "연결된 후보 없음"}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">추천 노드</span>
+              <span class="failure-text">${esc(String(followupArtifact?.recommended_node_type || candidatePayload.recommended_node_type || "-"))}</span>
+            </li>
+          </ul>
+          <section class="stage-snapshot">
+            <h4>후속 작업 ${esc(String(lineage.child_count || childJobs.length || 0))}개</h4>
+            <ul class="failure-list">${childHtml}</ul>
+          </section>
+        `;
+      }
+
+      function renderWorkflowOperatorInputsBoard(operatorInputs) {
+        const board = document.getElementById("workflow-operator-inputs-board");
+        if (!board) return;
+
+        const payload = operatorInputs && typeof operatorInputs === "object" ? operatorInputs : {};
+        const resolvedInputs = Array.isArray(payload.resolved_inputs) ? payload.resolved_inputs : [];
+        const pendingInputs = Array.isArray(payload.pending_inputs) ? payload.pending_inputs : [];
+        const availableEnvVars = Array.isArray(payload.available_env_vars) ? payload.available_env_vars : [];
+
+        const resolvedHtml = resolvedInputs.length
+          ? resolvedInputs.map((item) => `
+              <li class="failure-item">
+                <span class="failure-type">${esc(String(item?.label || item?.key || "-"))}</span>
+                <span class="failure-text">
+                  <span class="badge status-done">ready</span>
+                  · ${esc(String(item?.env_var_name || "-"))}
+                  · ${esc(String(item?.display_value || "-"))}
+                </span>
+              </li>
+            `).join("")
+          : `<li class="failure-item"><span class="failure-type">ready</span><span class="failure-text">제공된 입력 없음</span></li>`;
+
+        const pendingHtml = pendingInputs.length
+          ? pendingInputs.map((item) => `
+              <li class="failure-item">
+                <span class="failure-type">${esc(String(item?.label || item?.key || "-"))}</span>
+                <span class="failure-text">
+                  <span class="badge status-running">pending</span>
+                  · ${esc(String(item?.env_var_name || "-"))}
+                  ${item?.description ? ` · ${esc(String(item?.description || ""))}` : ""}
+                </span>
+              </li>
+            `).join("")
+          : `<li class="failure-item"><span class="failure-type">pending</span><span class="failure-text">대기 중 입력 없음</span></li>`;
+
+        board.innerHTML = `
+          <h3>Operator Inputs</h3>
+          <ul class="failure-list">
+            <li class="failure-item">
+              <span class="failure-type">ready</span>
+              <span class="failure-text">${esc(String(payload.available_count || 0))}개 · ${esc(availableEnvVars.join(", ") || "-")}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">pending</span>
+              <span class="failure-text">${esc(String(payload.pending_count || 0))}개</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">artifact</span>
+              <span class="failure-text">${esc(String(payload.artifact_path || "-"))}</span>
+            </li>
+          </ul>
+          <section class="stage-snapshot">
+            <h4>제공된 입력</h4>
+            <ul class="failure-list">${resolvedHtml}</ul>
+          </section>
+          <section class="stage-snapshot">
+            <h4>대기 중 입력</h4>
+            <ul class="failure-list">${pendingHtml}</ul>
+          </section>
+        `;
+      }
+
+      function renderLogOpsBoard(logSummary) {
+        const board = document.getElementById("log-ops-board");
+        if (!board) return;
+        const summary = logSummary && typeof logSummary === "object" ? logSummary : {};
+        const channels = summary.channels && typeof summary.channels === "object" ? summary.channels : {};
+        const debugChannel = channels.debug && typeof channels.debug === "object" ? channels.debug : {};
+        const userChannel = channels.user && typeof channels.user === "object" ? channels.user : {};
+        const latestError = summary.latest_error && typeof summary.latest_error === "object" ? summary.latest_error : {};
+        const latestCommand = summary.latest_command && typeof summary.latest_command === "object" ? summary.latest_command : {};
+        const topActors = Array.isArray(summary.top_actors) ? summary.top_actors : [];
+        const actorSummary = topActors.length
+          ? topActors.map((item) => `${actorDisplayName(item.name || "ORCHESTRATOR")} ${item.count || 0}`).join(" · ")
+          : "-";
+        const kindCounts = summary.kind_counts && typeof summary.kind_counts === "object"
+          ? Object.entries(summary.kind_counts).map(([kind, count]) => `${kind} ${count}`).join(" · ")
+          : "-";
+
+        board.innerHTML = `
+          <h3>로그 운영 요약</h3>
+          <ul class="failure-list">
+            <li class="failure-item">
+              <span class="failure-type">채널</span>
+              <span class="failure-text">
+                ${debugChannel.url ? `<a href="${esc(String(debugChannel.url))}" target="_blank" rel="noreferrer">debug</a>` : "debug"}${debugChannel.exists ? "" : " (없음)"}
+                ·
+                ${userChannel.url ? `<a href="${esc(String(userChannel.url))}" target="_blank" rel="noreferrer">user</a>` : "user"}${userChannel.exists ? "" : " (없음)"}
+              </span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">이벤트</span>
+              <span class="failure-text">${esc(String(summary.event_count || 0))}개 · ${esc(kindCounts)}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">오류 신호</span>
+              <span class="failure-text">${esc(String(summary.error_count || 0))}개 · nonzero done ${esc(String(summary.nonzero_done_count || 0))}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">최근 명령</span>
+              <span class="failure-text">${esc(String(latestCommand.message || "-"))}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">최근 오류</span>
+              <span class="failure-text">${esc(String(latestError.message || "-").split("\n")[0] || "-")}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">주요 actor</span>
+              <span class="failure-text">${esc(actorSummary)}</span>
+            </li>
+          </ul>
+        `;
+      }
+
+      function renderAssistantDiagnosisBoard(trace) {
+        const board = document.getElementById("assistant-diagnosis-board");
+        if (!board) return;
+
+        const payload = trace && typeof trace === "object" ? trace : {};
+        const toolRuns = Array.isArray(payload.tool_runs) ? payload.tool_runs : [];
+        if (!payload.enabled && !toolRuns.length) {
+          board.innerHTML = `
+            <h3>Assistant Diagnosis Trace</h3>
+            <p class="failure-empty">아직 기록된 진단 trace가 없습니다.</p>
+          `;
+          return;
+        }
+
+        const toolHtml = toolRuns.length
+          ? toolRuns.map((item) => {
+              const ok = Boolean(item && item.ok);
+              const toolName = String(item?.tool || "-").trim() || "-";
+              const query = String(item?.query || "-").trim() || "-";
+              const mode = String(item?.mode || "-").trim() || "-";
+              const error = String(item?.error || "").trim();
+              const contextPath = String(item?.context_path || "").trim();
+              const resultPath = String(item?.result_path || "").trim();
+              return `
+                <li class="failure-item">
+                  <span class="failure-type">${esc(toolName)}</span>
+                  <span class="failure-text">
+                    <span class="badge status-${ok ? "done" : "failed"}">${ok ? "ok" : "failed"}</span>
+                    · ${esc(query)}
+                    · mode ${esc(mode)}
+                    ${contextPath ? ` · ctx ${esc(contextPath.split("/").slice(-2).join("/"))}` : ""}
+                    ${resultPath ? ` · out ${esc(resultPath.split("/").slice(-2).join("/"))}` : ""}
+                    ${error ? ` · ${esc(error.split("\n")[0])}` : ""}
+                  </span>
+                </li>
+              `;
+            }).join("")
+          : `<li class="failure-item"><span class="failure-type">trace</span><span class="failure-text">tool run 정보 없음</span></li>`;
+
+        board.innerHTML = `
+          <h3>Assistant Diagnosis Trace</h3>
+          <ul class="failure-list">
+            <li class="failure-item">
+              <span class="failure-type">scope</span>
+              <span class="failure-text">${esc(String(payload.assistant_scope || "-"))}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">질문</span>
+              <span class="failure-text">${esc(String(payload.question || "-"))}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">생성 시각</span>
+              <span class="failure-text">${esc(formatKstDateTime(String(payload.generated_at || "")))}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">context 길이</span>
+              <span class="failure-text">${esc(String(payload.combined_context_length || 0))} chars</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">trace 파일</span>
+              <span class="failure-text">${esc(String(payload.trace_path || "-"))}</span>
+            </li>
+          </ul>
+          <section class="stage-snapshot">
+            <h4>도구 실행 ${esc(String(toolRuns.length))}개</h4>
+            <ul class="failure-list">${toolHtml}</ul>
+          </section>
+        `;
+      }
+
       function renderWorkflowManualPanel(options, resumeState) {
         const panel = document.getElementById("workflow-manual-panel");
         const modeSelect = document.getElementById("workflow-manual-mode");
@@ -1494,6 +1875,8 @@
         const runtimeNodes = workflowNodesForLane();
         renderWorkflowConfigBoard(workflowRuntimeCache);
         renderWorkflowFallbackBoard(workflowRuntimeCache);
+        renderWorkflowLineageBoard(jobLineageCache);
+        renderWorkflowOperatorInputsBoard(operatorInputsCache);
         renderWorkflowResumeBoard(resumeState);
         renderWorkflowMemoryBoard(memoryTraceCache);
         if (runtimeNodes.length) {
@@ -2343,13 +2726,28 @@
           memoryTraceCache = payload.memory_trace && typeof payload.memory_trace === "object"
             ? payload.memory_trace
             : null;
+          assistantDiagnosisTraceCache = payload.assistant_diagnosis_trace && typeof payload.assistant_diagnosis_trace === "object"
+            ? payload.assistant_diagnosis_trace
+            : null;
+          jobLineageCache = payload.job_lineage && typeof payload.job_lineage === "object"
+            ? payload.job_lineage
+            : null;
+          logSummaryCache = payload.log_summary && typeof payload.log_summary === "object"
+            ? payload.log_summary
+            : null;
+          operatorInputsCache = payload.operator_inputs && typeof payload.operator_inputs === "object"
+            ? payload.operator_inputs
+            : null;
           renderWorkflowMeta(workflowRuntimeCache);
+          renderJobMetaPanels(payload.job || {}, jobLineageCache, logSummaryCache, operatorInputsCache);
           const nextMdFiles = Array.isArray(payload.md_files) ? payload.md_files : [];
           const nextMdSignature = buildWorkspaceMdSignature(nextMdFiles);
           const docsChanged = nextMdSignature !== workspaceMdSignature;
           workspaceMdFilesCache = nextMdFiles;
           workspaceMdSignature = nextMdSignature;
           renderRuntimeHealth(runtimeSignalsCache);
+          renderLogOpsBoard(logSummaryCache);
+          renderAssistantDiagnosisBoard(assistantDiagnosisTraceCache);
           renderWorkflowLane(debugEntriesCache, currentStageCode);
           renderWorkflowManualPanel(manualRetryOptionsCache, resumeStateCache);
           if (docsChanged && firstUserLogLoaded && lastUserLogText) {

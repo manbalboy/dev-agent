@@ -20,6 +20,7 @@ class ShellTestRuntime:
         settings,
         shell_executor,
         shell_executor_accepts_heartbeat: bool,
+        shell_executor_accepts_env: bool,
         touch_job_heartbeat: Callable[..., None],
         actor_log_writer,
         infer_actor_from_command,
@@ -30,6 +31,7 @@ class ShellTestRuntime:
         self.settings = settings
         self.shell_executor = shell_executor
         self.shell_executor_accepts_heartbeat = shell_executor_accepts_heartbeat
+        self.shell_executor_accepts_env = shell_executor_accepts_env
         self.touch_job_heartbeat = touch_job_heartbeat
         self.actor_log_writer = actor_log_writer
         self.infer_actor_from_command = infer_actor_from_command
@@ -58,6 +60,8 @@ class ShellTestRuntime:
         if self.shell_executor_accepts_heartbeat:
             kwargs["heartbeat_callback"] = self.touch_job_heartbeat
             kwargs["heartbeat_interval_seconds"] = 10.0
+        if self.shell_executor_accepts_env:
+            kwargs["extra_env"] = dict(getattr(self, "extra_env", {}) or {})
         return self.shell_executor(**kwargs)
 
     def run_shell(

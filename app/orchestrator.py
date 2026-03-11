@@ -75,8 +75,16 @@ from app.workflow_resume import (
 from app.workflow_resolution import load_workflow_catalog, resolve_workflow_selection
 from app.memory.fix_store import FixStore, NoOpFixStore
 from app.memory.runtime_ingest import ingest_memory_runtime_artifacts
+from app.memory.qdrant_shadow import QdrantShadowTransport
 from app.memory.runtime_store import MemoryRuntimeStore
+from app.memory.vector_shadow import build_vector_shadow_manifest
+from app.langgraph_planner_shadow import (
+    LangGraphPlannerShadowRunner,
+    build_disabled_planner_shadow_payload,
+)
+from app.langgraph_recovery_shadow import LangGraphRecoveryShadowRunner
 from app.recovery_runtime import RecoveryRuntime
+from app.runtime_inputs import normalize_env_var_name, resolve_runtime_inputs
 from app.shell_test_runtime import ShellTestRuntime
 from app.tool_runtime import ToolRequest, ToolResult, ToolRuntime
 
@@ -142,8 +150,16 @@ class Orchestrator:
             self.shell_executor,
             {"heartbeat_callback", "heartbeat_interval_seconds"},
         )
+        self._shell_executor_accepts_env = self._callable_accepts_kwargs(
+            self.shell_executor,
+            {"extra_env"},
+        )
+        self._active_runtime_input_env: Dict[str, str] = {}
         self._memory_runtime_db_path = settings.resolved_memory_dir / "memory_runtime.db"
         self._memory_runtime_store: MemoryRuntimeStore | None = None
+        self._qdrant_shadow_transport = QdrantShadowTransport.from_env()
+        self._langgraph_planner_shadow = LangGraphPlannerShadowRunner()
+        self._langgraph_recovery_shadow = LangGraphRecoveryShadowRunner()
         self._fix_store: FixStore | NoOpFixStore = (
             FixStore(settings.resolved_memory_dir) if settings.memory_enabled else NoOpFixStore()
         )
@@ -151,6 +167,7 @@ class Orchestrator:
             settings=self.settings,
             shell_executor=self.shell_executor,
             shell_executor_accepts_heartbeat=self._shell_executor_accepts_heartbeat,
+            shell_executor_accepts_env=self._shell_executor_accepts_env,
             touch_job_heartbeat=self._touch_job_heartbeat,
             actor_log_writer=self._actor_log_writer,
             infer_actor_from_command=self._infer_actor_from_command,
@@ -172,6 +189,8 @@ class Orchestrator:
             actor_log_writer=self._actor_log_writer,
             is_escalation_enabled=self._is_escalation_enabled,
             run_optional_escalation=self._run_optional_escalation,
+            feature_enabled=self._feature_enabled,
+            recovery_shadow_runner=self._langgraph_recovery_shadow,
         )
         self._tool_runtime = ToolRuntime(
             command_templates=self.command_templates,
@@ -181,6 +200,8 @@ class Orchestrator:
             actor_log_writer=self._actor_log_writer,
             append_actor_log=self._append_actor_log,
             build_local_evidence_fallback=self._build_local_evidence_fallback,
+            search_memory_entries=self._search_memory_entries_for_tool,
+            search_vector_memory_entries=self._search_vector_memory_entries_for_tool,
             feature_enabled=self._feature_enabled,
         )
         self._install_command_template_heartbeat()
@@ -191,6 +212,8 @@ class Orchestrator:
         try:
             setattr(self.command_templates, "heartbeat_callback", self._touch_job_heartbeat)
             setattr(self.command_templates, "heartbeat_interval_seconds", 10.0)
+            setattr(self.command_templates, "extra_env", self._active_runtime_input_env)
+            setattr(self._shell_test_runtime, "extra_env", self._active_runtime_input_env)
         except Exception:
             return
 
@@ -216,6 +239,99 @@ class Orchestrator:
             self._memory_runtime_store = MemoryRuntimeStore(self._memory_runtime_db_path)
         return self._memory_runtime_store
 
+    def _resolve_runtime_inputs_for_job(self, job: JobRecord) -> Dict[str, object]:
+        """Resolve operator-provided runtime inputs for one job."""
+
+        resolved = resolve_runtime_inputs(
+            self.store.list_runtime_inputs(),
+            repository=job.repository,
+            app_code=job.app_code,
+            job_id=job.job_id,
+        )
+        return resolved if isinstance(resolved, dict) else {"resolved": [], "pending": [], "environment": {}}
+
+    def _set_active_runtime_input_environment(self, job: JobRecord) -> None:
+        """Install job-scoped runtime input env on shell/template runners."""
+
+        resolved = self._resolve_runtime_inputs_for_job(job)
+        environment = resolved.get("environment", {}) if isinstance(resolved, dict) else {}
+        self._active_runtime_input_env = {
+            normalize_env_var_name(key): str(value)
+            for key, value in dict(environment or {}).items()
+            if str(key).strip() and str(value).strip()
+        }
+        self._install_command_template_heartbeat()
+
+    def _write_operator_inputs_artifact(
+        self,
+        job: JobRecord,
+        artifact_path: Path,
+    ) -> Dict[str, object]:
+        """Persist prompt-safe runtime input context for one job."""
+
+        resolved = self._resolve_runtime_inputs_for_job(job)
+        payload = {
+            "generated_at": utc_now_iso(),
+            "job_id": job.job_id,
+            "repository": job.repository,
+            "app_code": job.app_code,
+            "resolved_inputs": resolved.get("resolved", []) if isinstance(resolved, dict) else [],
+            "pending_inputs": resolved.get("pending", []) if isinstance(resolved, dict) else [],
+            "available_env_vars": sorted(dict(resolved.get("environment", {}) or {}).keys()) if isinstance(resolved, dict) else [],
+        }
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        artifact_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        return payload
+
+    def _search_memory_entries_for_tool(
+        self,
+        *,
+        query: str,
+        repository: str,
+        execution_repository: str,
+        app_code: str,
+        workflow_id: str,
+        limit: int,
+    ) -> List[Dict[str, Any]]:
+        """Expose scoped memory search to the shared tool runtime."""
+
+        runtime_store = self._get_memory_runtime_store()
+        runtime_store.refresh_rankings(as_of=utc_now_iso())
+        return runtime_store.search_entries(
+            query=query,
+            repository=repository,
+            execution_repository=execution_repository,
+            app_code=app_code,
+            workflow_id=workflow_id,
+            limit=limit,
+        )
+
+    def _search_vector_memory_entries_for_tool(
+        self,
+        *,
+        query: str,
+        repository: str,
+        execution_repository: str,
+        app_code: str,
+        workflow_id: str,
+        limit: int,
+    ) -> Dict[str, Any]:
+        """Expose optional vector-backed memory search for the tool runtime."""
+
+        result = self._qdrant_shadow_transport.query_memory_entries(
+            query=query,
+            repository=repository,
+            execution_repository=execution_repository,
+            app_code=app_code,
+            workflow_id=workflow_id,
+            limit=limit,
+            score_threshold=0.15,
+        )
+        return result.to_dict()
+
     def process_next_job(self) -> bool:
         """Pop one job from queue and process it.
 
@@ -237,6 +353,7 @@ class Orchestrator:
         log_path = self.settings.logs_debug_dir / job.log_file
         self._active_job_id = job_id
         self._last_heartbeat_monotonic = 0.0
+        self._set_active_runtime_input_environment(job)
         self._append_actor_log(
             log_path,
             "ORCHESTRATOR",
@@ -327,6 +444,8 @@ class Orchestrator:
         finally:
             self._active_job_id = None
             self._last_heartbeat_monotonic = 0.0
+            self._active_runtime_input_env = {}
+            self._install_command_template_heartbeat()
 
     def _process_long_job(self, job_id: str, log_path: Path) -> None:
         """Run long-track mode with fixed 3 rounds of full workflow."""
@@ -4448,6 +4567,7 @@ class Orchestrator:
         selection_path = paths.get("memory_selection", self._docs_file(repository_path, "MEMORY_SELECTION.json"))
         context_path = paths.get("memory_context", self._docs_file(repository_path, "MEMORY_CONTEXT.json"))
         trace_path = paths.get("memory_trace", self._docs_file(repository_path, "MEMORY_TRACE.json"))
+        vector_shadow_path = paths.get("vector_shadow_index", self._docs_file(repository_path, "VECTOR_SHADOW_INDEX.json"))
         if not self._feature_enabled("memory_retrieval"):
             generated_at = utc_now_iso()
             self._write_json_artifact(
@@ -4487,6 +4607,13 @@ class Orchestrator:
                     "selected_memory_ids": [],
                     "routes": {},
                 },
+            )
+            self._write_vector_shadow_index_artifact(
+                job=job,
+                output_path=vector_shadow_path,
+                runtime_entries=[],
+                enabled=False,
+                status="memory_retrieval_disabled",
             )
             return
 
@@ -4572,6 +4699,98 @@ class Orchestrator:
         selection_path.write_text(json.dumps(selection_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         context_path.write_text(json.dumps(context_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         trace_path.write_text(json.dumps(trace_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        vector_shadow_enabled = self._feature_enabled("vector_memory_shadow")
+        self._write_vector_shadow_index_artifact(
+            job=job,
+            output_path=vector_shadow_path,
+            runtime_entries=self._load_vector_shadow_runtime_entries(job=job) if vector_shadow_enabled else [],
+            enabled=vector_shadow_enabled,
+            status="ready" if vector_shadow_enabled else "disabled",
+        )
+
+    def _load_vector_shadow_runtime_entries(self, *, job: JobRecord) -> List[Dict[str, Any]]:
+        """Return canonical DB entries eligible for vector shadow indexing."""
+
+        try:
+            runtime_store = self._get_memory_runtime_store()
+            runtime_store.refresh_rankings(as_of=utc_now_iso())
+            return runtime_store.query_entries_for_retrieval(
+                repository=job.repository,
+                execution_repository=self._job_execution_repository(job),
+                app_code=job.app_code,
+                workflow_id=str(job.workflow_id or "").strip(),
+                limit=48,
+            )
+        except Exception:
+            return []
+
+    def _write_vector_shadow_index_artifact(
+        self,
+        *,
+        job: JobRecord,
+        output_path: Path,
+        runtime_entries: List[Dict[str, Any]],
+        enabled: bool,
+        status: str,
+    ) -> None:
+        """Write one Qdrant shadow manifest without affecting primary retrieval."""
+
+        generated_at = utc_now_iso()
+        execution_repository = self._job_execution_repository(job)
+        if not enabled:
+            payload = {
+                "generated_at": generated_at,
+                "job_id": job.job_id,
+                "enabled": False,
+                "provider": "qdrant",
+                "mode": "shadow_manifest_only",
+                "status": status,
+                "repository": job.repository,
+                "execution_repository": execution_repository,
+                "app_code": job.app_code,
+                "workflow_id": str(job.workflow_id or "").strip(),
+                "candidate_count": 0,
+                "candidates": [],
+                "transport": self._qdrant_shadow_transport.sync_manifest({"candidates": []}).to_dict(),
+            }
+            self._write_json_artifact(output_path, payload)
+            return
+
+        manifest = build_vector_shadow_manifest(
+            entries=runtime_entries,
+            repository=job.repository,
+            execution_repository=execution_repository,
+            app_code=job.app_code,
+            workflow_id=str(job.workflow_id or "").strip(),
+        )
+        transport_result = self._qdrant_shadow_transport.sync_manifest(manifest)
+        payload = {
+            "generated_at": generated_at,
+            "job_id": job.job_id,
+            "enabled": True,
+            "provider": "qdrant",
+            "mode": "shadow_manifest_only",
+            "status": (
+                "transported"
+                if transport_result.ok and transport_result.attempted
+                else "transport_not_configured"
+                if not transport_result.configured
+                else "embedding_not_configured"
+                if str(transport_result.detail).startswith("embedding_not_configured:")
+                else "embedding_failed"
+                if str(transport_result.detail).startswith("embedding_failed:")
+                else "transport_failed"
+                if transport_result.attempted and not transport_result.ok
+                else status if manifest["candidate_count"] else "no_db_candidates"
+            ),
+            "repository": job.repository,
+            "execution_repository": execution_repository,
+            "app_code": job.app_code,
+            "workflow_id": str(job.workflow_id or "").strip(),
+            **manifest,
+            "transport": transport_result.to_dict(),
+        }
+        self._write_json_artifact(output_path, payload)
 
     def _load_memory_retrieval_corpus_from_db(self, *, job: JobRecord) -> Optional[Dict[str, Any]]:
         """Return retrieval corpus from the canonical memory DB when available."""
@@ -5627,8 +5846,10 @@ class Orchestrator:
                 improvement_plan_path=str(paths.get("improvement_plan", self._docs_file(repository_path, "IMPROVEMENT_PLAN.md"))),
                 improvement_loop_state_path=str(paths.get("improvement_loop_state", self._docs_file(repository_path, "IMPROVEMENT_LOOP_STATE.json"))),
                 next_improvement_tasks_path=str(paths.get("next_improvement_tasks", self._docs_file(repository_path, "NEXT_IMPROVEMENT_TASKS.json"))),
+                followup_backlog_task_path=str(paths.get("followup_backlog_task", self._docs_file(repository_path, "FOLLOWUP_BACKLOG_TASK.json"))),
                 memory_selection_path=str(paths.get("memory_selection", self._docs_file(repository_path, "MEMORY_SELECTION.json"))),
                 memory_context_path=str(paths.get("memory_context", self._docs_file(repository_path, "MEMORY_CONTEXT.json"))),
+                operator_inputs_path=str(paths.get("operator_inputs", self._docs_file(repository_path, "OPERATOR_INPUTS.json"))),
                 role_context=self._build_route_runtime_context("planner"),
                 is_long_term=self._is_long_track(self._require_job(job.job_id)),
                 is_refinement_round=review_ready,
@@ -5702,8 +5923,10 @@ class Orchestrator:
             improvement_plan_path=str(paths.get("improvement_plan", self._docs_file(repository_path, "IMPROVEMENT_PLAN.md"))),
             improvement_loop_state_path=str(paths.get("improvement_loop_state", self._docs_file(repository_path, "IMPROVEMENT_LOOP_STATE.json"))),
             next_improvement_tasks_path=str(paths.get("next_improvement_tasks", self._docs_file(repository_path, "NEXT_IMPROVEMENT_TASKS.json"))),
+            followup_backlog_task_path=str(paths.get("followup_backlog_task", self._docs_file(repository_path, "FOLLOWUP_BACKLOG_TASK.json"))),
             memory_selection_path=str(paths.get("memory_selection", self._docs_file(repository_path, "MEMORY_SELECTION.json"))),
             memory_context_path=str(paths.get("memory_context", self._docs_file(repository_path, "MEMORY_CONTEXT.json"))),
+            operator_inputs_path=str(paths.get("operator_inputs", self._docs_file(repository_path, "OPERATOR_INPUTS.json"))),
             role_context=self._build_route_runtime_context("planner"),
             is_long_term=self._is_long_track(self._require_job(job.job_id)),
             is_refinement_round=review_ready,
@@ -5817,6 +6040,13 @@ class Orchestrator:
             ) + "\n",
             encoding="utf-8",
         )
+        self._write_langgraph_planner_shadow_trace(
+            repository_path=repository_path,
+            paths=paths,
+            rounds=rounds,
+            max_rounds=max_rounds,
+            planning_mode=planning_mode,
+        )
         self._append_actor_log(
             log_path,
             "PLANNER",
@@ -5831,6 +6061,42 @@ class Orchestrator:
                 "ORCHESTRATOR",
                 "PLAN quality gate not passed, but continuing by non-blocking assist policy.",
             )
+
+    def _write_langgraph_planner_shadow_trace(
+        self,
+        *,
+        repository_path: Path,
+        paths: Dict[str, Path],
+        rounds: List[Dict[str, Any]],
+        max_rounds: int,
+        planning_mode: str,
+    ) -> None:
+        """Write optional LangGraph shadow trace without changing planner outputs."""
+
+        shadow_path = paths.get(
+            "langgraph_planner_shadow",
+            self._docs_file(repository_path, "LANGGRAPH_PLANNER_SHADOW.json"),
+        )
+        if not self._feature_enabled("langgraph_planner_shadow"):
+            shadow_path.write_text(
+                json.dumps(
+                    build_disabled_planner_shadow_payload(detail="feature_flag_disabled"),
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            return
+
+        payload = self._langgraph_planner_shadow.run(
+            rounds=rounds,
+            max_rounds=max_rounds,
+            planning_mode=planning_mode,
+            plan_path=paths["plan"],
+            plan_quality_path=self._docs_file(repository_path, "PLAN_QUALITY.json"),
+        )
+        shadow_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     @staticmethod
     def _planner_graph_max_rounds() -> int:
@@ -5952,6 +6218,7 @@ class Orchestrator:
                 next_improvement_tasks_path=str(paths.get("next_improvement_tasks", self._docs_file(repository_path, "NEXT_IMPROVEMENT_TASKS.json"))),
                 memory_selection_path=str(paths.get("memory_selection", self._docs_file(repository_path, "MEMORY_SELECTION.json"))),
                 memory_context_path=str(paths.get("memory_context", self._docs_file(repository_path, "MEMORY_CONTEXT.json"))),
+                operator_inputs_path=str(paths.get("operator_inputs", self._docs_file(repository_path, "OPERATOR_INPUTS.json"))),
                 role_context=self._build_route_runtime_context("coder"),
             ),
             encoding="utf-8",
@@ -7166,6 +7433,7 @@ class Orchestrator:
                 next_improvement_tasks_path=str(paths.get("next_improvement_tasks", self._docs_file(repository_path, "NEXT_IMPROVEMENT_TASKS.json"))),
                 memory_selection_path=str(paths.get("memory_selection", self._docs_file(repository_path, "MEMORY_SELECTION.json"))),
                 memory_context_path=str(paths.get("memory_context", self._docs_file(repository_path, "MEMORY_CONTEXT.json"))),
+                operator_inputs_path=str(paths.get("operator_inputs", self._docs_file(repository_path, "OPERATOR_INPUTS.json"))),
                 role_context=self._build_route_runtime_context("coder"),
             ),
             encoding="utf-8",
@@ -8110,6 +8378,9 @@ class Orchestrator:
     ) -> Dict[str, str]:
         """Provide a consistent variable set for all AI templates."""
 
+        operator_inputs_path = paths.get("operator_inputs", self._docs_file(self._job_workspace_path(job), "OPERATOR_INPUTS.json"))
+        self._write_operator_inputs_artifact(job, operator_inputs_path)
+
         return {
             "repository": job.repository,
             "execution_repository": self._job_execution_repository(job),
@@ -8149,6 +8420,7 @@ class Orchestrator:
             "memory_context_path": str(paths.get("memory_context", Path("_docs/MEMORY_CONTEXT.json"))),
             "memory_feedback_path": str(paths.get("memory_feedback", Path("_docs/MEMORY_FEEDBACK.json"))),
             "memory_rankings_path": str(paths.get("memory_rankings", Path("_docs/MEMORY_RANKINGS.json"))),
+            "operator_inputs_path": str(operator_inputs_path),
             "strategy_shadow_report_path": str(paths.get("strategy_shadow_report", Path("_docs/STRATEGY_SHADOW_REPORT.json"))),
             "stage_contracts_path": str(paths.get("stage_contracts", Path("_docs/STAGE_CONTRACTS.md"))),
             "stage_contracts_json_path": str(paths.get("stage_contracts_json", Path("_docs/STAGE_CONTRACTS.json"))),

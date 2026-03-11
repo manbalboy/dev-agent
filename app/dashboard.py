@@ -23,7 +23,17 @@ from app.config import AppSettings
 from app.dependencies import get_settings, get_store
 from app.feature_flags import feature_flags_payload, read_feature_flags, write_feature_flags
 from app.memory import MemoryRuntimeStore
-from app.models import JobRecord, JobStage, JobStatus, utc_now_iso
+from app.models import JobRecord, JobStage, JobStatus, RuntimeInputRecord, utc_now_iso
+from app.runtime_inputs import (
+    mask_runtime_input_value,
+    normalize_env_var_name,
+    normalize_runtime_input_requested_by,
+    normalize_runtime_input_scope,
+    normalize_runtime_input_status,
+    normalize_runtime_input_value_type,
+    resolve_runtime_inputs,
+    suggest_runtime_input_drafts,
+)
 from app.store import JobStore
 from app.workflow_design import (
     default_workflow_template,
@@ -47,6 +57,7 @@ from app.workflow_resolution import (
     resolve_workflow_selection,
     write_registered_apps as _shared_write_registered_apps,
 )
+from app.tool_runtime import ToolRequest, ToolRuntime, ToolResult
 
 
 router = APIRouter(tags=["dashboard"])
@@ -188,6 +199,47 @@ class MemoryOverrideRequest(BaseModel):
     note: str = Field(default="", max_length=300)
 
 
+class BacklogCandidateActionRequest(BaseModel):
+    """Payload for one backlog candidate state transition."""
+
+    action: str = Field(min_length=1, max_length=20)
+    note: str = Field(default="", max_length=300)
+
+
+class RuntimeInputRequestPayload(BaseModel):
+    """Payload for one operator-managed runtime input request."""
+
+    repository: str = Field(default="", max_length=200)
+    app_code: str = Field(default="", max_length=32)
+    job_id: str = Field(default="", max_length=128)
+    scope: str = Field(min_length=1, max_length=20)
+    key: str = Field(min_length=1, max_length=80)
+    label: str = Field(default="", max_length=120)
+    description: str = Field(default="", max_length=500)
+    value_type: str = Field(default="text", max_length=20)
+    env_var_name: str = Field(default="", max_length=80)
+    sensitive: bool = Field(default=False)
+    placeholder: str = Field(default="", max_length=200)
+    note: str = Field(default="", max_length=300)
+    requested_by: str = Field(default="operator", max_length=40)
+
+
+class RuntimeInputDraftRequestPayload(BaseModel):
+    """Payload for suggesting one runtime input request draft."""
+
+    repository: str = Field(default="", max_length=200)
+    app_code: str = Field(default="", max_length=32)
+    job_id: str = Field(default="", max_length=128)
+    context_text: str = Field(default="", max_length=2000)
+
+
+class RuntimeInputProvidePayload(BaseModel):
+    """Payload for providing one runtime input value later."""
+
+    value: str = Field(default="", max_length=8000)
+    note: str = Field(default="", max_length=300)
+
+
 def _read_dashboard_json(path: Path) -> Dict[str, Any]:
     """Read one dashboard-side JSON artifact safely."""
 
@@ -271,6 +323,27 @@ def _read_job_memory_trace(job: JobRecord, settings: AppSettings) -> Dict[str, A
 
     workspace_path = _job_workspace_path(job, settings)
     return _read_dashboard_json(workspace_path / "_docs" / "MEMORY_TRACE.json")
+
+
+def _read_job_assistant_diagnosis_trace(job: JobRecord, settings: AppSettings) -> Dict[str, Any]:
+    """Read one job's latest assistant diagnosis trace artifact."""
+
+    workspace_path = _job_workspace_path(job, settings)
+    paths = build_workflow_artifact_paths(workspace_path)
+    trace_payload = _read_dashboard_json(paths["assistant_diagnosis_trace"])
+    if not isinstance(trace_payload, dict):
+        return {}
+
+    tool_runs = trace_payload.get("tool_runs", [])
+    return {
+        "enabled": bool(trace_payload.get("enabled")),
+        "generated_at": str(trace_payload.get("generated_at", "")).strip(),
+        "assistant_scope": str(trace_payload.get("assistant_scope", "")).strip(),
+        "question": str(trace_payload.get("question", "")).strip(),
+        "trace_path": str(paths["assistant_diagnosis_trace"]),
+        "combined_context_length": int(trace_payload.get("combined_context_length", 0) or 0),
+        "tool_runs": tool_runs if isinstance(tool_runs, list) else [],
+    }
 
 
 def _list_dashboard_jobs(store: JobStore, settings: AppSettings) -> List[Dict[str, Any]]:
@@ -524,6 +597,238 @@ def _get_memory_runtime_store(settings: AppSettings) -> MemoryRuntimeStore:
     return MemoryRuntimeStore(_memory_runtime_db_path(settings))
 
 
+def _normalized_job_kind(job: JobRecord | Dict[str, Any]) -> str:
+    """Return one normalized job kind for UI/operator displays."""
+
+    raw_value = ""
+    if isinstance(job, JobRecord):
+        raw_value = str(job.job_kind or "").strip().lower()
+    elif isinstance(job, dict):
+        raw_value = str(job.get("job_kind", "")).strip().lower()
+    return raw_value or "issue"
+
+
+def _job_kind_label(job_kind: str) -> str:
+    """Return one short localized label for a job kind."""
+
+    normalized = str(job_kind or "").strip().lower()
+    if normalized == "followup_backlog":
+        return "Follow-up backlog"
+    return "Issue-backed"
+
+
+def _job_link_summary(job: JobRecord) -> Dict[str, Any]:
+    """Return one small job summary payload for lineage/operator views."""
+
+    normalized_kind = _normalized_job_kind(job)
+    return {
+        "job_id": job.job_id,
+        "job_kind": normalized_kind,
+        "job_kind_label": _job_kind_label(normalized_kind),
+        "status": job.status,
+        "stage": job.stage,
+        "issue_number": job.issue_number,
+        "issue_title": job.issue_title,
+        "app_code": job.app_code,
+        "workflow_id": job.workflow_id,
+        "created_at": job.created_at,
+        "updated_at": job.updated_at,
+        "detail_url": f"/jobs/{job.job_id}",
+        "log_file": job.log_file,
+        "backlog_candidate_id": str(job.backlog_candidate_id or "").strip(),
+        "parent_job_id": str(job.parent_job_id or "").strip(),
+    }
+
+
+def _matching_followup_artifact(job: JobRecord, settings: AppSettings) -> Dict[str, Any]:
+    """Return follow-up artifact payload only when it belongs to the current lineage."""
+
+    workspace_path = _job_workspace_path(job, settings)
+    artifact_payload = _read_dashboard_json(build_workflow_artifact_paths(workspace_path)["followup_backlog_task"])
+    if not artifact_payload:
+        return {}
+
+    queued_job_id = str(artifact_payload.get("queued_job_id", "")).strip()
+    candidate_id = str(artifact_payload.get("candidate_id", "")).strip()
+    source_job_id = str(artifact_payload.get("source_job_id", "")).strip()
+    normalized_candidate_id = str(job.backlog_candidate_id or "").strip()
+    if not any(
+        [
+            queued_job_id and queued_job_id == job.job_id,
+            normalized_candidate_id and candidate_id == normalized_candidate_id,
+            source_job_id and source_job_id == job.job_id,
+            str(job.parent_job_id or "").strip() and source_job_id == str(job.parent_job_id or "").strip(),
+        ]
+    ):
+        return {}
+
+    return {
+        "candidate_id": candidate_id,
+        "queued_job_id": queued_job_id,
+        "source_job_id": source_job_id,
+        "recommended_node_type": str(artifact_payload.get("recommended_node_type", "")).strip(),
+        "action": str(artifact_payload.get("action", "")).strip(),
+        "job_contract": artifact_payload.get("job_contract", {}) if isinstance(artifact_payload.get("job_contract"), dict) else {},
+        "generated_at": str(artifact_payload.get("generated_at", "")).strip(),
+    }
+
+
+def _build_job_lineage(
+    job: JobRecord,
+    *,
+    store: JobStore,
+    settings: AppSettings,
+) -> Dict[str, Any]:
+    """Collect parent/child/backlog lineage data for one job detail page."""
+
+    normalized_kind = _normalized_job_kind(job)
+    parent_job_id = str(job.parent_job_id or "").strip()
+    backlog_candidate_id = str(job.backlog_candidate_id or "").strip()
+
+    parent_job = store.get_job(parent_job_id) if parent_job_id else None
+    child_jobs = [
+        _job_link_summary(item)
+        for item in store.list_jobs()
+        if str(item.parent_job_id or "").strip() == job.job_id
+    ]
+    child_jobs.sort(key=lambda item: item.get("created_at", ""), reverse=True)
+
+    backlog_candidate = None
+    if backlog_candidate_id:
+        backlog_candidate = _get_memory_runtime_store(settings).get_backlog_candidate(backlog_candidate_id)
+
+    return {
+        "job_kind": normalized_kind,
+        "job_kind_label": _job_kind_label(normalized_kind),
+        "is_followup": normalized_kind == "followup_backlog",
+        "issue_backed": bool(int(job.issue_number or 0)),
+        "parent_job": _job_link_summary(parent_job) if parent_job is not None else None,
+        "parent_job_id": parent_job_id,
+        "child_jobs": child_jobs[:12],
+        "child_count": len(child_jobs),
+        "backlog_candidate_id": backlog_candidate_id,
+        "backlog_candidate": backlog_candidate,
+        "followup_artifact": _matching_followup_artifact(job, settings),
+    }
+
+
+def _build_job_log_summary(
+    job: JobRecord,
+    *,
+    settings: AppSettings,
+    events: List[Dict[str, str]],
+) -> Dict[str, Any]:
+    """Return operator-friendly summary for debug/user log channels."""
+
+    debug_log_path = _resolve_channel_log_path(settings, job.log_file, channel="debug")
+    user_log_path = _resolve_channel_log_path(settings, job.log_file, channel="user")
+    kind_counts: Counter[str] = Counter()
+    actor_counts: Counter[str] = Counter()
+    error_count = 0
+    warn_count = 0
+    nonzero_done_count = 0
+    latest_error: Dict[str, str] | None = None
+    latest_command: Dict[str, str] | None = None
+
+    for event in events:
+        kind = str(event.get("kind", "")).strip().lower() or "info"
+        kind_counts[kind] += 1
+
+        actor = ""
+        if kind == "run":
+            actor = str(event.get("receiver", "")).strip().lower()
+            latest_command = {
+                "timestamp": str(event.get("timestamp", "")).strip(),
+                "actor": actor or "shell",
+                "message": str(event.get("message", "")).strip(),
+            }
+        elif kind in {"stdout", "stderr", "done"}:
+            actor = str(event.get("speaker", "")).strip().lower()
+        elif str(event.get("speaker", "")).strip().lower() not in {"agenthub", "dashboard"}:
+            actor = str(event.get("speaker", "")).strip().lower()
+
+        if actor:
+            actor_counts[actor] += 1
+
+        if kind == "stderr":
+            warn_count += 1
+            error_count += 1
+            latest_error = {
+                "timestamp": str(event.get("timestamp", "")).strip(),
+                "actor": actor or "shell",
+                "message": str(event.get("message", "")).strip(),
+                "kind": kind,
+            }
+            continue
+
+        if kind == "done":
+            matched = re.search(r"exit_code=(\d+)", str(event.get("message", "")))
+            if matched and int(matched.group(1)) != 0:
+                error_count += 1
+                nonzero_done_count += 1
+                latest_error = {
+                    "timestamp": str(event.get("timestamp", "")).strip(),
+                    "actor": actor or "shell",
+                    "message": str(event.get("message", "")).strip(),
+                    "kind": kind,
+                }
+
+    top_actors = [
+        {"name": actor, "count": count}
+        for actor, count in actor_counts.most_common(6)
+    ]
+    return {
+        "event_count": len(events),
+        "kind_counts": dict(kind_counts),
+        "actor_counts": dict(actor_counts),
+        "top_actors": top_actors,
+        "error_count": error_count,
+        "warn_count": warn_count,
+        "nonzero_done_count": nonzero_done_count,
+        "latest_error": latest_error or {},
+        "latest_command": latest_command or {},
+        "channels": {
+            "debug": {
+                "exists": debug_log_path.exists(),
+                "url": f"/logs/{job.log_file}?channel=debug",
+            },
+            "user": {
+                "exists": user_log_path.exists(),
+                "url": f"/logs/{job.log_file}?channel=user",
+            },
+        },
+    }
+
+
+def _build_job_operator_inputs(
+    job: JobRecord,
+    *,
+    store: JobStore,
+    settings: AppSettings,
+) -> Dict[str, Any]:
+    """Return read-only operator runtime input state for one job detail page."""
+
+    workspace_path = _job_workspace_path(job, settings)
+    paths = build_workflow_artifact_paths(workspace_path)
+    resolved = resolve_runtime_inputs(
+        store.list_runtime_inputs(),
+        repository=job.repository,
+        app_code=job.app_code,
+        job_id=job.job_id,
+    )
+    resolved_inputs = resolved.get("resolved", []) if isinstance(resolved, dict) else []
+    pending_inputs = resolved.get("pending", []) if isinstance(resolved, dict) else []
+    environment = dict(resolved.get("environment", {}) or {}) if isinstance(resolved, dict) else {}
+    return {
+        "artifact_path": str(paths["operator_inputs"]),
+        "available_count": len(resolved_inputs),
+        "pending_count": len(pending_inputs),
+        "available_env_vars": sorted(environment.keys()),
+        "resolved_inputs": resolved_inputs,
+        "pending_inputs": pending_inputs,
+    }
+
+
 def _normalize_memory_state(value: str) -> str:
     """Normalize one optional memory state filter/override."""
 
@@ -542,6 +847,46 @@ def _normalize_backlog_priority(value: str) -> str:
     return ""
 
 
+def _normalize_backlog_action(value: str) -> str:
+    """Normalize one operator action for backlog candidates."""
+
+    normalized = str(value or "").strip().lower()
+    if normalized in {"approve", "queue", "dismiss"}:
+        return normalized
+    return ""
+
+
+def _serialize_runtime_input(record: RuntimeInputRecord) -> Dict[str, Any]:
+    """Return one operator-safe runtime input payload for dashboard APIs."""
+
+    sensitive = bool(record.sensitive or normalize_runtime_input_value_type(record.value_type) == "secret")
+    normalized_value = str(record.value or "")
+    normalized_status = normalize_runtime_input_status(record.status) or "requested"
+    return {
+        "request_id": record.request_id,
+        "repository": str(record.repository or "").strip(),
+        "app_code": str(record.app_code or "").strip(),
+        "job_id": str(record.job_id or "").strip(),
+        "scope": normalize_runtime_input_scope(record.scope) or "repository",
+        "key": str(record.key or "").strip(),
+        "label": str(record.label or "").strip(),
+        "description": str(record.description or "").strip(),
+        "value_type": normalize_runtime_input_value_type(record.value_type) or "text",
+        "env_var_name": normalize_env_var_name(record.env_var_name, fallback_key=record.key),
+        "sensitive": sensitive,
+        "status": normalized_status,
+        "has_value": bool(normalized_value),
+        "display_value": mask_runtime_input_value(normalized_value, sensitive=sensitive),
+        "value": normalized_value if normalized_value and not sensitive else "",
+        "placeholder": str(record.placeholder or "").strip(),
+        "note": str(record.note or "").strip(),
+        "requested_by": str(record.requested_by or "operator").strip(),
+        "requested_at": str(record.requested_at or "").strip(),
+        "provided_at": str(record.provided_at or "").strip(),
+        "updated_at": str(record.updated_at or "").strip(),
+    }
+
+
 def _build_memory_detail_payload(
     runtime_store: MemoryRuntimeStore,
     *,
@@ -558,6 +903,89 @@ def _build_memory_detail_payload(
         "entry": entry,
         "evidence": evidence_rows[:20],
         "feedback": list(reversed(feedback_rows[-20:])),
+    }
+
+
+def _build_admin_assistant_diagnosis_metrics(
+    store: JobStore,
+    settings: AppSettings,
+) -> Dict[str, Any]:
+    """Aggregate recent assistant diagnosis traces for operator comparison."""
+
+    scope_counter: Counter[str] = Counter()
+    tool_counter: Counter[str] = Counter()
+    failed_tool_counter: Counter[str] = Counter()
+    generated_ats: List[str] = []
+    recent_traces: List[Dict[str, Any]] = []
+
+    jobs = sorted(
+        store.list_jobs(),
+        key=lambda item: item.updated_at or item.created_at or "",
+        reverse=True,
+    )
+    for job in jobs:
+        trace_payload = _read_job_assistant_diagnosis_trace(job, settings)
+        tool_runs = trace_payload.get("tool_runs", [])
+        if not trace_payload or (not trace_payload.get("enabled") and not tool_runs):
+            continue
+
+        assistant_scope = str(trace_payload.get("assistant_scope", "")).strip() or "unknown"
+        generated_at = str(trace_payload.get("generated_at", "")).strip()
+        generated_ats.append(generated_at)
+        scope_counter[assistant_scope] += 1
+
+        failed_tools: List[str] = []
+        ordered_tools: List[str] = []
+        for item in tool_runs if isinstance(tool_runs, list) else []:
+            if not isinstance(item, dict):
+                continue
+            tool_name = str(item.get("tool", "")).strip() or "unknown"
+            ordered_tools.append(tool_name)
+            tool_counter[tool_name] += 1
+            if not bool(item.get("ok")):
+                failed_tool_counter[tool_name] += 1
+                failed_tools.append(tool_name)
+
+        recent_traces.append(
+            {
+                "job_id": job.job_id,
+                "detail_url": f"/jobs/{job.job_id}",
+                "status": job.status,
+                "stage": job.stage,
+                "app_code": job.app_code,
+                "assistant_scope": assistant_scope,
+                "question": str(trace_payload.get("question", "")).strip(),
+                "generated_at": generated_at,
+                "trace_path": str(trace_payload.get("trace_path", "")).strip(),
+                "combined_context_length": int(trace_payload.get("combined_context_length", 0) or 0),
+                "tool_run_count": len(tool_runs) if isinstance(tool_runs, list) else 0,
+                "failed_tool_count": len(failed_tools),
+                "tools": ordered_tools,
+                "failed_tools": failed_tools,
+                "tool_runs": [
+                    {
+                        "tool": str(item.get("tool", "")).strip() or "unknown",
+                        "query": str(item.get("query", "")).strip(),
+                        "ok": bool(item.get("ok")),
+                        "mode": str(item.get("mode", "")).strip(),
+                        "context_path": str(item.get("context_path", "")).strip(),
+                        "result_path": str(item.get("result_path", "")).strip(),
+                        "error": str(item.get("error", "")).strip(),
+                    }
+                    for item in tool_runs
+                    if isinstance(item, dict)
+                ],
+            }
+        )
+
+    return {
+        "active": bool(recent_traces),
+        "trace_count": len(recent_traces),
+        "latest_generated_at": _latest_non_empty(generated_ats),
+        "scope_counts": _top_counter_items(scope_counter, limit=8),
+        "tool_counts": _top_counter_items(tool_counter, limit=8),
+        "failed_tool_counts": _top_counter_items(failed_tool_counter, limit=8),
+        "recent_traces": recent_traces[:8],
     }
 
 
@@ -796,7 +1224,20 @@ def _build_admin_metrics(store: JobStore, settings: AppSettings) -> Dict[str, An
     retrieval_enabled = bool(feature_flags.get("memory_retrieval"))
     scoring_enabled = bool(feature_flags.get("memory_scoring"))
     shadow_enabled = bool(feature_flags.get("strategy_shadow"))
+    assistant_diagnosis = _build_admin_assistant_diagnosis_metrics(store, settings)
+    assistant_diagnosis_loop_enabled = bool(feature_flags.get("assistant_diagnosis_loop"))
     mcp_tools_shadow_enabled = bool(feature_flags.get("mcp_tools_shadow"))
+    vector_memory_shadow_enabled = bool(feature_flags.get("vector_memory_shadow"))
+    vector_memory_retrieval_enabled = bool(feature_flags.get("vector_memory_retrieval"))
+    langgraph_planner_shadow_enabled = bool(feature_flags.get("langgraph_planner_shadow"))
+    langgraph_recovery_shadow_enabled = bool(feature_flags.get("langgraph_recovery_shadow"))
+    runtime_input_records = store.list_runtime_inputs()
+    runtime_input_requested_count = sum(
+        1 for item in runtime_input_records if (normalize_runtime_input_status(item.status) or "requested") == "requested"
+    )
+    runtime_input_provided_count = sum(
+        1 for item in runtime_input_records if (normalize_runtime_input_status(item.status) or "requested") == "provided"
+    )
     capabilities = [
         {
             "id": "workflow_control_nodes",
@@ -835,10 +1276,46 @@ def _build_admin_metrics(store: JobStore, settings: AppSettings) -> Dict[str, An
             "detail": f"실제 전략은 유지한 채 memory-aware shadow strategy를 비교 기록합니다. active workspace {memory_totals['workspaces_with_strategy_shadow']}",
         },
         {
+            "id": "assistant_diagnosis_loop",
+            "label": "Assistant Diagnosis Loop",
+            "enabled": assistant_diagnosis_loop_enabled,
+            "detail": "assistant log-analysis 전에 log_lookup/repo_search/memory_search를 순차 호출해 진단 trace를 기록합니다.",
+        },
+        {
             "id": "mcp_tools_shadow",
             "label": "MCP Tool Shadow",
             "enabled": mcp_tools_shadow_enabled,
             "detail": "기존 tool 실행 결과는 유지한 채 MCP shadow client를 병행 호출해 trace만 기록합니다.",
+        },
+        {
+            "id": "vector_memory_shadow",
+            "label": "Vector Memory Shadow",
+            "enabled": vector_memory_shadow_enabled,
+            "detail": "SQLite memory DB는 그대로 유지한 채 Qdrant용 vector candidate payload를 shadow artifact로만 기록합니다.",
+        },
+        {
+            "id": "vector_memory_retrieval",
+            "label": "Vector Memory Retrieval",
+            "enabled": vector_memory_retrieval_enabled,
+            "detail": "memory_search 한정으로 vector retrieval을 opt-in 실험하고, 실패 시 SQLite 검색으로 자동 fallback 합니다.",
+        },
+        {
+            "id": "langgraph_planner_shadow",
+            "label": "LangGraph Planner Shadow",
+            "enabled": langgraph_planner_shadow_enabled,
+            "detail": "planner primary loop는 유지한 채 LangGraph subgraph shadow trace를 `_docs/LANGGRAPH_PLANNER_SHADOW.json`에 기록합니다.",
+        },
+        {
+            "id": "langgraph_recovery_shadow",
+            "label": "LangGraph Recovery Shadow",
+            "enabled": langgraph_recovery_shadow_enabled,
+            "detail": "recovery primary policy는 유지한 채 LangGraph subgraph shadow trace를 `_docs/LANGGRAPH_RECOVERY_SHADOW.json`에 기록합니다.",
+        },
+        {
+            "id": "operator_runtime_inputs",
+            "label": "Operator Runtime Inputs",
+            "enabled": True,
+            "detail": f"운영자가 나중에 API key/tenant id 같은 런타임 입력을 등록하고 제공할 수 있으며, 초안 추천 뒤 승인 등록도 가능합니다. requested {runtime_input_requested_count}, provided {runtime_input_provided_count}",
         },
     ]
     phase_status = [
@@ -908,6 +1385,14 @@ def _build_admin_metrics(store: JobStore, settings: AppSettings) -> Dict[str, An
             "ranking_state_counts": _top_counter_items(ranking_state_counter, limit=8),
             "backlog_state_counts": _top_counter_items(backlog_state_counter, limit=8),
         },
+        "runtime_inputs": {
+            "total": len(runtime_input_records),
+            "requested": runtime_input_requested_count,
+            "provided": runtime_input_provided_count,
+            "latest_updated_at": _latest_non_empty(
+                [item.updated_at or item.provided_at or item.requested_at for item in runtime_input_records]
+            ),
+        },
         "feature_flags": feature_flags,
         "capabilities": capabilities,
         "phase_status": phase_status,
@@ -930,6 +1415,7 @@ def _build_admin_metrics(store: JobStore, settings: AppSettings) -> Dict[str, An
             "divergence_count": shadow_divergence_count,
             "active": memory_totals["workspaces_with_strategy_shadow"] > 0,
         },
+        "assistant_diagnosis": assistant_diagnosis,
     }
 
 
@@ -1115,6 +1601,83 @@ def admin_memory_backlog_api(
     )
 
 
+@router.post("/api/admin/memory/backlog/{candidate_id:path}/action", response_class=JSONResponse)
+def admin_memory_backlog_action_api(
+    candidate_id: str,
+    payload: BacklogCandidateActionRequest,
+    store: JobStore = Depends(get_store),
+    settings: AppSettings = Depends(get_settings),
+) -> JSONResponse:
+    """Apply one small operator action to a backlog candidate."""
+
+    action = _normalize_backlog_action(payload.action)
+    if not action:
+        raise HTTPException(status_code=400, detail=f"지원하지 않는 backlog action 입니다: {payload.action}")
+
+    runtime_store = _get_memory_runtime_store(settings)
+    candidate = runtime_store.get_backlog_candidate(candidate_id)
+    if candidate is None:
+        raise HTTPException(status_code=404, detail=f"candidate_id를 찾을 수 없습니다: {candidate_id}")
+
+    note = str(payload.note or "").strip()
+    if action == "approve":
+        updated = runtime_store.set_backlog_candidate_state(
+            candidate_id,
+            state="approved",
+            payload_updates={
+                "approved_at": utc_now_iso(),
+                "operator_note": note,
+                "last_action": "approve",
+            },
+        )
+        assert updated is not None
+        return JSONResponse({"ok": True, "action": action, "candidate": updated})
+
+    if action == "dismiss":
+        updated = runtime_store.set_backlog_candidate_state(
+            candidate_id,
+            state="dismissed",
+            payload_updates={
+                "dismissed_at": utc_now_iso(),
+                "operator_note": note,
+                "last_action": "dismiss",
+            },
+        )
+        assert updated is not None
+        return JSONResponse({"ok": True, "action": action, "candidate": updated})
+
+    if str(candidate.get("state", "")).strip().lower() == "queued":
+        queued_job_id = str((candidate.get("payload", {}) or {}).get("queued_job_id", "")).strip()
+        return JSONResponse(
+            {
+                "ok": True,
+                "action": action,
+                "already_queued": True,
+                "candidate": candidate,
+                "queued_job_id": queued_job_id,
+            }
+        )
+
+    queued_job, artifact_path = _queue_followup_job_from_backlog_candidate(
+        candidate=candidate,
+        runtime_store=runtime_store,
+        store=store,
+        settings=settings,
+        note=note,
+    )
+    updated = runtime_store.get_backlog_candidate(candidate_id)
+    assert updated is not None
+    return JSONResponse(
+        {
+            "ok": True,
+            "action": action,
+            "candidate": updated,
+            "queued_job_id": queued_job.job_id,
+            "artifact_path": str(artifact_path),
+        }
+    )
+
+
 @router.get("/api/admin/memory/{memory_id:path}", response_class=JSONResponse)
 def admin_memory_detail_api(
     memory_id: str,
@@ -1155,6 +1718,219 @@ def admin_memory_override_api(
             "detail": detail,
         }
     )
+
+
+@router.get("/api/admin/runtime-inputs", response_class=JSONResponse)
+def admin_runtime_inputs_api(
+    q: str = Query(default="", max_length=200),
+    status: str = Query(default="", max_length=20),
+    scope: str = Query(default="", max_length=20),
+    repository: str = Query(default="", max_length=200),
+    app_code: str = Query(default="", max_length=32),
+    job_id: str = Query(default="", max_length=128),
+    limit: int = Query(default=20, ge=1, le=100),
+    store: JobStore = Depends(get_store),
+) -> JSONResponse:
+    """List operator-managed runtime input requests/values for dashboard admin."""
+
+    normalized_status = normalize_runtime_input_status(status)
+    if status.strip() and not normalized_status:
+        raise HTTPException(status_code=400, detail=f"지원하지 않는 runtime input status 입니다: {status}")
+    normalized_scope = normalize_runtime_input_scope(scope)
+    if scope.strip() and not normalized_scope:
+        raise HTTPException(status_code=400, detail=f"지원하지 않는 runtime input scope 입니다: {scope}")
+
+    normalized_query = q.strip().lower()
+    items = []
+    for record in store.list_runtime_inputs():
+        payload = _serialize_runtime_input(record)
+        if normalized_status and payload["status"] != normalized_status:
+            continue
+        if normalized_scope and payload["scope"] != normalized_scope:
+            continue
+        if repository.strip() and payload["repository"] != repository.strip():
+            continue
+        if app_code.strip() and payload["app_code"] != app_code.strip():
+            continue
+        if job_id.strip() and payload["job_id"] != job_id.strip():
+            continue
+        if normalized_query:
+            haystack = " ".join(
+                [
+                    str(payload.get("key", "")),
+                    str(payload.get("label", "")),
+                    str(payload.get("description", "")),
+                    str(payload.get("repository", "")),
+                    str(payload.get("app_code", "")),
+                    str(payload.get("job_id", "")),
+                    str(payload.get("env_var_name", "")),
+                    str(payload.get("note", "")),
+                    str(payload.get("value", "")),
+                ]
+            ).lower()
+            if normalized_query not in haystack:
+                continue
+        items.append(payload)
+
+    items.sort(
+        key=lambda item: (
+            str(item.get("updated_at", "")),
+            str(item.get("request_id", "")),
+        ),
+        reverse=True,
+    )
+    return JSONResponse(
+        {
+            "items": items[:limit],
+            "count": len(items),
+            "filters": {
+                "q": q.strip(),
+                "status": normalized_status,
+                "scope": normalized_scope,
+                "repository": repository.strip(),
+                "app_code": app_code.strip(),
+                "job_id": job_id.strip(),
+                "limit": limit,
+            },
+        }
+    )
+
+
+@router.post("/api/admin/runtime-inputs/draft", response_class=JSONResponse)
+def admin_runtime_inputs_draft_api(
+    payload: RuntimeInputDraftRequestPayload,
+    store: JobStore = Depends(get_store),
+    settings: AppSettings = Depends(get_settings),
+) -> JSONResponse:
+    """Suggest operator-approval runtime input drafts from job/context text."""
+
+    job = None
+    normalized_job_id = str(payload.job_id or "").strip()
+    if normalized_job_id:
+        job = store.get_job(normalized_job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail=f"job_id를 찾을 수 없습니다: {normalized_job_id}")
+
+    normalized_repository = str(payload.repository or "").strip() or (job.repository if job is not None else settings.allowed_repository)
+    normalized_app_code = str(payload.app_code or "").strip() or (job.app_code if job is not None else "")
+    context_parts = [
+        str(payload.context_text or "").strip(),
+        str(job.issue_title or "").strip() if job is not None else "",
+        normalized_app_code,
+        normalized_repository,
+    ]
+    context_text = "\n".join(part for part in context_parts if part)
+    suggestions = suggest_runtime_input_drafts(
+        context_text=context_text,
+        repository=normalized_repository,
+        app_code=normalized_app_code,
+        job_id=normalized_job_id,
+    )
+    return JSONResponse(
+        {
+            "items": suggestions,
+            "count": len(suggestions),
+            "context_text": context_text,
+            "repository": normalized_repository,
+            "app_code": normalized_app_code,
+            "job_id": normalized_job_id,
+        }
+    )
+
+
+@router.post("/api/admin/runtime-inputs/request", response_class=JSONResponse)
+def admin_runtime_inputs_request_api(
+    payload: RuntimeInputRequestPayload,
+    store: JobStore = Depends(get_store),
+    settings: AppSettings = Depends(get_settings),
+) -> JSONResponse:
+    """Create one small operator runtime input request."""
+
+    normalized_scope = normalize_runtime_input_scope(payload.scope)
+    if not normalized_scope:
+        raise HTTPException(status_code=400, detail=f"지원하지 않는 runtime input scope 입니다: {payload.scope}")
+    normalized_value_type = normalize_runtime_input_value_type(payload.value_type)
+    if not normalized_value_type:
+        raise HTTPException(status_code=400, detail=f"지원하지 않는 runtime input value_type 입니다: {payload.value_type}")
+    normalized_requested_by = normalize_runtime_input_requested_by(payload.requested_by)
+
+    job = None
+    normalized_job_id = str(payload.job_id or "").strip()
+    if normalized_job_id:
+        job = store.get_job(normalized_job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail=f"job_id를 찾을 수 없습니다: {normalized_job_id}")
+
+    normalized_repository = str(payload.repository or "").strip() or (job.repository if job is not None else settings.allowed_repository)
+    normalized_app_code = str(payload.app_code or "").strip() or (job.app_code if job is not None else "")
+    if normalized_scope == "app" and not normalized_app_code:
+        raise HTTPException(status_code=400, detail="app scope는 app_code가 필요합니다.")
+    if normalized_scope == "job" and not normalized_job_id:
+        raise HTTPException(status_code=400, detail="job scope는 job_id가 필요합니다.")
+
+    request_id = f"runtime-input-{uuid.uuid4().hex[:10]}"
+    now = utc_now_iso()
+    record = RuntimeInputRecord(
+        request_id=request_id,
+        repository=normalized_repository,
+        app_code=normalized_app_code,
+        job_id=normalized_job_id,
+        scope=normalized_scope,
+        key=str(payload.key or "").strip(),
+        label=str(payload.label or "").strip() or str(payload.key or "").strip(),
+        description=str(payload.description or "").strip(),
+        value_type=normalized_value_type,
+        env_var_name=normalize_env_var_name(payload.env_var_name, fallback_key=payload.key),
+        sensitive=bool(payload.sensitive or normalized_value_type == "secret"),
+        status="requested",
+        value="",
+        placeholder=str(payload.placeholder or "").strip(),
+        note=str(payload.note or "").strip(),
+        requested_by=normalized_requested_by,
+        requested_at=now,
+        provided_at=None,
+        updated_at=now,
+    )
+    store.upsert_runtime_input(record)
+    return JSONResponse({"saved": True, "item": _serialize_runtime_input(record)})
+
+
+@router.post("/api/admin/runtime-inputs/{request_id:path}/provide", response_class=JSONResponse)
+def admin_runtime_inputs_provide_api(
+    request_id: str,
+    payload: RuntimeInputProvidePayload,
+    store: JobStore = Depends(get_store),
+) -> JSONResponse:
+    """Provide or clear one runtime input value."""
+
+    current = store.get_runtime_input(request_id)
+    if current is None:
+        raise HTTPException(status_code=404, detail=f"request_id를 찾을 수 없습니다: {request_id}")
+    normalized_value = str(payload.value or "")
+    now = utc_now_iso()
+    updated = RuntimeInputRecord(
+        request_id=current.request_id,
+        repository=current.repository,
+        app_code=current.app_code,
+        job_id=current.job_id,
+        scope=current.scope,
+        key=current.key,
+        label=current.label,
+        description=current.description,
+        value_type=current.value_type,
+        env_var_name=normalize_env_var_name(current.env_var_name, fallback_key=current.key),
+        sensitive=bool(current.sensitive),
+        status="provided" if normalized_value.strip() else "requested",
+        value=normalized_value,
+        placeholder=current.placeholder,
+        note=str(payload.note or "").strip(),
+        requested_by=current.requested_by,
+        requested_at=current.requested_at,
+        provided_at=now if normalized_value.strip() else None,
+        updated_at=now,
+    )
+    store.upsert_runtime_input(updated)
+    return JSONResponse({"saved": True, "item": _serialize_runtime_input(updated)})
 
 
 @router.get("/api/jobs/options", response_class=JSONResponse)
@@ -1760,11 +2536,18 @@ def assistant_chat(
 
     focus_job_id = payload.job_id.strip()
     focus_context = ""
+    diagnosis_trace: Dict[str, Any] = {"enabled": False, "tool_runs": []}
     if focus_job_id:
         job = store.get_job(focus_job_id)
         if job is None:
             raise HTTPException(status_code=404, detail=f"job_id를 찾을 수 없습니다: {focus_job_id}")
         focus_context = _build_focus_job_log_context(job, settings)
+        diagnosis_trace = _run_assistant_diagnosis_loop(
+            job=job,
+            question=raw_message,
+            settings=settings,
+            assistant_scope="chat",
+        )
 
     runtime_context = _build_agent_observability_context(store, settings)
     prompt = _build_assistant_chat_prompt(
@@ -1773,6 +2556,7 @@ def assistant_chat(
         history=payload.history,
         runtime_context=runtime_context,
         focus_context=focus_context,
+        diagnosis_context=str(diagnosis_trace.get("context_text", "")).strip(),
     )
     try:
         templates = _read_command_templates(settings.command_config)
@@ -1791,6 +2575,11 @@ def assistant_chat(
             "provider": assistant,
             "requested_provider": requested_assistant,
             "focus_job_id": focus_job_id,
+            "diagnosis_trace": {
+                "enabled": bool(diagnosis_trace.get("enabled")),
+                "trace_path": str(diagnosis_trace.get("trace_path", "")).strip(),
+                "tool_runs": diagnosis_trace.get("tool_runs", []),
+            },
         }
     )
 
@@ -1822,11 +2611,17 @@ def assistant_log_analysis(
 
     focus_job_id = payload.job_id.strip()
     focus_context = ""
+    diagnosis_trace: Dict[str, Any] = {"enabled": False, "tool_runs": []}
     if focus_job_id:
         job = store.get_job(focus_job_id)
         if job is None:
             raise HTTPException(status_code=404, detail=f"job_id를 찾을 수 없습니다: {focus_job_id}")
         focus_context = _build_focus_job_log_context(job, settings)
+        diagnosis_trace = _run_assistant_diagnosis_loop(
+            job=job,
+            question=question,
+            settings=settings,
+        )
 
     runtime_context = _build_agent_observability_context(store, settings)
     prompt = _build_log_analysis_prompt(
@@ -1834,6 +2629,7 @@ def assistant_log_analysis(
         question=question,
         runtime_context=runtime_context,
         focus_context=focus_context,
+        diagnosis_context=str(diagnosis_trace.get("context_text", "")).strip(),
     )
 
     try:
@@ -1853,6 +2649,11 @@ def assistant_log_analysis(
             "provider": assistant,
             "requested_provider": requested_assistant,
             "focus_job_id": focus_job_id,
+            "diagnosis_trace": {
+                "enabled": bool(diagnosis_trace.get("enabled")),
+                "trace_path": str(diagnosis_trace.get("trace_path", "")).strip(),
+                "tool_runs": diagnosis_trace.get("tool_runs", []),
+            },
         }
     )
 
@@ -2077,7 +2878,11 @@ def job_detail_api(
     resume_state = _compute_job_resume_state(job, node_runs, settings)
     runtime_signals = _build_job_runtime_signals(job, store=store, settings=settings)
     memory_trace = _read_job_memory_trace(job, settings)
+    assistant_diagnosis_trace = _read_job_assistant_diagnosis_trace(job, settings)
     manual_retry_options = _build_manual_retry_options(job, settings=settings, node_runs=node_runs)
+    job_lineage = _build_job_lineage(job, store=store, settings=settings)
+    log_summary = _build_job_log_summary(job, settings=settings, events=events)
+    operator_inputs = _build_job_operator_inputs(job, store=store, settings=settings)
 
     return JSONResponse(
         {
@@ -2091,6 +2896,10 @@ def job_detail_api(
             "manual_retry_options": manual_retry_options,
             "runtime_signals": runtime_signals,
             "memory_trace": memory_trace,
+            "assistant_diagnosis_trace": assistant_diagnosis_trace,
+            "job_lineage": job_lineage,
+            "log_summary": log_summary,
+            "operator_inputs": operator_inputs,
             "stop_requested": _stop_signal_path(settings.data_dir, job_id).exists(),
         }
     )
@@ -3189,6 +3998,7 @@ def _build_log_analysis_prompt(
     question: str,
     runtime_context: str,
     focus_context: str,
+    diagnosis_context: str = "",
 ) -> str:
     """Create one-shot prompt for assistant-driven log diagnosis."""
 
@@ -3206,7 +4016,155 @@ def _build_log_analysis_prompt(
         f"[사용자 질문]\n{question}\n\n"
         f"[런타임 컨텍스트]\n{runtime_context}\n\n"
         + (f"[집중 분석 대상]\n{focus_context}\n\n" if focus_context else "")
+        + (f"[도구 진단 컨텍스트]\n{diagnosis_context}\n\n" if diagnosis_context else "")
     )
+
+
+def _assistant_tool_docs_file(repository_path: Path, name: str) -> Path:
+    """Return assistant diagnosis tool artifact path under one workspace."""
+
+    docs_dir = repository_path / "_docs"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    return docs_dir / f"ASSISTANT_{name}"
+
+
+def _derive_assistant_diagnosis_queries(
+    *,
+    job: JobRecord,
+    question: str,
+    settings: AppSettings,
+) -> Dict[str, str]:
+    """Build small diagnosis-oriented queries for internal tool loop."""
+
+    debug_log_path = _resolve_channel_log_path(settings, job.log_file, channel="debug")
+    events = _parse_log_events(debug_log_path) if debug_log_path.exists() else []
+    latest_command = ""
+    latest_error = ""
+    for event in reversed(events):
+        kind = str(event.get("kind", "")).strip().lower()
+        if not latest_command and kind == "run":
+            latest_command = str(event.get("message", "")).strip()
+        if not latest_error and kind in {"stderr", "done"}:
+            latest_error = str(event.get("message", "")).strip()
+        if latest_command and latest_error:
+            break
+
+    def _collapse(*parts: str) -> str:
+        ordered: List[str] = []
+        for raw in parts:
+            value = str(raw or "").strip()
+            if not value or value in ordered:
+                continue
+            ordered.append(value)
+        return " ".join(ordered)[:240]
+
+    base_error = str(job.error_message or "").strip()
+    base_stage = str(job.stage or "").strip()
+    issue_title = str(job.issue_title or "").strip()
+    return {
+        "log_lookup": _collapse(question, base_error, base_stage, latest_error, latest_command),
+        "repo_search": _collapse(base_stage, base_error, latest_command, issue_title),
+        "memory_search": _collapse(base_error, base_stage, issue_title, latest_error),
+    }
+
+
+def _build_assistant_diagnosis_runtime(settings: AppSettings) -> ToolRuntime:
+    """Build one minimal internal tool runtime for assistant diagnosis loops."""
+
+    runtime_store = _get_memory_runtime_store(settings)
+    return ToolRuntime(
+        command_templates=None,
+        docs_file=_assistant_tool_docs_file,
+        build_template_variables=lambda *_args, **_kwargs: {},
+        template_for_route=lambda route_name: route_name,
+        actor_log_writer=lambda *_args, **_kwargs: None,
+        append_actor_log=lambda *_args, **_kwargs: None,
+        build_local_evidence_fallback=lambda *_args, **_kwargs: {"context_text": ""},
+        search_memory_entries=lambda **kwargs: runtime_store.search_entries(**kwargs),
+        search_vector_memory_entries=lambda **_kwargs: {},
+        feature_enabled=lambda _flag_name: False,
+    )
+
+
+def _run_assistant_diagnosis_loop(
+    *,
+    job: JobRecord,
+    question: str,
+    settings: AppSettings,
+    assistant_scope: str = "log_analysis",
+) -> Dict[str, Any]:
+    """Run one small internal tool diagnosis loop and write a trace artifact."""
+
+    feature_flags = read_feature_flags(_FEATURE_FLAGS_CONFIG_PATH)
+    if not bool(feature_flags.get("assistant_diagnosis_loop")):
+        return {"enabled": False, "tool_runs": []}
+
+    repository_path = _job_workspace_path(job, settings)
+    repository_path.mkdir(parents=True, exist_ok=True)
+    paths = build_workflow_artifact_paths(repository_path)
+    log_path = _resolve_channel_log_path(settings, job.log_file, channel="debug")
+    runtime = _build_assistant_diagnosis_runtime(settings)
+    queries = _derive_assistant_diagnosis_queries(job=job, question=question, settings=settings)
+    tool_runs: List[Dict[str, Any]] = []
+    context_sections: List[str] = []
+
+    for tool_name in ("log_lookup", "repo_search", "memory_search"):
+        query = str(queries.get(tool_name, "")).strip()
+        if not query:
+            continue
+        request = ToolRequest(tool=tool_name, query=query, reason="assistant diagnosis loop")
+        try:
+            result = runtime.execute(
+                job=job,
+                repository_path=repository_path,
+                paths=paths,
+                log_path=log_path,
+                request=request,
+            )
+            tool_runs.append(
+                {
+                    "tool": tool_name,
+                    "query": query,
+                    "ok": result.ok,
+                    "mode": result.mode,
+                    "context_path": result.context_path,
+                    "result_path": result.result_path,
+                    "error": result.error,
+                }
+            )
+            if result.context_text:
+                context_sections.append(f"[{tool_name}]\n{result.context_text.strip()}")
+        except Exception as error:  # noqa: BLE001
+            tool_runs.append(
+                {
+                    "tool": tool_name,
+                    "query": query,
+                    "ok": False,
+                    "mode": "error",
+                    "context_path": "",
+                    "result_path": "",
+                    "error": str(error),
+                }
+            )
+
+    combined_context = "\n\n".join(section for section in context_sections if section).strip()
+    trace_payload = {
+        "generated_at": utc_now_iso(),
+        "enabled": True,
+        "job_id": job.job_id,
+        "assistant_scope": str(assistant_scope or "log_analysis").strip() or "log_analysis",
+        "question": question,
+        "tool_runs": tool_runs,
+        "combined_context_length": len(combined_context),
+    }
+    trace_path = repository_path / "_docs" / "ASSISTANT_DIAGNOSIS_TRACE.json"
+    trace_path.parent.mkdir(parents=True, exist_ok=True)
+    trace_path.write_text(json.dumps(trace_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return {
+        **trace_payload,
+        "trace_path": str(trace_path),
+        "context_text": combined_context[:20_000],
+    }
 
 
 def _build_assistant_chat_prompt(
@@ -3216,6 +4174,7 @@ def _build_assistant_chat_prompt(
     history: List[Dict[str, str]],
     runtime_context: str,
     focus_context: str,
+    diagnosis_context: str = "",
 ) -> str:
     """Create multi-turn prompt for the assistant tab."""
 
@@ -3239,6 +4198,7 @@ def _build_assistant_chat_prompt(
         + (f"[대화 이력]\n{chr(10).join(history_lines)}\n\n" if history_lines else "")
         + f"[런타임 컨텍스트]\n{runtime_context}\n\n"
         + (f"[집중 분석 대상]\n{focus_context}\n\n" if focus_context else "")
+        + (f"[도구 진단 컨텍스트]\n{diagnosis_context}\n\n" if diagnosis_context else "")
         + f"[최신 사용자 메시지]\n{message}\n"
     )
 
@@ -3877,6 +4837,14 @@ def _default_roles_payload() -> Dict[str, Any]:
         }
         for code, name, cli, template_key, inputs, outputs in role_rows
     ]
+    tool_defaults = {
+        "ai-helper": ["log_lookup", "repo_search", "memory_search"],
+        "data-ai-engineer": ["log_lookup", "repo_search", "memory_search"],
+        "incident-analyst": ["log_lookup", "repo_search", "memory_search"],
+        "orchestration-helper": ["log_lookup", "repo_search", "memory_search"],
+    }
+    for role in roles:
+        role["allowed_tools"] = list(tool_defaults.get(role["code"], []))
     presets = [
         {
             "preset_id": "default-dev",
@@ -3997,3 +4965,184 @@ def _find_active_job(
         if item.status in {JobStatus.QUEUED.value, JobStatus.RUNNING.value}:
             return item
     return None
+
+
+def _queue_followup_job_from_backlog_candidate(
+    *,
+    candidate: Dict[str, Any],
+    runtime_store: MemoryRuntimeStore,
+    store: JobStore,
+    settings: AppSettings,
+    note: str,
+) -> tuple[JobRecord, Path]:
+    """Queue one follow-up job that consumes an approved backlog candidate."""
+
+    payload = candidate.get("payload", {}) if isinstance(candidate.get("payload"), dict) else {}
+    source_job_id = str(payload.get("job_id", "")).strip()
+    source_job = store.get_job(source_job_id) if source_job_id else None
+    candidate_id = str(candidate.get("candidate_id", "")).strip()
+
+    repository = str(candidate.get("repository", "")).strip() or settings.allowed_repository
+    execution_repository = (
+        str(candidate.get("execution_repository", "")).strip()
+        or (str(source_job.source_repository or "").strip() if source_job is not None else "")
+        or (str(source_job.repository or "").strip() if source_job is not None else "")
+        or repository
+    )
+    source_repository = execution_repository if execution_repository and execution_repository != repository else ""
+    app_code = _normalize_app_code(
+        str(candidate.get("app_code", "")).strip() or (source_job.app_code if source_job is not None else "default")
+    ) or "default"
+
+    issue_number = int(payload.get("issue_number", 0) or (source_job.issue_number if source_job is not None else 0) or 0)
+    if issue_number <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="현재 follow-up bridge는 기존 GitHub issue에 연결된 backlog 후보만 큐잉할 수 있습니다.",
+        )
+    issue_url = (
+        str(source_job.issue_url or "").strip()
+        if source_job is not None
+        else f"https://github.com/{repository}/issues/{issue_number}"
+    )
+    if not issue_url:
+        issue_url = f"https://github.com/{repository}/issues/{issue_number}"
+
+    workflow_id = str(candidate.get("workflow_id", "")).strip() or (
+        str(source_job.workflow_id or "").strip() if source_job is not None else ""
+    )
+    if not workflow_id:
+        selection = resolve_workflow_selection(
+            requested_workflow_id="",
+            app_code=app_code,
+            repository=repository,
+            apps_path=_APPS_CONFIG_PATH,
+            workflows_path=_WORKFLOWS_CONFIG_PATH,
+        )
+        workflow_id = selection.workflow_id
+
+    track = "enhance"
+    if source_job is not None:
+        source_track = _normalize_track(source_job.track)
+        if source_track in {"bug", "new", "enhance"}:
+            track = source_track
+
+    now = utc_now_iso()
+    queued_job_id = str(uuid.uuid4())
+    followup_title = f"[Follow-up] {str(candidate.get('title', '')).strip() or f'Issue {issue_number} improvement'}"
+    queued_job = JobRecord(
+        job_id=queued_job_id,
+        repository=repository,
+        issue_number=issue_number,
+        issue_title=followup_title,
+        issue_url=issue_url,
+        status=JobStatus.QUEUED.value,
+        stage=JobStage.QUEUED.value,
+        attempt=0,
+        max_attempts=settings.max_retries,
+        branch_name=_build_branch_name(
+            app_code,
+            issue_number,
+            track,
+            queued_job_id,
+            keep_branch=True,
+        ),
+        pr_url=None,
+        error_message=None,
+        log_file=_build_log_file_name(app_code, queued_job_id),
+        created_at=now,
+        updated_at=now,
+        started_at=None,
+        finished_at=None,
+        app_code=app_code,
+        track=track,
+        workflow_id=workflow_id,
+        source_repository=source_repository,
+        job_kind="followup_backlog",
+        parent_job_id=source_job_id,
+        backlog_candidate_id=candidate_id,
+    )
+    store.create_job(queued_job)
+    store.enqueue_job(queued_job_id)
+
+    artifact_path = _write_followup_backlog_artifact(
+        candidate=candidate,
+        queued_job=queued_job,
+        settings=settings,
+        note=note,
+        source_job=source_job,
+    )
+    runtime_store.set_backlog_candidate_state(
+        str(candidate.get("candidate_id", "")).strip(),
+        state="queued",
+        payload_updates={
+            "approved_at": str(payload.get("approved_at", "")).strip() or now,
+            "queued_at": now,
+            "queued_job_id": queued_job_id,
+            "queued_job_kind": queued_job.job_kind,
+            "queued_job_issue_number": issue_number,
+            "queued_job_issue_url": issue_url,
+            "parent_job_id": source_job_id,
+            "backlog_candidate_id": candidate_id,
+            "followup_artifact_path": str(artifact_path),
+            "operator_note": note,
+            "last_action": "queue",
+        },
+    )
+    return queued_job, artifact_path
+
+
+def _write_followup_backlog_artifact(
+    *,
+    candidate: Dict[str, Any],
+    queued_job: JobRecord,
+    settings: AppSettings,
+    note: str,
+    source_job: Optional[JobRecord],
+) -> Path:
+    """Write one explicit follow-up backlog artifact for the next planner round."""
+
+    workspace_path = _job_workspace_path(queued_job, settings)
+    paths = build_workflow_artifact_paths(workspace_path)
+    artifact_path = paths["followup_backlog_task"]
+    payload = candidate.get("payload", {}) if isinstance(candidate.get("payload"), dict) else {}
+    artifact_payload = {
+        "generated_at": utc_now_iso(),
+        "source": "memory_backlog_candidate",
+        "job_contract": {
+            "kind": "followup_backlog",
+            "version": "v1",
+            "issue_backed": True,
+            "dedicated_followup": True,
+        },
+        "candidate_id": str(candidate.get("candidate_id", "")).strip(),
+        "title": str(candidate.get("title", "")).strip(),
+        "summary": str(candidate.get("summary", "")).strip(),
+        "priority": str(candidate.get("priority", "P2")).strip() or "P2",
+        "state": "queued",
+        "queued_job_id": queued_job.job_id,
+        "queued_job_kind": str(queued_job.job_kind or "").strip() or "followup_backlog",
+        "queued_job_issue_number": queued_job.issue_number,
+        "queued_job_issue_url": queued_job.issue_url,
+        "workflow_id": queued_job.workflow_id,
+        "app_code": queued_job.app_code,
+        "track": queued_job.track,
+        "parent_job_id": str(queued_job.parent_job_id or "").strip(),
+        "backlog_candidate_id": str(queued_job.backlog_candidate_id or "").strip(),
+        "recommended_node_type": str(payload.get("recommended_node_type", "")).strip(),
+        "recommended_action": (
+            str(payload.get("action", "")).strip()
+            or str(payload.get("recommended_action", "")).strip()
+        ),
+        "source_kind": str(payload.get("source_kind", "")).strip(),
+        "source_job_id": str(payload.get("job_id", "")).strip(),
+        "source_issue_number": int(payload.get("issue_number", queued_job.issue_number) or queued_job.issue_number),
+        "source_issue_title": str(payload.get("issue_title", "")).strip()
+        or (str(source_job.issue_title or "").strip() if source_job is not None else ""),
+        "source_job_kind": str(source_job.job_kind or "").strip() if source_job is not None else "issue",
+        "cluster_key": str(payload.get("cluster_key", "")).strip(),
+        "operator_note": note,
+        "raw_payload": payload,
+    }
+    artifact_path.write_text(json.dumps(artifact_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return artifact_path
