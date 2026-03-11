@@ -62,6 +62,9 @@ class MemoryRuntimeStore:
                     positive_count INTEGER NOT NULL DEFAULT 0,
                     negative_count INTEGER NOT NULL DEFAULT 0,
                     neutral_count INTEGER NOT NULL DEFAULT 0,
+                    state_reason TEXT NOT NULL DEFAULT '',
+                    manual_state_override TEXT NOT NULL DEFAULT '',
+                    manual_override_note TEXT NOT NULL DEFAULT '',
                     last_verdict TEXT NOT NULL DEFAULT '',
                     last_routes_json TEXT NOT NULL DEFAULT '[]',
                     payload_json TEXT NOT NULL DEFAULT '{}',
@@ -145,6 +148,9 @@ class MemoryRuntimeStore:
             self._ensure_column(connection, "memory_entries", "retrieval_count", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "memory_entries", "effectiveness", "REAL NOT NULL DEFAULT 0.0")
             self._ensure_column(connection, "memory_entries", "staleness_penalty", "REAL NOT NULL DEFAULT 0.0")
+            self._ensure_column(connection, "memory_entries", "state_reason", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(connection, "memory_entries", "manual_state_override", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(connection, "memory_entries", "manual_override_note", "TEXT NOT NULL DEFAULT ''")
 
     @staticmethod
     def _ensure_column(connection: sqlite3.Connection, table_name: str, column_name: str, definition: str) -> None:
@@ -168,6 +174,8 @@ class MemoryRuntimeStore:
         confidence = float(payload.get("confidence", 0.0) or 0.0)
         baseline_score = float(payload.get("baseline_score", score) or 0.0)
         baseline_confidence = float(payload.get("baseline_confidence", confidence) or 0.0)
+        manual_state_override = self._normalize_override_state(payload.get("manual_state_override", ""))
+        manual_override_note = str(payload.get("manual_override_note", "")).strip()
         with self._connect() as connection:
             connection.execute(
                 """
@@ -176,9 +184,9 @@ class MemoryRuntimeStore:
                     workflow_id, job_id, issue_number, issue_title, source_kind, source_path, title,
                     summary, state, baseline_score, baseline_confidence, confidence, score,
                     usage_count, retrieval_count, effectiveness, staleness_penalty, positive_count,
-                    negative_count, neutral_count, last_verdict, last_routes_json,
-                    payload_json, created_at, updated_at, last_used_at, last_feedback_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    negative_count, neutral_count, state_reason, manual_state_override, manual_override_note,
+                    last_verdict, last_routes_json, payload_json, created_at, updated_at, last_used_at, last_feedback_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(memory_id) DO UPDATE SET
                     memory_type=excluded.memory_type,
                     repository=excluded.repository,
@@ -204,6 +212,9 @@ class MemoryRuntimeStore:
                     positive_count=excluded.positive_count,
                     negative_count=excluded.negative_count,
                     neutral_count=excluded.neutral_count,
+                    state_reason=excluded.state_reason,
+                    manual_state_override=excluded.manual_state_override,
+                    manual_override_note=excluded.manual_override_note,
                     last_verdict=excluded.last_verdict,
                     last_routes_json=excluded.last_routes_json,
                     payload_json=excluded.payload_json,
@@ -238,6 +249,9 @@ class MemoryRuntimeStore:
                     int(payload.get("positive_count", 0) or 0),
                     int(payload.get("negative_count", 0) or 0),
                     int(payload.get("neutral_count", 0) or 0),
+                    str(payload.get("state_reason", "")).strip(),
+                    manual_state_override,
+                    manual_override_note,
                     str(payload.get("last_verdict", "")).strip(),
                     self._json_dumps(payload.get("last_routes", [])),
                     self._json_dumps(payload.get("payload", {})),
@@ -363,7 +377,7 @@ class MemoryRuntimeStore:
                     ),
                     3,
                 )
-                state = self._ranking_state(
+                state, state_reason = self._ranking_state(
                     score=adjusted_score,
                     positive_count=positive_count,
                     negative_count=negative_count,
@@ -371,6 +385,13 @@ class MemoryRuntimeStore:
                     staleness_penalty=staleness_penalty,
                     usage_count=usage_count,
                 )
+                manual_state_override = self._normalize_override_state(entry.get("manual_state_override", ""))
+                manual_override_note = str(entry.get("manual_override_note", "")).strip()
+                if manual_state_override:
+                    state = manual_state_override
+                    state_reason = "manual override"
+                    if manual_override_note:
+                        state_reason = f"{state_reason}: {manual_override_note}"
                 state_counts[state] = int(state_counts.get(state, 0) or 0) + 1
                 connection.execute(
                     """
@@ -385,6 +406,7 @@ class MemoryRuntimeStore:
                         negative_count = ?,
                         neutral_count = ?,
                         state = ?,
+                        state_reason = ?,
                         last_feedback_at = ?,
                         last_used_at = ?,
                         last_verdict = ?,
@@ -402,6 +424,7 @@ class MemoryRuntimeStore:
                         negative_count,
                         neutral_count,
                         state,
+                        state_reason,
                         str(feedback_stats.get("last_feedback_at", "")).strip(),
                         str(retrieval_stats.get("last_used_at", "")).strip() or str(entry.get("last_used_at", "")).strip(),
                         str(feedback_stats.get("last_verdict", "")).strip(),
@@ -425,16 +448,22 @@ class MemoryRuntimeStore:
         effectiveness: float,
         staleness_penalty: float,
         usage_count: int,
-    ) -> str:
+    ) -> tuple[str, str]:
         if negative_count >= 3 and score <= -2.5:
-            return "banned"
+            return "banned", "3+ negative feedback with strongly negative score"
         if usage_count >= 4 and effectiveness <= -0.75:
-            return "banned"
+            return "banned", "retrieval effectiveness stayed strongly negative"
         if score >= 3.0 or (positive_count >= 3 and effectiveness >= 0.4):
-            return "promoted"
+            if score >= 3.0:
+                return "promoted", "high cumulative score"
+            return "promoted", "repeated positive feedback and good effectiveness"
         if score < 0.0 or staleness_penalty >= 1.0 or effectiveness <= -0.25:
-            return "decayed"
-        return "active"
+            if score < 0.0:
+                return "decayed", "score dropped below zero"
+            if staleness_penalty >= 1.0:
+                return "decayed", "staleness penalty applied"
+            return "decayed", "retrieval effectiveness fell below threshold"
+        return "active", "within normal scoring range"
 
     @classmethod
     def _staleness_penalty(cls, *, reference_time: datetime, timestamps: List[str]) -> float:
@@ -607,6 +636,8 @@ class MemoryRuntimeStore:
 
         created_at = str(payload.get("created_at", "")).strip() or utc_now_iso()
         updated_at = str(payload.get("updated_at", "")).strip() or created_at
+        priority = self._normalize_backlog_priority(payload.get("priority", "")) or "P2"
+        state = str(payload.get("state", "")).strip().lower() or "candidate"
         with self._connect() as connection:
             connection.execute(
                 """
@@ -636,8 +667,8 @@ class MemoryRuntimeStore:
                     str(payload.get("workflow_id", "")).strip(),
                     str(payload.get("title", "")).strip(),
                     str(payload.get("summary", "")).strip(),
-                    str(payload.get("priority", "")).strip() or "P2",
-                    str(payload.get("state", "")).strip() or "candidate",
+                    priority,
+                    state,
                     self._json_dumps(payload.get("payload", {})),
                     created_at,
                     updated_at,
@@ -663,6 +694,113 @@ class MemoryRuntimeStore:
             rows = connection.execute(query, params).fetchall()
         return [self._decode_entry(row) for row in rows]
 
+    def search_entries(
+        self,
+        *,
+        query: str = "",
+        state: str = "",
+        memory_type: str = "",
+        repository: str = "",
+        execution_repository: str = "",
+        app_code: str = "",
+        workflow_id: str = "",
+        limit: int = 25,
+    ) -> List[Dict[str, Any]]:
+        clauses: List[str] = []
+        params: List[object] = []
+        normalized_query = str(query or "").strip().lower()
+        normalized_state = self._normalize_override_state(state) or str(state or "").strip().lower()
+        normalized_memory_type = str(memory_type or "").strip().lower()
+        normalized_repository = str(repository or "").strip()
+        normalized_execution_repository = str(execution_repository or "").strip()
+        normalized_app_code = str(app_code or "").strip()
+        normalized_workflow_id = str(workflow_id or "").strip()
+        normalized_limit = max(1, min(int(limit or 25), 100))
+
+        if normalized_query:
+            like_pattern = f"%{normalized_query}%"
+            clauses.append(
+                "("
+                "LOWER(memory_id) LIKE ? OR LOWER(title) LIKE ? OR LOWER(summary) LIKE ? "
+                "OR LOWER(source_path) LIKE ? OR LOWER(issue_title) LIKE ?"
+                ")"
+            )
+            params.extend([like_pattern] * 5)
+        if normalized_state:
+            clauses.append("state = ?")
+            params.append(normalized_state)
+        if normalized_memory_type:
+            clauses.append("memory_type = ?")
+            params.append(normalized_memory_type)
+        if normalized_repository:
+            clauses.append("repository = ?")
+            params.append(normalized_repository)
+        if normalized_execution_repository:
+            clauses.append("execution_repository = ?")
+            params.append(normalized_execution_repository)
+        if normalized_app_code:
+            clauses.append("app_code = ?")
+            params.append(normalized_app_code)
+        if normalized_workflow_id:
+            clauses.append("workflow_id = ?")
+            params.append(normalized_workflow_id)
+
+        sql = "SELECT * FROM memory_entries"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += """
+            ORDER BY
+                CASE state
+                    WHEN 'promoted' THEN 0
+                    WHEN 'active' THEN 1
+                    WHEN 'decayed' THEN 2
+                    WHEN 'candidate' THEN 3
+                    WHEN 'banned' THEN 4
+                    WHEN 'archived' THEN 5
+                    ELSE 6
+                END,
+                score DESC,
+                confidence DESC,
+                updated_at DESC,
+                memory_id ASC
+            LIMIT ?
+        """
+        params.append(normalized_limit)
+        with self._connect() as connection:
+            rows = connection.execute(sql, tuple(params)).fetchall()
+        return [self._decode_entry(row) for row in rows]
+
+    def set_manual_override(self, memory_id: str, *, state: str = "", note: str = "") -> Dict[str, Any] | None:
+        normalized_id = str(memory_id or "").strip()
+        if not normalized_id:
+            return None
+        normalized_state = self._normalize_override_state(state)
+        normalized_note = str(note or "").strip()
+        with self._connect() as connection:
+            existing = connection.execute(
+                "SELECT memory_id FROM memory_entries WHERE memory_id = ?",
+                (normalized_id,),
+            ).fetchone()
+            if existing is None:
+                return None
+            connection.execute(
+                """
+                UPDATE memory_entries
+                SET manual_state_override = ?,
+                    manual_override_note = ?,
+                    updated_at = ?
+                WHERE memory_id = ?
+                """,
+                (
+                    normalized_state,
+                    normalized_note,
+                    utc_now_iso(),
+                    normalized_id,
+                ),
+            )
+        self.refresh_rankings(as_of=utc_now_iso())
+        return self.get_entry(normalized_id)
+
     def query_entries_for_retrieval(
         self,
         *,
@@ -685,7 +823,7 @@ class MemoryRuntimeStore:
                 """
                 SELECT *
                 FROM memory_entries
-                WHERE state != 'banned'
+                WHERE state NOT IN ('banned', 'archived')
                   AND (
                     execution_repository = ?
                     OR repository = ?
@@ -788,6 +926,89 @@ class MemoryRuntimeStore:
             item["payload"] = item.pop("payload_json", {})
         return decoded_rows
 
+    def list_backlog_candidates(
+        self,
+        *,
+        query: str = "",
+        state: str = "",
+        priority: str = "",
+        repository: str = "",
+        execution_repository: str = "",
+        app_code: str = "",
+        workflow_id: str = "",
+        limit: int = 25,
+    ) -> List[Dict[str, Any]]:
+        clauses: List[str] = []
+        params: List[object] = []
+        normalized_query = str(query or "").strip().lower()
+        normalized_state = str(state or "").strip().lower()
+        normalized_priority = self._normalize_backlog_priority(priority)
+        normalized_repository = str(repository or "").strip()
+        normalized_execution_repository = str(execution_repository or "").strip()
+        normalized_app_code = str(app_code or "").strip()
+        normalized_workflow_id = str(workflow_id or "").strip()
+        normalized_limit = max(1, min(int(limit or 25), 100))
+
+        if normalized_query:
+            like_pattern = f"%{normalized_query}%"
+            clauses.append(
+                "("
+                "LOWER(candidate_id) LIKE ? OR LOWER(title) LIKE ? OR LOWER(summary) LIKE ? "
+                "OR LOWER(payload_json) LIKE ?"
+                ")"
+            )
+            params.extend([like_pattern] * 4)
+        if normalized_state:
+            clauses.append("LOWER(state) = ?")
+            params.append(normalized_state)
+        if normalized_priority:
+            clauses.append("priority = ?")
+            params.append(normalized_priority)
+        if normalized_repository:
+            clauses.append("repository = ?")
+            params.append(normalized_repository)
+        if normalized_execution_repository:
+            clauses.append("execution_repository = ?")
+            params.append(normalized_execution_repository)
+        if normalized_app_code:
+            clauses.append("app_code = ?")
+            params.append(normalized_app_code)
+        if normalized_workflow_id:
+            clauses.append("workflow_id = ?")
+            params.append(normalized_workflow_id)
+
+        sql = "SELECT * FROM memory_backlog_candidates"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += """
+            ORDER BY
+                CASE priority
+                    WHEN 'P0' THEN 0
+                    WHEN 'P1' THEN 1
+                    WHEN 'P2' THEN 2
+                    WHEN 'P3' THEN 3
+                    ELSE 4
+                END,
+                CASE LOWER(state)
+                    WHEN 'candidate' THEN 0
+                    WHEN 'approved' THEN 1
+                    WHEN 'queued' THEN 2
+                    WHEN 'done' THEN 3
+                    WHEN 'dismissed' THEN 4
+                    ELSE 5
+                END,
+                updated_at DESC,
+                candidate_id ASC
+            LIMIT ?
+        """
+        params.append(normalized_limit)
+        with self._connect() as connection:
+            rows = connection.execute(sql, tuple(params)).fetchall()
+        decoded_rows = [self._decode_row(row, json_fields={"payload_json"}) for row in rows]
+        for item in decoded_rows:
+            item["payload"] = item.pop("payload_json", {})
+        return decoded_rows
+
     @staticmethod
     def _json_dumps(payload: Any) -> str:
         return json.dumps(payload, ensure_ascii=False, sort_keys=True)
@@ -813,3 +1034,17 @@ class MemoryRuntimeStore:
         payload["last_routes"] = payload.pop("last_routes_json", [])
         payload["payload"] = payload.pop("payload_json", {})
         return payload
+
+    @staticmethod
+    def _normalize_override_state(value: Any) -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized in {"", "active", "candidate", "promoted", "decayed", "banned", "archived"}:
+            return normalized
+        return ""
+
+    @staticmethod
+    def _normalize_backlog_priority(value: Any) -> str:
+        normalized = str(value or "").strip().upper()
+        if normalized in {"", "P0", "P1", "P2", "P3"}:
+            return normalized
+        return ""

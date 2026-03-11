@@ -11,6 +11,7 @@ import shlex
 from app.ai_role_routing import AIRoleRouter, default_ai_role_routing_payload
 from app.command_runner import CommandResult
 from app.command_runner import CommandExecutionError
+from app.memory.runtime_store import MemoryRuntimeStore
 from app.models import JobRecord, JobStage, JobStatus, NodeRunRecord, utc_now_iso
 from app.orchestrator import IssueDetails, Orchestrator
 
@@ -35,6 +36,7 @@ class FakeTemplateRunner:
             "planner",
             "coder",
             "reviewer",
+            "codex_helper",
             "copilot",
             "escalation",
             "documentation_writer",
@@ -87,6 +89,50 @@ def _make_job(job_id: str = "job-1") -> JobRecord:
         started_at=None,
         finished_at=None,
     )
+
+
+def test_orchestrator_passes_heartbeat_hooks_to_shell_executor(app_components, tmp_path: Path) -> None:
+    settings, store, _ = app_components
+    captured: dict[str, object] = {}
+
+    def fake_shell(
+        command,
+        cwd,
+        log_writer,
+        check,
+        command_purpose,
+        heartbeat_callback=None,
+        heartbeat_interval_seconds=None,
+    ):
+        captured["command"] = command
+        captured["heartbeat_callback"] = heartbeat_callback
+        captured["heartbeat_interval_seconds"] = heartbeat_interval_seconds
+        log_writer("[DONE] exit_code=0 elapsed=0.00s")
+        return CommandResult(
+            command=command,
+            exit_code=0,
+            stdout="",
+            stderr="",
+            duration_seconds=0.0,
+        )
+
+    orchestrator = Orchestrator(
+        settings=settings,
+        store=store,
+        command_templates=FakeTemplateRunner(),
+        shell_executor=fake_shell,
+    )
+
+    orchestrator._run_shell(
+        command="echo heartbeat",
+        cwd=tmp_path,
+        log_path=tmp_path / "heartbeat.log",
+        purpose="heartbeat smoke",
+    )
+
+    assert captured["command"] == "echo heartbeat"
+    assert callable(captured["heartbeat_callback"])
+    assert captured["heartbeat_interval_seconds"] == 10.0
 
 
 def _improvement_paths(repository_path: Path) -> dict[str, Path]:
@@ -1418,6 +1464,14 @@ def test_improvement_stage_writes_structured_memory_artifacts(app_components):
     ranking_map = {item["memory_id"]: item for item in rankings_payload["items"]}
     assert ranking_map[f"episodic_job_summary:{job.job_id}"]["state"] in {"active", "promoted"}
     assert ranking_map[f"improvement_strategy:{job.job_id}"]["score"] >= 1.0
+
+    runtime_store = MemoryRuntimeStore(settings.resolved_memory_dir / "memory_runtime.db")
+    backlog_candidates = runtime_store.list_backlog_candidates(repository=job.repository, limit=10)
+    backlog_map = {item["candidate_id"]: item for item in backlog_candidates}
+    assert "improvement_backlog:job-memory-structured:tests_regression" in backlog_map
+    assert "quality_trend_persistent_low:job-memory-structured:test_coverage" in backlog_map
+    assert backlog_map["quality_trend_persistent_low:job-memory-structured:test_coverage"]["priority"] == "P1"
+    assert backlog_map["next_improvement_task:job-memory-structured:next_1"]["payload"]["selected_by_strategy"] == "test_hardening"
 
 
 def test_improvement_stage_extracts_richer_repo_conventions(app_components):

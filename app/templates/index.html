@@ -574,8 +574,8 @@
         <section class="quick-panel assistant-panel">
           <div class="quick-panel-head">
             <div>
-              <h2>시스템 로그 분석 도우미</h2>
-              <p class="hint">Gemini 또는 Codex를 골라 로그 문제점을 분석합니다.</p>
+              <h2>AI 도우미</h2>
+              <p class="hint">현재 범위: 로그/운영 진단. Gemini 또는 Codex와 여러 턴으로 대화하면서 최근 실행 문제를 좁혀갈 수 있습니다.</p>
             </div>
           </div>
           <div id="assistant-messages" class="assistant-messages"></div>
@@ -609,11 +609,11 @@
 
               <label class="assistant-field assistant-field-wide" for="assistant-input">
                 <span>메시지</span>
-                <textarea id="assistant-input" rows="4" maxlength="8000" placeholder="예: 최근 실패 로그 기준으로 핵심 문제점 3개와 즉시 조치안을 알려줘"></textarea>
+                <textarea id="assistant-input" rows="4" maxlength="8000" placeholder="예: 방금 실패한 job 기준으로 stale heartbeat 원인을 더 좁혀줘"></textarea>
               </label>
             </div>
             <div class="issue-form-actions assistant-form-actions">
-              <button type="submit" id="assistant-submit" class="action-button">로그 분석 요청</button>
+              <button type="submit" id="assistant-submit" class="action-button">메시지 보내기</button>
               <p id="assistant-status" class="hint"></p>
             </div>
           </form>
@@ -664,6 +664,7 @@
                 <div><dt>Episodic</dt><dd id="admin-memory-episodic">0</dd></div>
                 <div><dt>Decisions</dt><dd id="admin-memory-decisions">0</dd></div>
                 <div><dt>Feedback</dt><dd id="admin-memory-feedback">0</dd></div>
+                <div><dt>Backlog 후보</dt><dd id="admin-memory-backlog">0</dd></div>
               </dl>
             </article>
             <article class="admin-metric-card">
@@ -761,6 +762,67 @@
               <div id="admin-execution-repo-list" class="admin-list-body">불러오는 중...</div>
             </article>
           </div>
+        </section>
+
+        <section class="quick-panel admin-panel">
+          <div class="quick-panel-head">
+            <div>
+              <h2>메모리 워크벤치</h2>
+              <p class="hint">memory runtime DB를 검색하고, ranking reason과 수동 override를 확인합니다.</p>
+            </div>
+          </div>
+          <form id="admin-memory-search-form" class="admin-memory-search-form">
+            <label for="admin-memory-search-query">
+              <span>검색어</span>
+              <input id="admin-memory-search-query" type="search" maxlength="200" placeholder="memory_id, summary, source path" />
+            </label>
+            <label for="admin-memory-search-state">
+              <span>상태</span>
+              <select id="admin-memory-search-state">
+                <option value="">전체</option>
+                <option value="promoted">promoted</option>
+                <option value="active">active</option>
+                <option value="decayed">decayed</option>
+                <option value="candidate">candidate</option>
+                <option value="banned">banned</option>
+                <option value="archived">archived</option>
+              </select>
+            </label>
+            <label for="admin-memory-search-type">
+              <span>타입</span>
+              <select id="admin-memory-search-type">
+                <option value="">전체</option>
+                <option value="episodic">episodic</option>
+                <option value="decision">decision</option>
+                <option value="failure_pattern">failure_pattern</option>
+                <option value="convention">convention</option>
+              </select>
+            </label>
+            <div class="admin-memory-actions">
+              <button id="admin-memory-search-submit" class="action-button" type="submit">검색</button>
+              <button id="admin-memory-search-reset" class="action-button" type="button">초기화</button>
+            </div>
+          </form>
+          <div class="admin-grid admin-grid-lists">
+            <article class="admin-list-card">
+              <h3>검색 결과</h3>
+              <div id="admin-memory-search-results" class="admin-list-body">검색 준비 중...</div>
+            </article>
+            <article class="admin-list-card">
+              <h3>메모리 상세</h3>
+              <div id="admin-memory-detail" class="admin-list-body">왼쪽에서 memory를 선택하세요.</div>
+            </article>
+          </div>
+        </section>
+
+        <section class="quick-panel admin-panel">
+          <div class="quick-panel-head">
+            <div>
+              <h2>자동 개선 백로그 큐</h2>
+              <p class="hint">improvement artifact, quality trend, strategy shadow에서 생성된 backlog 후보를 읽기 전용으로 확인합니다.</p>
+            </div>
+          </div>
+          <div id="admin-memory-backlog-results" class="admin-list-body">불러오는 중...</div>
         </section>
 
         <section class="quick-panel admin-panel">
@@ -1010,6 +1072,7 @@
         assign("admin-memory-episodic", memory.episodic_entries ?? 0);
         assign("admin-memory-decisions", memory.decision_entries ?? 0);
         assign("admin-memory-feedback", memory.feedback_entries ?? 0);
+        assign("admin-memory-backlog", memory.backlog_candidates ?? 0);
         assign("admin-workflow-default-apps", payload?.workflow_adoption?.apps_using_default_workflow ?? 0);
         assign("admin-workflow-adaptive-apps", payload?.workflow_adoption?.apps_using_adaptive_workflow ?? 0);
         assign("admin-workflow-default-jobs", runtime.default_job_count ?? 0);
@@ -1066,6 +1129,292 @@
         if (lastUpdated) {
           lastUpdated.textContent = `어드민 지표 갱신: ${formatKstDateTime(payload?.generated_at || new Date().toISOString())}`;
         }
+      }
+
+      function memoryStateBadgeClass(state) {
+        const normalized = String(state || "").trim().toLowerCase();
+        if (normalized === "promoted" || normalized === "active") return "done";
+        if (normalized === "banned") return "failed";
+        return "queued";
+      }
+
+      function renderAdminMemorySearchResults(items) {
+        const node = document.getElementById("admin-memory-search-results");
+        if (!node) return;
+        if (!Array.isArray(items) || items.length === 0) {
+          node.innerHTML = `<p class="hint">검색 결과가 없습니다.</p>`;
+          return;
+        }
+        node.innerHTML = `
+          <div class="admin-memory-result-list">
+            ${items.map((item) => {
+              const memoryId = String(item?.memory_id || "").trim();
+              const selected = memoryId && memoryId === adminMemorySearchState.selectedId;
+              const state = String(item?.state || "active").trim() || "active";
+              const manualOverride = String(item?.manual_state_override || "").trim();
+              return `
+                <article class="admin-memory-result${selected ? " is-selected" : ""}">
+                  <div class="admin-memory-result-head">
+                    <strong>
+                      <button type="button" class="admin-drilldown-button" data-memory-id="${esc(memoryId)}">
+                        ${esc(memoryId || "-")}
+                      </button>
+                    </strong>
+                    <span class="badge status-${memoryStateBadgeClass(state)}">${esc(state)}</span>
+                  </div>
+                  <div class="admin-memory-meta">
+                    <code>${esc(String(item?.memory_type || "-"))}</code>
+                    <code>score ${esc(formatAdminValue(item?.score))}</code>
+                    <code>confidence ${esc(formatAdminValue(item?.confidence))}</code>
+                    ${manualOverride ? `<code>override ${esc(manualOverride)}</code>` : ""}
+                  </div>
+                  <p class="admin-memory-summary">${esc(String(item?.summary || item?.title || "-"))}</p>
+                  <p class="hint">${esc(String(item?.state_reason || "reason 없음"))}</p>
+                </article>
+              `;
+            }).join("")}
+          </div>
+        `;
+      }
+
+      function renderAdminMemoryDetail(detailPayload) {
+        const node = document.getElementById("admin-memory-detail");
+        if (!node) return;
+        const detail = detailPayload && typeof detailPayload === "object" ? detailPayload : null;
+        const entry = detail?.entry && typeof detail.entry === "object" ? detail.entry : null;
+        if (!entry) {
+          node.innerHTML = `<p class="hint">왼쪽에서 memory를 선택하세요.</p>`;
+          return;
+        }
+        const evidence = Array.isArray(detail?.evidence) ? detail.evidence : [];
+        const feedback = Array.isArray(detail?.feedback) ? detail.feedback : [];
+        const state = String(entry?.state || "active").trim() || "active";
+        const manualOverride = String(entry?.manual_state_override || "").trim();
+        const manualNote = String(entry?.manual_override_note || "").trim();
+        node.innerHTML = `
+          <div class="admin-memory-detail">
+            <div class="admin-memory-detail-head">
+              <div>
+                <strong>${esc(String(entry?.memory_id || "-"))}</strong>
+                <p class="hint">${esc(String(entry?.title || ""))}</p>
+              </div>
+              <span class="badge status-${memoryStateBadgeClass(state)}">${esc(state)}</span>
+            </div>
+
+            <div class="admin-memory-meta">
+              <code>${esc(String(entry?.memory_type || "-"))}</code>
+              <code>${esc(String(entry?.app_code || "default"))}</code>
+              <code>${esc(String(entry?.workflow_id || "-"))}</code>
+              ${manualOverride ? `<code>manual ${esc(manualOverride)}</code>` : `<code>manual none</code>`}
+            </div>
+
+            <p class="admin-memory-summary">${esc(String(entry?.summary || "-"))}</p>
+            <p class="hint">reason: ${esc(String(entry?.state_reason || "-"))}</p>
+
+            <dl class="admin-memory-detail-grid">
+              <div><dt>Score</dt><dd>${esc(formatAdminValue(entry?.score))}</dd></div>
+              <div><dt>Confidence</dt><dd>${esc(formatAdminValue(entry?.confidence))}</dd></div>
+              <div><dt>Effectiveness</dt><dd>${esc(formatAdminValue(entry?.effectiveness))}</dd></div>
+              <div><dt>Staleness</dt><dd>${esc(formatAdminValue(entry?.staleness_penalty))}</dd></div>
+              <div><dt>Positive / Negative</dt><dd>${esc(String(entry?.positive_count ?? 0))} / ${esc(String(entry?.negative_count ?? 0))}</dd></div>
+              <div><dt>Usage / Retrieval</dt><dd>${esc(String(entry?.usage_count ?? 0))} / ${esc(String(entry?.retrieval_count ?? 0))}</dd></div>
+              <div><dt>Execution Repo</dt><dd>${esc(String(entry?.execution_repository || "-"))}</dd></div>
+              <div><dt>Updated</dt><dd>${esc(formatKstDateTime(entry?.updated_at || entry?.created_at || ""))}</dd></div>
+            </dl>
+
+            <div>
+              <h4>수동 Override</h4>
+              <p class="hint">${esc(manualOverride ? `현재 ${manualOverride}${manualNote ? ` · ${manualNote}` : ""}` : "현재 override 없음")}</p>
+              <div class="admin-memory-actions">
+                <button type="button" class="action-button" data-memory-override-state="promoted" data-memory-id="${esc(String(entry?.memory_id || ""))}">Promote</button>
+                <button type="button" class="action-button" data-memory-override-state="decayed" data-memory-id="${esc(String(entry?.memory_id || ""))}">Decay</button>
+                <button type="button" class="action-button" data-memory-override-state="banned" data-memory-id="${esc(String(entry?.memory_id || ""))}">Ban</button>
+                <button type="button" class="action-button" data-memory-override-state="archived" data-memory-id="${esc(String(entry?.memory_id || ""))}">Archive</button>
+                <button type="button" class="action-button" data-memory-override-state="" data-memory-id="${esc(String(entry?.memory_id || ""))}">Clear</button>
+              </div>
+            </div>
+
+            <div>
+              <h4>Evidence</h4>
+              ${evidence.length === 0 ? `<p class="hint">evidence 없음</p>` : `
+                <ul class="admin-memory-sublist">
+                  ${evidence.map((item) => `
+                    <li>
+                      <div class="admin-memory-subhead">
+                        <strong>${esc(String(item?.evidence_type || "evidence"))}</strong>
+                        <code>${esc(String(item?.source_path || "-"))}</code>
+                      </div>
+                      <p class="admin-memory-summary">${esc(String(item?.content || ""))}</p>
+                    </li>
+                  `).join("")}
+                </ul>
+              `}
+            </div>
+
+            <div>
+              <h4>Feedback</h4>
+              ${feedback.length === 0 ? `<p class="hint">feedback 없음</p>` : `
+                <ul class="admin-memory-sublist">
+                  ${feedback.map((item) => `
+                    <li>
+                      <div class="admin-memory-subhead">
+                        <strong>${esc(String(item?.verdict || "-"))}</strong>
+                        <code>${esc(formatKstDateTime(item?.generated_at || ""))}</code>
+                      </div>
+                      <p class="admin-memory-summary">
+                        delta ${esc(formatAdminValue(item?.score_delta))} · routes ${esc((Array.isArray(item?.routes) ? item.routes.join(", ") : "-") || "-")}
+                      </p>
+                    </li>
+                  `).join("")}
+                </ul>
+              `}
+            </div>
+          </div>
+        `;
+      }
+
+      function renderAdminBacklogCandidates(items) {
+        const node = document.getElementById("admin-memory-backlog-results");
+        if (!node) return;
+        if (!Array.isArray(items) || items.length === 0) {
+          node.innerHTML = `<p class="hint">생성된 backlog 후보가 없습니다.</p>`;
+          return;
+        }
+        node.innerHTML = `
+          <ul class="admin-memory-sublist admin-backlog-list">
+            ${items.map((item) => {
+              const payload = item?.payload && typeof item.payload === "object" ? item.payload : {};
+              const state = String(item?.state || "candidate").trim() || "candidate";
+              const priority = String(item?.priority || "P2").trim() || "P2";
+              const sourceKind = String(payload?.source_kind || "-").trim() || "-";
+              const category = String(payload?.category || "").trim();
+              const recommendedNodeType = String(payload?.recommended_node_type || "").trim();
+              return `
+                <li>
+                  <div class="admin-memory-subhead">
+                    <strong>${esc(String(item?.title || item?.candidate_id || "-"))}</strong>
+                    <div class="admin-memory-meta">
+                      <code>${esc(priority)}</code>
+                      <span class="badge status-${memoryStateBadgeClass(state)}">${esc(state)}</span>
+                    </div>
+                  </div>
+                  <p class="admin-memory-summary">${esc(String(item?.summary || "-"))}</p>
+                  <div class="admin-memory-meta">
+                    <code>${esc(sourceKind)}</code>
+                    ${category ? `<code>${esc(category)}</code>` : ""}
+                    ${recommendedNodeType ? `<code>${esc(recommendedNodeType)}</code>` : ""}
+                    <code>${esc(formatKstDateTime(item?.updated_at || item?.created_at || ""))}</code>
+                  </div>
+                </li>
+              `;
+            }).join("")}
+          </ul>
+        `;
+      }
+
+      const adminMemorySearchState = {
+        q: "",
+        state: "",
+        memoryType: "",
+        selectedId: "",
+      };
+
+      function applyAdminMemorySearchStateToForm() {
+        const queryInput = document.getElementById("admin-memory-search-query");
+        const stateSelect = document.getElementById("admin-memory-search-state");
+        const typeSelect = document.getElementById("admin-memory-search-type");
+        if (queryInput) queryInput.value = adminMemorySearchState.q;
+        if (stateSelect) stateSelect.value = adminMemorySearchState.state;
+        if (typeSelect) typeSelect.value = adminMemorySearchState.memoryType;
+      }
+
+      async function loadAdminMemoryDetail(memoryId) {
+        const normalizedId = String(memoryId || "").trim();
+        adminMemorySearchState.selectedId = normalizedId;
+        if (!normalizedId) {
+          renderAdminMemoryDetail(null);
+          renderAdminMemorySearchResults([]);
+          return;
+        }
+        const response = await fetch(`/api/admin/memory/${encodeURIComponent(normalizedId)}`, { cache: "no-store" });
+        const payload = await response.json();
+        if (!response.ok) {
+          renderAdminMemoryDetail(null);
+          throw new Error(payload.detail || "memory 상세 조회 실패");
+        }
+        renderAdminMemoryDetail(payload);
+      }
+
+      async function loadAdminMemorySearch({ preserveSelection = true } = {}) {
+        applyAdminMemorySearchStateToForm();
+        const params = new URLSearchParams();
+        if (adminMemorySearchState.q) params.set("q", adminMemorySearchState.q);
+        if (adminMemorySearchState.state) params.set("state", adminMemorySearchState.state);
+        if (adminMemorySearchState.memoryType) params.set("memory_type", adminMemorySearchState.memoryType);
+        params.set("limit", "12");
+        const response = await fetch(`/api/admin/memory/search?${params.toString()}`, { cache: "no-store" });
+        const payload = await response.json();
+        if (!response.ok) {
+          const node = document.getElementById("admin-memory-search-results");
+          if (node) node.innerHTML = `<p class="hint">${esc(payload.detail || "memory 검색 실패")}</p>`;
+          return;
+        }
+        const items = Array.isArray(payload?.items) ? payload.items : [];
+        const hasSelected = preserveSelection
+          && adminMemorySearchState.selectedId
+          && items.some((item) => String(item?.memory_id || "").trim() === adminMemorySearchState.selectedId);
+        if (!hasSelected) {
+          adminMemorySearchState.selectedId = items.length ? String(items[0]?.memory_id || "").trim() : "";
+        }
+        renderAdminMemorySearchResults(items);
+        if (adminMemorySearchState.selectedId) {
+          await loadAdminMemoryDetail(adminMemorySearchState.selectedId);
+          renderAdminMemorySearchResults(items);
+        } else {
+          renderAdminMemoryDetail(null);
+        }
+      }
+
+      async function saveAdminMemoryOverride(memoryId, nextState) {
+        const normalizedId = String(memoryId || "").trim();
+        if (!normalizedId) return;
+        let note = "";
+        if (nextState) {
+          const provided = window.prompt(`override note (${nextState})`, "");
+          if (provided === null) return;
+          note = provided.trim();
+        }
+        const response = await fetch(`/api/admin/memory/${encodeURIComponent(normalizedId)}/override`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ state: nextState, note }),
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          window.alert(payload.detail || "memory override 저장 실패");
+          return;
+        }
+        adminMemorySearchState.selectedId = normalizedId;
+        renderAdminMemoryDetail(payload?.detail || null);
+        await loadAdminMetrics();
+        await loadAdminMemorySearch({ preserveSelection: true });
+      }
+
+      async function loadAdminBacklogCandidates() {
+        const response = await fetch("/api/admin/memory/backlog?limit=12", { cache: "no-store" });
+        const payload = await response.json();
+        if (!response.ok) {
+          const node = document.getElementById("admin-memory-backlog-results");
+          if (node) node.innerHTML = `<p class="hint">${esc(payload.detail || "backlog 조회 실패")}</p>`;
+          return;
+        }
+        renderAdminBacklogCandidates(Array.isArray(payload?.items) ? payload.items : []);
+      }
+
+      async function loadAdminPanel() {
+        await loadAdminMetrics();
+        await loadAdminMemorySearch({ preserveSelection: true });
+        await loadAdminBacklogCandidates();
       }
 
       const jobsFilterState = {
@@ -1614,7 +1963,7 @@
         {
           role: "assistant",
           provider: "system",
-          content: "안녕하세요. 로그 분석 도우미입니다. Gemini 또는 Codex를 선택해 문제점을 분석할 수 있습니다.",
+          content: "안녕하세요. AI 도우미입니다. 현재는 로그/운영 진단에 집중하며, Gemini 또는 Codex와 여러 턴으로 대화하면서 최근 실행 문제를 분석할 수 있습니다.",
         },
       ];
       let assistantJobOptions = [];
@@ -1627,7 +1976,7 @@
         if (normalized === "claude") return "Codex";
         if (normalized === "copilot") return "Codex";
         if (normalized === "system") return "System";
-        return "Assistant";
+        return "AI 도우미";
       }
 
       function setAssistantStatus(message, isError = false) {
@@ -3166,13 +3515,16 @@
         const saved = localStorage.getItem("agenthub-main-tab");
         const initial = (saved === "settings" || saved === "assistant" || saved === "admin") ? saved : "jobs";
         setMainTab(initial);
+        if (initial === "admin") {
+          void loadAdminPanel();
+        }
 
         document.querySelectorAll(".menu-tab").forEach((button) => {
           button.addEventListener("click", () => {
             const nextTab = button.dataset.tab || "jobs";
             setMainTab(nextTab);
             if (nextTab === "admin") {
-              void loadAdminMetrics();
+              void loadAdminPanel();
             }
           });
         });
@@ -3229,22 +3581,28 @@
             return;
           }
 
-          const userMessage = jobId
-            ? `${text}\n(job_id=${jobId})`
-            : text;
-          assistantMessages.push({ role: "user", content: userMessage });
+          assistantMessages.push({ role: "user", content: text });
           renderAssistantMessages();
           input.value = "";
           submit.disabled = true;
-          setAssistantStatus(`${assistantProviderLabel(provider)} 로그 분석 중...`);
+          setAssistantStatus(`${assistantProviderLabel(provider)} 응답 생성 중...`);
 
           try {
-            const response = await fetch("/api/assistant/log-analysis", {
+            const history = assistantMessages
+              .filter((item) => item && (item.role === "user" || item.role === "assistant") && item.provider !== "system")
+              .slice(0, -1)
+              .slice(-12)
+              .map((item) => ({
+                role: item.role === "user" ? "user" : "assistant",
+                content: String(item.content || ""),
+              }));
+            const response = await fetch("/api/assistant/chat", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
                 assistant: provider,
-                question: text,
+                message: text,
+                history,
                 job_id: jobId,
               }),
             });
@@ -3541,7 +3899,7 @@
         refreshButton?.addEventListener("click", async () => {
           refreshButton.disabled = true;
           try {
-            await loadAdminMetrics();
+            await loadAdminPanel();
           } finally {
             refreshButton.disabled = false;
           }
@@ -3572,6 +3930,50 @@
         });
       }
 
+      function bindAdminMemoryWorkbench() {
+        const form = document.getElementById("admin-memory-search-form");
+        const resetButton = document.getElementById("admin-memory-search-reset");
+        const panel = document.getElementById("panel-admin");
+
+        form?.addEventListener("submit", async (event) => {
+          event.preventDefault();
+          adminMemorySearchState.q = document.getElementById("admin-memory-search-query")?.value.trim() || "";
+          adminMemorySearchState.state = document.getElementById("admin-memory-search-state")?.value.trim() || "";
+          adminMemorySearchState.memoryType = document.getElementById("admin-memory-search-type")?.value.trim() || "";
+          adminMemorySearchState.selectedId = "";
+          await loadAdminMemorySearch({ preserveSelection: false });
+        });
+
+        resetButton?.addEventListener("click", async () => {
+          adminMemorySearchState.q = "";
+          adminMemorySearchState.state = "";
+          adminMemorySearchState.memoryType = "";
+          adminMemorySearchState.selectedId = "";
+          applyAdminMemorySearchStateToForm();
+          await loadAdminMemorySearch({ preserveSelection: false });
+        });
+
+        panel?.addEventListener("click", async (event) => {
+          const target = event.target instanceof Element ? event.target : null;
+          if (!target) return;
+          const selectButton = target.closest("[data-memory-id]");
+          if (selectButton instanceof HTMLButtonElement && !selectButton.hasAttribute("data-memory-override-state")) {
+            const memoryId = String(selectButton.getAttribute("data-memory-id") || "").trim();
+            if (memoryId) {
+              await loadAdminMemoryDetail(memoryId);
+              await loadAdminMemorySearch({ preserveSelection: true });
+            }
+            return;
+          }
+
+          const overrideButton = target.closest("[data-memory-override-state]");
+          if (!(overrideButton instanceof HTMLButtonElement)) return;
+          const memoryId = String(overrideButton.getAttribute("data-memory-id") || "").trim();
+          const nextState = String(overrideButton.getAttribute("data-memory-override-state") || "").trim();
+          await saveAdminMemoryOverride(memoryId, nextState);
+        });
+      }
+
       initThemeToggle();
       bindMainTabs();
       bindSettingsTabs();
@@ -3587,6 +3989,7 @@
       bindJobsFilterControls();
       bindRequeueActions();
       bindAdminControls();
+      bindAdminMemoryWorkbench();
       hydrateRenderedTimes();
       applySafeTemplateToEasyFields();
       renderAssistantMessages();
@@ -3598,7 +4001,7 @@
       loadFeatureFlags();
       loadRoles();
       loadAgentConfig();
-      loadAdminMetrics();
+      loadAdminPanel();
       refreshJobs();
       setInterval(refreshJobs, 3000);
       setInterval(loadAdminMetrics, 10000);

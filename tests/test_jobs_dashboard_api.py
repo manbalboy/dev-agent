@@ -8,6 +8,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 import app.dashboard as dashboard
+from app.memory.runtime_store import MemoryRuntimeStore
 from app.models import JobRecord
 
 
@@ -661,6 +662,139 @@ def test_admin_metrics_api_aggregates_system_quality_and_memory_signals(app_comp
     assert payload["runtime"]["shadow_decision_counts"][0]["name"] == "memory_divergence"
 
 
+def test_admin_memory_search_detail_and_override_api(app_components):
+    settings, _, app = app_components
+    client = TestClient(app)
+    runtime_store = MemoryRuntimeStore(settings.resolved_memory_dir / "memory_runtime.db")
+    runtime_store.upsert_entry(
+        {
+            "memory_id": "conv_pytest_file_pattern",
+            "memory_type": "convention",
+            "repository": "owner/repo",
+            "execution_repository": "owner/repo",
+            "app_code": "default",
+            "workflow_id": "wf-default",
+            "job_id": "job-memory-ui",
+            "title": "pytest file pattern",
+            "summary": "tests live under tests/test_*.py",
+            "baseline_score": 2.4,
+            "baseline_confidence": 0.8,
+            "score": 2.4,
+            "confidence": 0.8,
+            "updated_at": "2026-03-11T00:00:00+00:00",
+        }
+    )
+    runtime_store.replace_evidence(
+        "conv_pytest_file_pattern",
+        [
+            {
+                "evidence_id": "ev-1",
+                "evidence_type": "source_path",
+                "source_path": "tests/test_jobs_dashboard_api.py",
+                "content": "dashboard api tests use pytest naming",
+                "created_at": "2026-03-11T00:01:00+00:00",
+            }
+        ],
+    )
+    runtime_store.upsert_feedback(
+        {
+            "feedback_id": "fb-1",
+            "memory_id": "conv_pytest_file_pattern",
+            "job_id": "job-memory-ui",
+            "generated_at": "2026-03-11T00:02:00+00:00",
+            "verdict": "promote",
+            "score_delta": 1.2,
+            "routes": ["planner", "reviewer"],
+        }
+    )
+    runtime_store.refresh_rankings(as_of="2026-03-11T00:10:00+00:00")
+
+    response = client.get("/api/admin/memory/search", params={"q": "pytest", "state": "promoted"})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count"] == 1
+    assert payload["items"][0]["memory_id"] == "conv_pytest_file_pattern"
+    assert payload["items"][0]["state_reason"] == "high cumulative score"
+
+    response = client.get("/api/admin/memory/conv_pytest_file_pattern")
+    assert response.status_code == 200
+    detail = response.json()
+    assert detail["entry"]["memory_id"] == "conv_pytest_file_pattern"
+    assert detail["evidence"][0]["source_path"] == "tests/test_jobs_dashboard_api.py"
+    assert detail["feedback"][0]["verdict"] == "promote"
+
+    response = client.post(
+        "/api/admin/memory/conv_pytest_file_pattern/override",
+        json={"state": "banned", "note": "manual regression check"},
+    )
+    assert response.status_code == 200
+    override_payload = response.json()
+    assert override_payload["saved"] is True
+    assert override_payload["entry"]["state"] == "banned"
+    assert override_payload["entry"]["manual_state_override"] == "banned"
+    assert override_payload["detail"]["entry"]["state_reason"] == "manual override: manual regression check"
+
+    response = client.get("/api/admin/memory/search", params={"state": "banned"})
+    assert response.status_code == 200
+    banned_payload = response.json()
+    assert banned_payload["items"][0]["memory_id"] == "conv_pytest_file_pattern"
+
+
+def test_admin_memory_backlog_api_returns_candidates(app_components):
+    settings, _, app = app_components
+    client = TestClient(app)
+    runtime_store = MemoryRuntimeStore(settings.resolved_memory_dir / "memory_runtime.db")
+    runtime_store.upsert_backlog_candidate(
+        {
+            "candidate_id": "strategy_shadow:job-backlog:feature_expansion",
+            "repository": "owner/repo",
+            "execution_repository": "owner/repo",
+            "app_code": "default",
+            "workflow_id": "wf-default",
+            "title": "전략 재검토: feature_expansion",
+            "summary": "현재 전략과 shadow 전략이 갈라짐",
+            "priority": "P1",
+            "state": "candidate",
+            "payload": {
+                "source_kind": "strategy_shadow",
+                "job_id": "job-backlog",
+                "shadow_strategy": "feature_expansion",
+                "decision_mode": "memory_divergence",
+            },
+            "created_at": "2026-03-11T01:00:00+00:00",
+            "updated_at": "2026-03-11T01:00:00+00:00",
+        }
+    )
+    runtime_store.upsert_backlog_candidate(
+        {
+            "candidate_id": "quality_trend_persistent_low:job-backlog:test_coverage",
+            "repository": "owner/repo",
+            "execution_repository": "owner/repo",
+            "app_code": "default",
+            "workflow_id": "wf-default",
+            "title": "지속 저점 개선: test_coverage",
+            "summary": "최근 3회 리뷰에서 저점이 지속됨",
+            "priority": "P1",
+            "state": "candidate",
+            "payload": {
+                "source_kind": "quality_trend_persistent_low",
+                "job_id": "job-backlog",
+                "category": "test_coverage",
+            },
+            "created_at": "2026-03-11T01:01:00+00:00",
+            "updated_at": "2026-03-11T01:01:00+00:00",
+        }
+    )
+
+    response = client.get("/api/admin/memory/backlog", params={"q": "shadow", "priority": "P1"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count"] == 1
+    assert payload["items"][0]["candidate_id"] == "strategy_shadow:job-backlog:feature_expansion"
+    assert payload["items"][0]["payload"]["source_kind"] == "strategy_shadow"
+
+
 def test_jobs_api_query_matches_runtime_quality_signals(app_components):
     settings, store, app = app_components
     client = TestClient(app)
@@ -780,3 +914,8 @@ def test_roles_api_default_catalog_hides_legacy_provider_roles(app_components, m
     assert "log-analyzer-gemini" in role_codes
     assert "log-analyzer-claude" not in role_codes
     assert "log-analyzer-copilot" not in role_codes
+    helper_templates = {item["code"]: item.get("template_key", "") for item in payload["roles"]}
+    assert helper_templates["ai-helper"] == "codex_helper"
+    assert helper_templates["incident-analyst"] == "codex_helper"
+    assert helper_templates["orchestration-helper"] == "codex_helper"
+    assert helper_templates["data-ai-engineer"] == "codex_helper"

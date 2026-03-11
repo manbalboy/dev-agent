@@ -590,7 +590,7 @@
           documentation_task: "TECH_WRITER",
           implement_with_codex: "CODER",
           fix_with_codex: "CODER",
-          summarize_code_changes: "COPILOT",
+          summarize_code_changes: "CODEX_HELPER",
           test_after_implement: "TESTER",
           test_after_fix: "TESTER",
           ux_e2e_review: "TESTER",
@@ -622,7 +622,8 @@
           GIT: "깃",
           SYSTEM: "시스템",
           SHELL: "쉘",
-          COPILOT: "코파일럿",
+          CODEX_HELPER: "Codex 도우미",
+          COPILOT: "Codex 도우미",
           CLAUDE: "클로드",
         };
         return map[key] || key.toLowerCase();
@@ -681,8 +682,9 @@
         const attempt = String(first.attempt || "1").replace(/^attempt:/, "");
         const round = String(first.roundLabel || "").trim();
         const mode = String(first.mode || "").trim();
+        const actor = actorDisplayName(detectGroupActor(group));
         const roundText = round ? ` · ${round}` : (mode ? ` · ${mode}` : "");
-        return `시도 ${attempt}${roundText} · ${stage} · ${group.entries.length}줄`;
+        return `시도 ${attempt}${roundText} · ${stage} · ${actor} · ${group.entries.length}줄`;
       }
 
       function parseAttemptContext(message) {
@@ -767,8 +769,8 @@
         if (key === "CLAUDE") {
           return { min: 3.0, max: 15.0, label: "Claude 계열 추정" };
         }
-        if (key === "COPILOT") {
-          return { min: 2.0, max: 12.0, label: "Copilot 경유 모델 추정" };
+        if (["CODEX_HELPER", "COPILOT"].includes(key)) {
+          return { min: 1.25, max: 10.0, label: "Codex helper 추정" };
         }
         return { min: 0, max: 0, label: "비과금/미집계" };
       }
@@ -1687,6 +1689,7 @@
       }
 
       function renderGroupSnapshot(group) {
+        if (!group?.isStageTail) return "";
         const key = `${group.attempt}|${group.stage}`;
         const snapshot = stageSnapshotMap.get(key);
         if (!snapshot) return "";
@@ -1722,11 +1725,14 @@
       }
 
       function detectGroupActor(group) {
+        const groupActor = String(group?.actor || "").trim();
+        if (groupActor && groupActor !== "ORCHESTRATOR") return groupActor;
+        if (groupActor) return groupActor;
         const stageCode = String(group.stage || "").replace(/^stage:/, "");
-        const stageActor = stageOwnerActor(stageCode);
-        if (stageActor !== "ORCHESTRATOR") return stageActor;
         const runEntry = (group.entries || []).find((entry) => String(entry.message || "").startsWith("[RUN] "));
         if (runEntry && runEntry.actor) return runEntry.actor;
+        const stageActor = stageOwnerActor(stageCode);
+        if (stageActor !== "ORCHESTRATOR") return stageActor;
         return "ORCHESTRATOR";
       }
 
@@ -1763,6 +1769,7 @@
       }
 
       function summarizeGroupDocuments(group) {
+        if (!group?.isStageTail) return [];
         const snapshot = stageSnapshotMap.get(`${group.attempt}|${group.stage}`);
         const changedRaw = Array.isArray(snapshot && snapshot.changed_files)
           ? snapshot.changed_files
@@ -2012,8 +2019,18 @@
           const nextAttempt = attemptContext ? `attempt:${attemptContext.attempt}` : currentAttempt;
           const nextRoundLabel = attemptContext ? attemptContext.roundLabel : currentRoundLabel;
           const nextMode = attemptContext ? attemptContext.mode : currentMode;
+          const entryActor = String(entry.actor || "ORCHESTRATOR").trim().toUpperCase() || "ORCHESTRATOR";
+          const startsRun = String(entry.message || "").startsWith("[RUN] ");
           const stageMatch = String(entry.message || "").match(/^\[STAGE\]\s+([a-zA-Z0-9_:-]+)/);
           const nextStage = stageMatch ? `stage:${stageMatch[1]}` : currentStage;
+          const actorChanged = Boolean(activeGroup) && activeGroup.actor !== entryActor;
+          const hasRuntimeLines = Boolean(activeGroup) && activeGroup.entries.some((item) => {
+            const message = String(item?.message || "");
+            return message.startsWith("[RUN] ")
+              || message.startsWith("[STDOUT]")
+              || message.startsWith("[STDERR]")
+              || message.startsWith("[DONE] ");
+          });
 
           const mustStartNewGroup = !activeGroup
             || activeGroup.attempt !== nextAttempt
@@ -2021,15 +2038,22 @@
             || activeGroup.roundLabel !== nextRoundLabel
             || Boolean(attemptContext)
             || Boolean(stageMatch);
+          const mustSplitRuntimeSegment = Boolean(activeGroup)
+            && (
+              (startsRun && hasRuntimeLines)
+              || (actorChanged && hasRuntimeLines)
+            );
 
-          if (mustStartNewGroup) {
+          if (mustStartNewGroup || mustSplitRuntimeSegment) {
             segmentIndex += 1;
             activeGroup = {
-              key: `${nextAttempt}|${nextStage}|segment:${segmentIndex}`,
+              key: `${nextAttempt}|${nextStage}|actor:${entryActor}|segment:${segmentIndex}`,
               attempt: nextAttempt,
               stage: nextStage,
               roundLabel: nextRoundLabel,
               mode: nextMode,
+              actor: entryActor,
+              isStageTail: false,
               entries: [],
             };
             grouped.push(activeGroup);
@@ -2045,6 +2069,14 @@
           currentStage = nextStage;
           currentRoundLabel = nextRoundLabel;
           currentMode = nextMode;
+        }
+
+        for (let index = 0; index < grouped.length; index += 1) {
+          const current = grouped[index];
+          const next = grouped[index + 1] || null;
+          const currentStageKey = `${current.attempt}|${current.stage}`;
+          const nextStageKey = next ? `${next.attempt}|${next.stage}` : "";
+          current.isStageTail = currentStageKey !== nextStageKey;
         }
 
         return grouped;

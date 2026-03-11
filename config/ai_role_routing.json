@@ -51,25 +51,30 @@
     "commit_summary": {
       "role_code": "tech-writer",
       "template_keys": ["commit_summary", "pr_summary", "escalation"],
-      "fallback_route": "copilot_helper",
+      "fallback_route": "codex_helper",
       "description": "커밋 제목/요약 생성"
     },
     "pr_summary": {
       "role_code": "tech-writer",
       "template_keys": ["pr_summary", "escalation"],
-      "fallback_route": "copilot_helper",
+      "fallback_route": "codex_helper",
       "description": "PR 본문 요약 생성"
     },
     "escalation": {
       "role_code": "escalation-helper",
-      "template_keys": ["escalation", "copilot"],
-      "fallback_route": "copilot_helper",
+      "template_keys": ["escalation", "codex_helper"],
+      "fallback_route": "codex_helper",
       "description": "실패 분석과 보조 전략"
+    },
+    "codex_helper": {
+      "role_code": "orchestration-helper",
+      "template_keys": ["codex_helper"],
+      "description": "Codex 기반 보조 오케스트레이션 분석"
     },
     "copilot_helper": {
       "role_code": "orchestration-helper",
-      "template_keys": ["copilot"],
-      "description": "보조 오케스트레이션 분석"
+      "template_keys": ["codex_helper"],
+      "description": "레거시 helper route 별칭"
     },
     "research_search": {
       "role_code": "research-agent",

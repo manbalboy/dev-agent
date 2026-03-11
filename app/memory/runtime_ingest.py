@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from app.memory.runtime_store import MemoryRuntimeStore
-from app.models import JobRecord
+from app.models import JobRecord, utc_now_iso
 
 
 def ingest_memory_runtime_artifacts(
@@ -34,6 +34,7 @@ def ingest_memory_runtime_artifacts(
     evidence_ids: set[str] = set()
     feedback_ids: set[str] = set()
     retrieval_run_ids: set[str] = set()
+    backlog_candidate_ids: set[str] = set()
 
     for entry in _read_jsonl_entries(paths.get("memory_log")):
         memory_id = str(entry.get("memory_id", "")).strip()
@@ -236,6 +237,17 @@ def ingest_memory_runtime_artifacts(
             )
             retrieval_run_ids.add(run_id)
 
+    for candidate in _build_backlog_candidate_payloads(
+        job=job,
+        execution_repository=execution_repository,
+        paths=paths,
+    ):
+        candidate_id = str(candidate.get("candidate_id", "")).strip()
+        if not candidate_id:
+            continue
+        store.upsert_backlog_candidate(candidate)
+        backlog_candidate_ids.add(candidate_id)
+
     store.refresh_rankings(as_of=_latest_generated_at(paths=paths))
 
     return {
@@ -243,6 +255,7 @@ def ingest_memory_runtime_artifacts(
         "evidence": len(evidence_ids),
         "feedback": len(feedback_ids),
         "retrieval_runs": len(retrieval_run_ids),
+        "backlog_candidates": len(backlog_candidate_ids),
     }
 
 
@@ -381,3 +394,326 @@ def _latest_generated_at(*, paths: Dict[str, Path]) -> str | None:
         if generated_at:
             candidates.append(generated_at)
     return max(candidates) if candidates else None
+
+
+def _build_backlog_candidate_payloads(
+    *,
+    job: JobRecord,
+    execution_repository: str,
+    paths: Dict[str, Path],
+) -> List[Dict[str, Any]]:
+    workflow_id = str(job.workflow_id or "").strip()
+    candidates: List[Dict[str, Any]] = []
+
+    improvement_backlog_payload = _read_json_file(paths.get("improvement_backlog"))
+    improvement_items = improvement_backlog_payload.get("items", []) if isinstance(improvement_backlog_payload, dict) else []
+    if not isinstance(improvement_items, list):
+        improvement_items = []
+    for index, item in enumerate(improvement_items):
+        if not isinstance(item, dict):
+            continue
+        source_issue_id = str(item.get("id", "")).strip() or f"item_{index + 1}"
+        reason = str(item.get("reason", "")).strip()
+        action = str(item.get("action", "")).strip()
+        candidates.append(
+            _make_backlog_candidate_payload(
+                job=job,
+                execution_repository=execution_repository,
+                workflow_id=workflow_id,
+                source_kind="improvement_backlog",
+                source_id=source_issue_id,
+                title=str(item.get("title", "")).strip() or f"Improvement backlog {index + 1}",
+                summary=_join_summary_parts(reason, action),
+                priority=str(item.get("priority", "")).strip() or "P2",
+                created_at=str(improvement_backlog_payload.get("generated_at", "")).strip(),
+                source_path=paths.get("improvement_backlog"),
+                payload={
+                    "source_kind": "improvement_backlog",
+                    "job_id": job.job_id,
+                    "source_issue_id": source_issue_id,
+                    "reason": reason,
+                    "action": action,
+                    "cluster_key": _cluster_key(
+                        repository=job.repository,
+                        app_code=job.app_code,
+                        workflow_id=workflow_id,
+                        source_kind="improvement_backlog",
+                        source_id=source_issue_id,
+                    ),
+                    "raw": item,
+                },
+            )
+        )
+
+    next_tasks_payload = _read_json_file(paths.get("next_improvement_tasks"))
+    next_tasks = next_tasks_payload.get("tasks", []) if isinstance(next_tasks_payload, dict) else []
+    if not isinstance(next_tasks, list):
+        next_tasks = []
+    for index, item in enumerate(next_tasks):
+        if not isinstance(item, dict):
+            continue
+        task_id = str(item.get("task_id", "")).strip() or str(item.get("source_issue_id", "")).strip() or f"task_{index + 1}"
+        reason = str(item.get("reason", "")).strip()
+        action = str(item.get("action", "")).strip()
+        strategy = str(item.get("selected_by_strategy", "")).strip() or str(next_tasks_payload.get("strategy", "")).strip()
+        recommended_node_type = str(item.get("recommended_node_type", "")).strip()
+        candidates.append(
+            _make_backlog_candidate_payload(
+                job=job,
+                execution_repository=execution_repository,
+                workflow_id=workflow_id,
+                source_kind="next_improvement_task",
+                source_id=task_id,
+                title=str(item.get("title", "")).strip() or f"Next improvement task {index + 1}",
+                summary=_join_summary_parts(reason, action, recommended_node_type),
+                priority=str(item.get("priority", "")).strip() or "P2",
+                created_at=str(next_tasks_payload.get("generated_at", "")).strip(),
+                source_path=paths.get("next_improvement_tasks"),
+                payload={
+                    "source_kind": "next_improvement_task",
+                    "job_id": job.job_id,
+                    "task_id": task_id,
+                    "source_issue_id": str(item.get("source_issue_id", "")).strip(),
+                    "reason": reason,
+                    "action": action,
+                    "selected_by_strategy": strategy,
+                    "recommended_node_type": recommended_node_type,
+                    "scope_restriction": str(next_tasks_payload.get("scope_restriction", "")).strip(),
+                    "cluster_key": _cluster_key(
+                        repository=job.repository,
+                        app_code=job.app_code,
+                        workflow_id=workflow_id,
+                        source_kind="next_improvement_task",
+                        source_id=str(item.get("source_issue_id", "")).strip() or task_id,
+                    ),
+                    "raw": item,
+                },
+            )
+        )
+
+    quality_trend_payload = _read_json_file(paths.get("quality_trend"))
+    review_round_count = int(quality_trend_payload.get("review_round_count", 0) or 0) if isinstance(quality_trend_payload, dict) else 0
+    trend_direction = str(quality_trend_payload.get("trend_direction", "")).strip() if isinstance(quality_trend_payload, dict) else ""
+    delta_from_previous = quality_trend_payload.get("delta_from_previous") if isinstance(quality_trend_payload, dict) else None
+    persistent_low_categories = quality_trend_payload.get("persistent_low_categories", []) if isinstance(quality_trend_payload, dict) else []
+    stagnant_categories = quality_trend_payload.get("stagnant_categories", []) if isinstance(quality_trend_payload, dict) else []
+    if not isinstance(persistent_low_categories, list):
+        persistent_low_categories = []
+    if not isinstance(stagnant_categories, list):
+        stagnant_categories = []
+
+    for category in persistent_low_categories:
+        normalized_category = str(category or "").strip()
+        if not normalized_category:
+            continue
+        candidates.append(
+            _make_backlog_candidate_payload(
+                job=job,
+                execution_repository=execution_repository,
+                workflow_id=workflow_id,
+                source_kind="quality_trend_persistent_low",
+                source_id=normalized_category,
+                title=f"지속 저점 개선: {normalized_category}",
+                summary=_join_summary_parts(
+                    f"최근 {review_round_count}회 리뷰에서 저점이 지속됨" if review_round_count else "지속 저점 감지",
+                    _recommended_action_for_category(normalized_category),
+                ),
+                priority="P1",
+                created_at=str(quality_trend_payload.get("generated_at", "")).strip(),
+                source_path=paths.get("quality_trend"),
+                payload={
+                    "source_kind": "quality_trend_persistent_low",
+                    "job_id": job.job_id,
+                    "category": normalized_category,
+                    "trend_direction": trend_direction,
+                    "delta_from_previous": delta_from_previous,
+                    "review_round_count": review_round_count,
+                    "recommended_action": _recommended_action_for_category(normalized_category),
+                    "cluster_key": _cluster_key(
+                        repository=job.repository,
+                        app_code=job.app_code,
+                        workflow_id=workflow_id,
+                        source_kind="quality_trend_persistent_low",
+                        source_id=normalized_category,
+                    ),
+                },
+            )
+        )
+
+    for category in stagnant_categories:
+        normalized_category = str(category or "").strip()
+        if not normalized_category:
+            continue
+        candidates.append(
+            _make_backlog_candidate_payload(
+                job=job,
+                execution_repository=execution_repository,
+                workflow_id=workflow_id,
+                source_kind="quality_trend_stagnant",
+                source_id=normalized_category,
+                title=f"정체 카테고리 개선: {normalized_category}",
+                summary=_join_summary_parts(
+                    "최근 리뷰 라운드에서 개선 폭이 정체됨",
+                    _recommended_action_for_category(normalized_category),
+                ),
+                priority="P2",
+                created_at=str(quality_trend_payload.get("generated_at", "")).strip(),
+                source_path=paths.get("quality_trend"),
+                payload={
+                    "source_kind": "quality_trend_stagnant",
+                    "job_id": job.job_id,
+                    "category": normalized_category,
+                    "trend_direction": trend_direction,
+                    "delta_from_previous": delta_from_previous,
+                    "review_round_count": review_round_count,
+                    "recommended_action": _recommended_action_for_category(normalized_category),
+                    "cluster_key": _cluster_key(
+                        repository=job.repository,
+                        app_code=job.app_code,
+                        workflow_id=workflow_id,
+                        source_kind="quality_trend_stagnant",
+                        source_id=normalized_category,
+                    ),
+                },
+            )
+        )
+
+    strategy_shadow_payload = _read_json_file(paths.get("strategy_shadow_report"))
+    if isinstance(strategy_shadow_payload, dict) and bool(strategy_shadow_payload.get("diverged")):
+        shadow_strategy = str(strategy_shadow_payload.get("shadow_strategy", "")).strip() or "shadow"
+        decision_mode = str(strategy_shadow_payload.get("decision_mode", "")).strip()
+        confidence = strategy_shadow_payload.get("confidence")
+        candidates.append(
+            _make_backlog_candidate_payload(
+                job=job,
+                execution_repository=execution_repository,
+                workflow_id=workflow_id,
+                source_kind="strategy_shadow",
+                source_id=shadow_strategy,
+                title=f"전략 재검토: {shadow_strategy}",
+                summary=_join_summary_parts(
+                    "현재 전략과 memory-aware shadow 전략이 갈라짐",
+                    decision_mode,
+                ),
+                priority="P1",
+                created_at=str(strategy_shadow_payload.get("generated_at", "")).strip(),
+                source_path=paths.get("strategy_shadow_report"),
+                payload={
+                    "source_kind": "strategy_shadow",
+                    "job_id": job.job_id,
+                    "shadow_strategy": shadow_strategy,
+                    "decision_mode": decision_mode,
+                    "confidence": confidence,
+                    "diverged": True,
+                    "cluster_key": _cluster_key(
+                        repository=job.repository,
+                        app_code=job.app_code,
+                        workflow_id=workflow_id,
+                        source_kind="strategy_shadow",
+                        source_id=shadow_strategy,
+                    ),
+                    "raw": strategy_shadow_payload,
+                },
+            )
+        )
+
+    return candidates
+
+
+def _make_backlog_candidate_payload(
+    *,
+    job: JobRecord,
+    execution_repository: str,
+    workflow_id: str,
+    source_kind: str,
+    source_id: str,
+    title: str,
+    summary: str,
+    priority: str,
+    created_at: str,
+    source_path: Path | None,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    normalized_source_id = _slug_part(source_id) or "candidate"
+    normalized_source_kind = _slug_part(source_kind) or "backlog"
+    timestamp = created_at or utc_now_iso()
+    return {
+        "candidate_id": f"{normalized_source_kind}:{job.job_id}:{normalized_source_id}",
+        "repository": job.repository,
+        "execution_repository": execution_repository,
+        "app_code": job.app_code,
+        "workflow_id": workflow_id,
+        "title": title.strip() or normalized_source_id,
+        "summary": summary.strip() or title.strip() or normalized_source_id,
+        "priority": _normalize_backlog_priority(priority),
+        "state": "candidate",
+        "payload": {
+            **payload,
+            "job_id": job.job_id,
+            "issue_number": job.issue_number,
+            "issue_title": job.issue_title,
+            "source_path": str(source_path) if source_path is not None else "",
+        },
+        "created_at": timestamp,
+        "updated_at": timestamp,
+    }
+
+
+def _join_summary_parts(*parts: str) -> str:
+    normalized = [str(part or "").strip() for part in parts if str(part or "").strip()]
+    if not normalized:
+        return ""
+    return " / ".join(normalized[:3])
+
+
+def _cluster_key(
+    *,
+    repository: str,
+    app_code: str,
+    workflow_id: str,
+    source_kind: str,
+    source_id: str,
+) -> str:
+    return "|".join(
+        [
+            str(repository or "").strip(),
+            str(app_code or "").strip() or "default",
+            str(workflow_id or "").strip() or "default",
+            _slug_part(source_kind) or "backlog",
+            _slug_part(source_id) or "candidate",
+        ]
+    )
+
+
+def _slug_part(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if not normalized:
+        return ""
+    parts: List[str] = []
+    for char in normalized:
+        if char.isalnum():
+            parts.append(char)
+        else:
+            parts.append("_")
+    collapsed = "".join(parts).strip("_")
+    while "__" in collapsed:
+        collapsed = collapsed.replace("__", "_")
+    return collapsed[:120]
+
+
+def _normalize_backlog_priority(value: str) -> str:
+    normalized = str(value or "").strip().upper()
+    if normalized in {"P0", "P1", "P2", "P3"}:
+        return normalized
+    return "P2"
+
+
+def _recommended_action_for_category(category: str) -> str:
+    normalized = str(category or "").strip().lower()
+    if "test" in normalized:
+        return "회귀 테스트와 검증 시나리오를 우선 보강"
+    if normalized in {"ux_clarity", "loading_state_handling", "empty_state_handling", "error_state_handling"}:
+        return "문제 흐름을 재현하고 화면 상태/카피를 함께 정리"
+    if normalized in {"architecture_structure", "maintainability", "code_quality"}:
+        return "구조 정리와 리팩터링 범위를 작은 단위로 쪼개서 개선"
+    return "해당 카테고리의 반복 실패 원인을 기준으로 다음 작업을 설계"

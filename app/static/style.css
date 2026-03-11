@@ -675,6 +675,150 @@ code {
   margin-bottom: 6px;
 }
 
+.admin-memory-search-form {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) repeat(2, minmax(160px, 1fr)) auto;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.admin-memory-search-form label {
+  display: grid;
+  gap: 8px;
+  color: var(--muted-text);
+  font-size: 13px;
+}
+
+.admin-memory-search-form input,
+.admin-memory-search-form select {
+  width: 100%;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--surface-soft);
+  color: var(--text);
+  padding: 12px 14px;
+  font: inherit;
+}
+
+.admin-memory-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: end;
+}
+
+.admin-memory-result-list {
+  display: grid;
+  gap: 10px;
+}
+
+.admin-memory-result {
+  border: 1px solid var(--line-color);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.02);
+  padding: 14px;
+}
+
+.admin-memory-result.is-selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+.admin-memory-result-head {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.admin-memory-result-head strong,
+.admin-memory-detail-head strong {
+  word-break: break-word;
+}
+
+.admin-memory-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.admin-memory-meta code {
+  font-size: 12px;
+}
+
+.admin-memory-summary {
+  margin: 0;
+  color: var(--muted-text);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.admin-memory-detail {
+  display: grid;
+  gap: 14px;
+}
+
+.admin-memory-detail-head {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.admin-memory-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 16px;
+}
+
+.admin-memory-detail-grid div {
+  display: grid;
+  gap: 4px;
+}
+
+.admin-memory-detail-grid dt {
+  color: var(--muted-text);
+  font-size: 12px;
+}
+
+.admin-memory-detail-grid dd {
+  margin: 0;
+  font-weight: 600;
+  word-break: break-word;
+}
+
+.admin-memory-sublist {
+  display: grid;
+  gap: 10px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.admin-memory-sublist li {
+  border-top: 1px solid var(--line-color);
+  padding-top: 10px;
+}
+
+.admin-memory-sublist li:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.admin-memory-subhead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+
+.admin-backlog-list .admin-memory-subhead {
+  align-items: flex-start;
+}
+
 .assistant-form-grid {
   display: grid;
   grid-template-columns: 1fr;
@@ -2677,6 +2821,14 @@ tbody tr:hover {
 
   .admin-grid,
   .admin-grid-lists {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-memory-search-form {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-memory-detail-grid {
     grid-template-columns: 1fr;
   }
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import hashlib
+import inspect
 import json
 import os
 from pathlib import Path
@@ -75,6 +76,9 @@ from app.workflow_resolution import load_workflow_catalog, resolve_workflow_sele
 from app.memory.fix_store import FixStore, NoOpFixStore
 from app.memory.runtime_ingest import ingest_memory_runtime_artifacts
 from app.memory.runtime_store import MemoryRuntimeStore
+from app.recovery_runtime import RecoveryRuntime
+from app.shell_test_runtime import ShellTestRuntime
+from app.tool_runtime import ToolRequest, ToolResult, ToolRuntime
 
 
 ShellExecutor = Callable[..., object]
@@ -90,7 +94,7 @@ WORKFLOW_NODE_ROUTE_NAMES: Dict[str, tuple[str, ...]] = {
     "copywriter_task": ("copywriter",),
     "documentation_task": ("documentation",),
     "codex_implement": ("coder",),
-    "code_change_summary": ("copilot_helper",),
+    "code_change_summary": ("codex_helper",),
     "commit_implement": ("commit_summary",),
     "gemini_review": ("reviewer",),
     "codex_fix": ("coder",),
@@ -134,11 +138,70 @@ class Orchestrator:
         self._workflow_route_role_overrides: Dict[str, str] = {}
         self._active_job_id: str | None = None
         self._last_heartbeat_monotonic: float = 0.0
+        self._shell_executor_accepts_heartbeat = self._callable_accepts_kwargs(
+            self.shell_executor,
+            {"heartbeat_callback", "heartbeat_interval_seconds"},
+        )
         self._memory_runtime_db_path = settings.resolved_memory_dir / "memory_runtime.db"
         self._memory_runtime_store: MemoryRuntimeStore | None = None
         self._fix_store: FixStore | NoOpFixStore = (
             FixStore(settings.resolved_memory_dir) if settings.memory_enabled else NoOpFixStore()
         )
+        self._shell_test_runtime = ShellTestRuntime(
+            settings=self.settings,
+            shell_executor=self.shell_executor,
+            shell_executor_accepts_heartbeat=self._shell_executor_accepts_heartbeat,
+            touch_job_heartbeat=self._touch_job_heartbeat,
+            actor_log_writer=self._actor_log_writer,
+            infer_actor_from_command=self._infer_actor_from_command,
+            set_stage=self._set_stage,
+            append_actor_log=self._append_actor_log,
+            is_long_track=self._is_long_track,
+        )
+        self._recovery_runtime = RecoveryRuntime(
+            command_templates=self.command_templates,
+            stage_run_tests=self._stage_run_tests,
+            append_actor_log=self._append_actor_log,
+            stage_fix_with_codex=self._stage_fix_with_codex,
+            commit_markdown_changes_after_stage=self._commit_markdown_changes_after_stage,
+            is_recovery_mode_enabled=self._is_recovery_mode_enabled,
+            find_configured_template_for_route=self._find_configured_template_for_route,
+            template_for_route=self._template_for_route,
+            build_template_variables=self._build_template_variables,
+            docs_file=self._docs_file,
+            actor_log_writer=self._actor_log_writer,
+            is_escalation_enabled=self._is_escalation_enabled,
+            run_optional_escalation=self._run_optional_escalation,
+        )
+        self._tool_runtime = ToolRuntime(
+            command_templates=self.command_templates,
+            docs_file=self._docs_file,
+            build_template_variables=self._build_template_variables,
+            template_for_route=self._template_for_route,
+            actor_log_writer=self._actor_log_writer,
+            append_actor_log=self._append_actor_log,
+            build_local_evidence_fallback=self._build_local_evidence_fallback,
+        )
+        self._install_command_template_heartbeat()
+
+    def _install_command_template_heartbeat(self) -> None:
+        """Attach heartbeat hooks to the template runner when it supports attributes."""
+
+        try:
+            setattr(self.command_templates, "heartbeat_callback", self._touch_job_heartbeat)
+            setattr(self.command_templates, "heartbeat_interval_seconds", 10.0)
+        except Exception:
+            return
+
+    @staticmethod
+    def _callable_accepts_kwargs(target: Callable[..., object], names: Set[str]) -> bool:
+        """Return True when one callable exposes every requested keyword parameter."""
+
+        try:
+            parameters = inspect.signature(target).parameters
+        except (TypeError, ValueError):
+            return False
+        return names.issubset(parameters.keys())
 
     def _feature_enabled(self, flag_name: str) -> bool:
         """Read one adaptive feature flag without requiring process restart."""
@@ -3245,7 +3308,7 @@ class Orchestrator:
         )
 
         git_head = ""
-        result = self.shell_executor(
+        result = self._execute_shell_command(
             command=f"git -C {shlex.quote(str(repository_path))} rev-parse HEAD",
             cwd=repository_path,
             log_writer=self._actor_log_writer(log_path, "GIT"),
@@ -5687,11 +5750,11 @@ class Orchestrator:
                 tool_request = self._parse_planner_tool_request(plan_text)
                 if not tool_request:
                     break
-                if not self._route_allows_tool("planner", str(tool_request.get("tool", ""))):
+                if not self._route_allows_tool("planner", tool_request.tool):
                     self._append_actor_log(
                         log_path,
                         "ORCHESTRATOR",
-                        f"Planner requested disallowed tool '{tool_request.get('tool', '')}'. Ignoring tool request.",
+                        f"Planner requested disallowed tool '{tool_request.tool}'. Ignoring tool request.",
                     )
                     break
                 if tool_request_count >= max_tool_requests:
@@ -5787,31 +5850,10 @@ class Orchestrator:
         return raw not in {"0", "false", "no", "off"}
 
     @staticmethod
-    def _parse_planner_tool_request(plan_text: str) -> Optional[Dict[str, str]]:
+    def _parse_planner_tool_request(plan_text: str) -> Optional[ToolRequest]:
         """Parse planner TOOL_REQUEST block from PLAN output."""
 
-        text = str(plan_text or "").strip()
-        if not text:
-            return None
-        block_match = re.search(
-            r"\[TOOL_REQUEST\](.*?)\[/TOOL_REQUEST\]",
-            text,
-            flags=re.IGNORECASE | re.DOTALL,
-        )
-        payload = block_match.group(1) if block_match else text
-
-        tool_match = re.search(r"^\s*tool\s*:\s*([a-zA-Z0-9_\-]+)\s*$", payload, flags=re.IGNORECASE | re.MULTILINE)
-        query_match = re.search(r"^\s*query\s*:\s*(.+?)\s*$", payload, flags=re.IGNORECASE | re.MULTILINE)
-        reason_match = re.search(r"^\s*reason\s*:\s*(.+?)\s*$", payload, flags=re.IGNORECASE | re.MULTILINE)
-        if not tool_match or not query_match:
-            return None
-
-        tool = tool_match.group(1).strip().lower()
-        query = query_match.group(1).strip()
-        reason = reason_match.group(1).strip() if reason_match else ""
-        if tool != "research_search" or not query:
-            return None
-        return {"tool": tool, "query": query[:240], "reason": reason[:240]}
+        return ToolRuntime.parse_planner_tool_request(plan_text)
 
     def _execute_planner_tool_request(
         self,
@@ -5820,85 +5862,17 @@ class Orchestrator:
         repository_path: Path,
         paths: Dict[str, Path],
         log_path: Path,
-        tool_request: Dict[str, str],
+        tool_request: ToolRequest,
     ) -> Dict[str, Any]:
-        """Execute planner-requested research_search with robust fallback."""
+        """Execute planner-requested tool via the shared runtime."""
 
-        query = str(tool_request.get("query", "")).strip()
-        search_context_path = self._docs_file(repository_path, "SEARCH_CONTEXT.md")
-        search_result_path = self._docs_file(repository_path, "SEARCH_RESULT.json")
-        prompt_path = self._docs_file(repository_path, "PLANNER_TOOL_REQUEST.md")
-        prompt_path.write_text(
-            (
-                "# Planner Tool Request\n\n"
-                f"- tool: research_search\n"
-                f"- query: {query}\n"
-                f"- reason: {tool_request.get('reason', '')}\n"
-            ),
-            encoding="utf-8",
-        )
-
-        variables = self._build_template_variables(job, paths, prompt_path)
-        variables["query"] = query
-        try:
-            self.command_templates.run_template(
-                template_name=self._template_for_route("research_search"),
-                variables=variables,
-                cwd=repository_path,
-                log_writer=self._actor_log_writer(log_path, "PLANNER"),
-            )
-            legacy_context_path = repository_path / "SEARCH_CONTEXT.md"
-            legacy_result_path = repository_path / "SEARCH_RESULT.json"
-            if not search_context_path.exists() and legacy_context_path.exists():
-                search_context_path.write_text(
-                    legacy_context_path.read_text(encoding="utf-8", errors="replace"),
-                    encoding="utf-8",
-                )
-            if not search_result_path.exists() and legacy_result_path.exists():
-                search_result_path.write_text(
-                    legacy_result_path.read_text(encoding="utf-8", errors="replace"),
-                    encoding="utf-8",
-                )
-            context_text = ""
-            if search_context_path.exists():
-                context_text = search_context_path.read_text(encoding="utf-8", errors="replace").strip()
-            if not context_text:
-                context_text = "검색 도구가 실행되었지만 SEARCH_CONTEXT.md 본문이 비어 있습니다."
-            return {
-                "ok": True,
-                "mode": "search_api",
-                "context_path": str(search_context_path),
-                "result_path": str(search_result_path),
-                "context_text": context_text[:20_000],
-            }
-        except Exception as error:  # noqa: BLE001
-            self._append_actor_log(
-                log_path,
-                "ORCHESTRATOR",
-                f"research_search failed. Fallback to local evidence pack: {error}",
-            )
-            fallback = self._build_local_evidence_fallback(repository_path, paths, query, str(error))
-            search_context_path.write_text(fallback["context_text"], encoding="utf-8")
-            search_result_path.write_text(
-                json.dumps(
-                    {
-                        "ok": False,
-                        "mode": "fallback_local",
-                        "query": query,
-                        "error": str(error),
-                    },
-                    ensure_ascii=False,
-                    indent=2,
-                ) + "\n",
-                encoding="utf-8",
-            )
-            return {
-                "ok": False,
-                "mode": "fallback_local",
-                "context_path": str(search_context_path),
-                "result_path": str(search_result_path),
-                "context_text": fallback["context_text"][:20_000],
-            }
+        return self._tool_runtime.execute(
+            job=job,
+            repository_path=repository_path,
+            paths=paths,
+            log_path=log_path,
+            request=tool_request,
+        ).to_dict()
 
     def _build_local_evidence_fallback(
         self,
@@ -5934,22 +5908,21 @@ class Orchestrator:
     @staticmethod
     def _build_planner_tool_context_addendum(
         *,
-        tool_request: Dict[str, str],
+        tool_request: ToolRequest,
         outcome: Dict[str, Any],
     ) -> str:
         """Build addendum prompt after tool execution."""
 
-        mode = str(outcome.get("mode", "unknown"))
-        context_path = str(outcome.get("context_path", "SEARCH_CONTEXT.md"))
-        context_text = str(outcome.get("context_text", "")).strip()
-        return (
-            "\n\n[Tool response context]\n"
-            f"- requested_tool: {tool_request.get('tool', '')}\n"
-            f"- query: {tool_request.get('query', '')}\n"
-            f"- mode: {mode}\n"
-            f"- context_file: {context_path}\n"
-            "- 아래 근거를 반영해 TOOL_REQUEST가 아닌 최종 PLAN.md 본문을 작성하세요.\n\n"
-            f"{context_text}\n"
+        return ToolRuntime.build_planner_tool_context_addendum(
+            request=tool_request,
+            result=ToolResult(
+                ok=bool(outcome.get("ok")),
+                mode=str(outcome.get("mode", "unknown")),
+                context_path=str(outcome.get("context_path", "SEARCH_CONTEXT.md")),
+                result_path=str(outcome.get("result_path", "SEARCH_RESULT.json")),
+                context_text=str(outcome.get("context_text", "")).strip(),
+                error=str(outcome.get("error", "")).strip(),
+            ),
         )
 
     def _stage_implement_with_codex(
@@ -6237,80 +6210,12 @@ class Orchestrator:
         stage: JobStage,
         log_path: Path,
     ) -> bool:
-        self._set_stage(job.job_id, stage, log_path)
-        test_results: List[Dict[str, Any]] = []
-        primary_command = self._resolve_test_command(stage, secondary=False)
-        primary_command = self._wrap_test_command_with_timeout(primary_command, log_path)
-
-        primary_name = self.settings.tester_primary_name
-        primary_result = self.shell_executor(
-            command=primary_command,
-            cwd=repository_path,
-            log_writer=self._actor_log_writer(log_path, f"TESTER_{self._safe_slug(primary_name).upper()}"),
-            check=False,
-            command_purpose=f"tests ({stage.value}) [{primary_name}]",
-        )
-        primary_report = self._write_test_report(
+        return self._shell_test_runtime.stage_run_tests(
+            job=job,
             repository_path=repository_path,
             stage=stage,
-            command_result=primary_result,
-            tester_name=primary_name,
-            report_suffix="",
+            log_path=log_path,
         )
-        self._append_actor_log(
-            log_path,
-            f"TESTER_{self._safe_slug(primary_name).upper()}",
-            f"Test report written: {primary_report.name}",
-        )
-        test_results.append({"name": primary_name, "result": primary_result, "report": primary_report})
-
-        if self._is_long_track(job):
-            secondary_command = self._resolve_test_command(stage, secondary=True)
-            secondary_command = self._wrap_test_command_with_timeout(secondary_command, log_path)
-            secondary_name = self.settings.tester_secondary_name
-            secondary_result = self.shell_executor(
-                command=secondary_command,
-                cwd=repository_path,
-                log_writer=self._actor_log_writer(log_path, f"TESTER_{self._safe_slug(secondary_name).upper()}"),
-                check=False,
-                command_purpose=f"tests ({stage.value}) [{secondary_name}]",
-            )
-            secondary_report = self._write_test_report(
-                repository_path=repository_path,
-                stage=stage,
-                command_result=secondary_result,
-                tester_name=secondary_name,
-                report_suffix=self._safe_slug(secondary_name).upper(),
-            )
-            self._append_actor_log(
-                log_path,
-                f"TESTER_{self._safe_slug(secondary_name).upper()}",
-                f"Test report written: {secondary_report.name}",
-            )
-            test_results.append({"name": secondary_name, "result": secondary_result, "report": secondary_report})
-
-        failed_reports = [
-            str(item["report"].name)
-            for item in test_results
-            if int(getattr(item["result"], "exit_code", 1)) != 0
-        ]
-        if failed_reports:
-            reason = (
-                f"Tests failed at stage '{stage.value}'. "
-                f"See {', '.join(failed_reports)} and job logs for details."
-            )
-            self._write_test_failure_reason(
-                repository_path=repository_path,
-                stage=stage,
-                reason=reason,
-            )
-            self._append_actor_log(
-                log_path,
-                "ORCHESTRATOR",
-                f"{reason} Continuing workflow by policy.",
-            )
-            return False
-        return True
 
     def _run_test_hard_gate(
         self,
@@ -6322,112 +6227,13 @@ class Orchestrator:
         stage: JobStage,
         gate_label: str,
     ) -> None:
-        """Run test gate with bounded retry/timebox and repeated-error detection."""
-
-        max_attempts = self._hard_gate_max_attempts()
-        timebox_seconds = self._hard_gate_timebox_seconds()
-        start = time.monotonic()
-        signatures: Dict[str, int] = {}
-
-        for attempt in range(1, max_attempts + 1):
-            passed = self._stage_run_tests(job, repository_path, stage, log_path)
-            if passed:
-                self._append_actor_log(
-                    log_path,
-                    "ORCHESTRATOR",
-                    f"[HARD_GATE:{gate_label}] passed on attempt {attempt}/{max_attempts}",
-                )
-                return
-
-            signature = self._latest_test_failure_signature(repository_path, stage)
-            if signature:
-                signatures[signature] = signatures.get(signature, 0) + 1
-
-            elapsed = int(time.monotonic() - start)
-            if elapsed >= timebox_seconds:
-                # Timeout is treated as non-fatal by policy. We analyze and continue.
-                self._run_failure_assistant(
-                    job=job,
-                    repository_path=repository_path,
-                    log_path=log_path,
-                    reason=(
-                        f"Hard gate timeout at {gate_label} ({elapsed}s/{timebox_seconds}s). "
-                        "Do not fail the run. Summarize root cause and next unblock actions."
-                    ),
-                )
-                self._append_actor_log(
-                    log_path,
-                    "ORCHESTRATOR",
-                    f"[SOFT_TIMEOUT:{gate_label}] timeout reached ({elapsed}s). Continuing workflow by policy.",
-                )
-                return
-            if signature and signatures.get(signature, 0) >= 2:
-                if self._is_recovery_mode_enabled():
-                    recovered = self._try_recovery_flow(
-                        job=job,
-                        repository_path=repository_path,
-                        paths=paths,
-                        log_path=log_path,
-                        stage=stage,
-                        gate_label=gate_label,
-                        reason=(
-                            f"Hard gate repeated failure signature at {gate_label}. "
-                            "Analyze recoverability and attempt one recovery cycle."
-                        ),
-                    )
-                    if recovered:
-                        return
-                    self._append_actor_log(log_path, "ORCHESTRATOR", f"[RECOVERY_MODE:{gate_label}] not recovered. Continuing workflow by policy.")
-                    return
-                self._run_failure_assistant(
-                    job=job,
-                    repository_path=repository_path,
-                    log_path=log_path,
-                    reason=(
-                        f"Hard gate repeated failure signature at {gate_label}. "
-                        "Summarize root cause and concrete fix plan."
-                    ),
-                )
-                raise CommandExecutionError(
-                    f"Hard gate '{gate_label}' stopped due to repeated failure signature. "
-                    "Next action: resolve root cause before retrying."
-                )
-            if attempt >= max_attempts:
-                break
-
-            self._append_actor_log(
-                log_path,
-                "ORCHESTRATOR",
-                f"[HARD_GATE:{gate_label}] failed attempt {attempt}/{max_attempts}. Running fix and retry.",
-            )
-            self._stage_fix_with_codex(job, repository_path, paths, log_path)
-            self._commit_markdown_changes_after_stage(
-                job,
-                repository_path,
-                JobStage.FIX_WITH_CODEX.value,
-                log_path,
-            )
-
-        if self._is_recovery_mode_enabled():
-            recovered = self._try_recovery_flow(
-                job=job,
-                repository_path=repository_path,
-                paths=paths,
-                log_path=log_path,
-                stage=stage,
-                gate_label=gate_label,
-                reason=(
-                    f"Hard gate max attempts reached at {gate_label}. "
-                    "Analyze recoverability and attempt one recovery cycle."
-                ),
-            )
-            if recovered:
-                return
-            self._append_actor_log(log_path, "ORCHESTRATOR", f"[RECOVERY_MODE:{gate_label}] not recovered. Continuing workflow by policy.")
-            return
-        raise CommandExecutionError(
-            f"Hard gate '{gate_label}' failed after {max_attempts} attempts. "
-            "Next action: inspect test reports and apply targeted fix."
+        self._recovery_runtime.run_test_hard_gate(
+            job=job,
+            repository_path=repository_path,
+            paths=paths,
+            log_path=log_path,
+            stage=stage,
+            gate_label=gate_label,
         )
 
     def _run_test_gate_by_policy(
@@ -6441,56 +6247,15 @@ class Orchestrator:
         gate_label: str,
         app_type: str,
     ) -> None:
-        """Run hard/soft test gate by policy. Default keeps non-web as soft gate."""
-
-        # Default policy keeps legacy behavior: do not stop pipeline on test gate failure.
-        policy = (os.getenv("AGENTHUB_TEST_GATE_POLICY", "soft") or "soft").strip().lower()
-        use_hard_gate = policy == "hard" or (policy == "mixed" and (app_type or "").strip().lower() == "web")
-        if policy in {"soft", "continue"}:
-            use_hard_gate = False
-
-        if use_hard_gate:
-            self._run_test_hard_gate(
-                job=job,
-                repository_path=repository_path,
-                paths=paths,
-                log_path=log_path,
-                stage=stage,
-                gate_label=gate_label,
-            )
-            return
-
-        passed = self._stage_run_tests(job, repository_path, stage, log_path)
-        if not passed:
-            self._append_actor_log(
-                log_path,
-                "ORCHESTRATOR",
-                f"[SOFT_GATE:{gate_label}] test failed but continuing by policy.",
-            )
-            if self._is_recovery_mode_enabled():
-                recovered = self._try_recovery_flow(
-                    job=job,
-                    repository_path=repository_path,
-                    paths=paths,
-                    log_path=log_path,
-                    stage=stage,
-                    gate_label=gate_label,
-                    reason=(
-                        f"Soft gate failure at {gate_label}. "
-                        "Analyze recoverability and attempt one recovery cycle."
-                    ),
-                )
-                if recovered:
-                    return
-            self._run_failure_assistant(
-                job=job,
-                repository_path=repository_path,
-                log_path=log_path,
-                reason=(
-                    f"Soft gate failure at {gate_label}. Workflow continues by policy. "
-                    "Analyze probable root cause and recommend next fixes."
-                ),
-            )
+        self._recovery_runtime.run_test_gate_by_policy(
+            job=job,
+            repository_path=repository_path,
+            paths=paths,
+            log_path=log_path,
+            stage=stage,
+            gate_label=gate_label,
+            app_type=app_type,
+        )
 
     def _try_recovery_flow(
         self,
@@ -6503,65 +6268,19 @@ class Orchestrator:
         gate_label: str,
         reason: str,
     ) -> bool:
-        """Analyze recoverability and run one fix+retest cycle when worth trying."""
-
-        self._run_failure_assistant(
+        return self._recovery_runtime.try_recovery_flow(
             job=job,
             repository_path=repository_path,
+            paths=paths,
             log_path=log_path,
+            stage=stage,
+            gate_label=gate_label,
             reason=reason,
         )
-        if not self._is_recoverable_failure(repository_path, stage):
-            self._append_actor_log(
-                log_path,
-                "ORCHESTRATOR",
-                f"[RECOVERY_MODE:{gate_label}] not recoverable by heuristic. Skip auto-recovery.",
-            )
-            return False
-        self._append_actor_log(
-            log_path,
-            "ORCHESTRATOR",
-            f"[RECOVERY_MODE:{gate_label}] recoverable. Running fix + retest once.",
-        )
-        self._stage_fix_with_codex(job, repository_path, paths, log_path)
-        self._commit_markdown_changes_after_stage(
-            job,
-            repository_path,
-            JobStage.FIX_WITH_CODEX.value,
-            log_path,
-        )
-        passed = self._stage_run_tests(job, repository_path, stage, log_path)
-        if passed:
-            self._append_actor_log(
-                log_path,
-                "ORCHESTRATOR",
-                f"[RECOVERY_MODE:{gate_label}] recovery succeeded.",
-            )
-            return True
-        self._append_actor_log(
-            log_path,
-            "ORCHESTRATOR",
-            f"[RECOVERY_MODE:{gate_label}] recovery attempt failed.",
-        )
-        return False
 
     @staticmethod
     def _is_recoverable_failure(repository_path: Path, stage: JobStage) -> bool:
-        """Cheap heuristic for auto-recovery eligibility."""
-
-        reason_path = repository_path / f"TEST_FAILURE_REASON_{stage.value.upper()}.md"
-        report_path = repository_path / f"TEST_REPORT_{stage.value.upper()}.md"
-        text = ""
-        if reason_path.exists():
-            text += "\n" + reason_path.read_text(encoding="utf-8", errors="replace")
-        if report_path.exists():
-            text += "\n" + report_path.read_text(encoding="utf-8", errors="replace")
-        lowered = text.lower()
-        if any(token in lowered for token in ["auth", "permission denied", "rate limit", "quota", "repository not found", "dns", "network is unreachable"]):
-            return False
-        if any(token in lowered for token in ["test failed", "lint", "type error", "module not found", "assert", "failed"]):
-            return True
-        return bool(lowered.strip())
+        return RecoveryRuntime.is_recoverable_failure(repository_path, stage)
 
     def _run_failure_assistant(
         self,
@@ -6571,57 +6290,12 @@ class Orchestrator:
         log_path: Path,
         reason: str,
     ) -> None:
-        """Run copilot/escalation helper on failure and persist analysis markdown."""
-
-        prompt_path = self._docs_file(repository_path, "FAILURE_ANALYSIS_PROMPT.md")
-        output_path = self._docs_file(repository_path, "FAILURE_ANALYSIS.md")
-        prompt_path.write_text(
-            (
-                "실패 원인 분석을 작성하세요.\n"
-                "- 한국어\n"
-                "- 재현 단서 3개 이내\n"
-                "- 근본 원인(가설) 1~3개\n"
-                "- 즉시 조치 3개(명령/파일 기준)\n"
-                "- 다음 라운드 체크리스트\n\n"
-                f"job_id: {job.job_id}\n"
-                f"issue: #{job.issue_number}\n"
-                f"reason: {reason}\n"
-            ),
-            encoding="utf-8",
+        self._recovery_runtime.run_failure_assistant(
+            job=job,
+            repository_path=repository_path,
+            log_path=log_path,
+            reason=reason,
         )
-
-        if self._find_configured_template_for_route("copilot_helper"):
-            try:
-                result = self.command_templates.run_template(
-                    template_name=self._template_for_route("copilot_helper"),
-                    variables=self._build_template_variables(
-                        job,
-                        {
-                            "spec": self._docs_file(repository_path, "SPEC.md"),
-                            "plan": self._docs_file(repository_path, "PLAN.md"),
-                            "review": self._docs_file(repository_path, "REVIEW.md"),
-                            "design": self._docs_file(repository_path, "DESIGN_SYSTEM.md"),
-                            "status": self._docs_file(repository_path, "STATUS.md"),
-                        },
-                        prompt_path,
-                    ),
-                    cwd=repository_path,
-                    log_writer=self._actor_log_writer(log_path, "COPILOT"),
-                )
-                analysis = str(getattr(result, "stdout", "")).strip()
-                if analysis:
-                    output_path.write_text(analysis + "\n", encoding="utf-8")
-                    self._append_actor_log(
-                        log_path,
-                        "ORCHESTRATOR",
-                        f"Failure analysis written: {output_path.name}",
-                    )
-                    return
-            except Exception as error:  # noqa: BLE001
-                self._append_actor_log(log_path, "ORCHESTRATOR", f"Failure assistant failed: {error}")
-
-        if self._is_escalation_enabled() and self._find_configured_template_for_route("escalation"):
-            self._run_optional_escalation(job.job_id, log_path, reason)
 
     def _resolve_app_type(self, repository_path: Path, paths: Dict[str, Path]) -> str:
         """Resolve app_type from SPEC.json with safe fallback."""
@@ -6671,40 +6345,14 @@ class Orchestrator:
 
     @staticmethod
     def _hard_gate_max_attempts() -> int:
-        """Read hard-gate max attempts from env with safe bounds."""
-
-        raw = (os.getenv("AGENTHUB_HARD_GATE_MAX_ATTEMPTS", "3") or "").strip()
-        try:
-            value = int(raw)
-        except ValueError:
-            return 3
-        return max(1, min(5, value))
+        return RecoveryRuntime.hard_gate_max_attempts()
 
     @staticmethod
     def _hard_gate_timebox_seconds() -> int:
-        """Read hard-gate timebox seconds from env with safe bounds."""
-
-        raw = (os.getenv("AGENTHUB_HARD_GATE_TIMEBOX_SECONDS", "1200") or "").strip()
-        try:
-            value = int(raw)
-        except ValueError:
-            return 1200
-        return max(120, min(7200, value))
+        return RecoveryRuntime.hard_gate_timebox_seconds()
 
     def _latest_test_failure_signature(self, repository_path: Path, stage: JobStage) -> str:
-        """Build compact signature from latest failure reason/report text."""
-
-        reason_path = repository_path / f"TEST_FAILURE_REASON_{stage.value.upper()}.md"
-        text = ""
-        if reason_path.exists():
-            try:
-                text = reason_path.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                text = ""
-        if not text:
-            return ""
-        normalized = re.sub(r"\s+", " ", text).strip().lower()[:600]
-        return hashlib.sha256(normalized.encode("utf-8", errors="ignore")).hexdigest()[:16]
+        return self._recovery_runtime.latest_test_failure_signature(repository_path, stage)
 
     def _stage_ux_e2e_review(
         self,
@@ -6879,46 +6527,11 @@ class Orchestrator:
         paths: Dict[str, Path],
         log_path: Path,
     ) -> None:
-        """Run codex_fix -> test_after_fix loop up to 3 rounds after E2E failure."""
-
-        max_rounds = 3
-        self._append_actor_log(
-            log_path,
-            "ORCHESTRATOR",
-            f"Entering fix/test retry loop after E2E failure. max_rounds={max_rounds}",
-        )
-        for round_index in range(1, max_rounds + 1):
-            self._append_actor_log(
-                log_path,
-                "ORCHESTRATOR",
-                f"[FIX_LOOP] Round {round_index}/{max_rounds} start",
-            )
-            self._stage_fix_with_codex(job, repository_path, paths, log_path)
-            self._commit_markdown_changes_after_stage(
-                job,
-                repository_path,
-                JobStage.FIX_WITH_CODEX.value,
-                log_path,
-            )
-            passed = self._stage_run_tests(job, repository_path, JobStage.TEST_AFTER_FIX, log_path)
-            self._commit_markdown_changes_after_stage(
-                job,
-                repository_path,
-                JobStage.TEST_AFTER_FIX.value,
-                log_path,
-            )
-            if passed:
-                self._append_actor_log(
-                    log_path,
-                    "ORCHESTRATOR",
-                    f"[FIX_LOOP] Round {round_index} succeeded. Proceeding to review stage.",
-                )
-                return
-
-        self._append_actor_log(
-            log_path,
-            "ORCHESTRATOR",
-            "[FIX_LOOP] Reached max rounds with remaining failures. Proceeding by policy.",
+        self._recovery_runtime.run_fix_retry_loop_after_test_failure(
+            job=job,
+            repository_path=repository_path,
+            paths=paths,
+            log_path=log_path,
         )
 
     def _stage_summarize_code_changes(
@@ -7025,7 +6638,7 @@ class Orchestrator:
             summary_path.write_text(copilot_summary.rstrip() + "\n", encoding="utf-8")
             self._append_actor_log(
                 log_path,
-                "COPILOT",
+                "CODEX_HELPER",
                 f"Wrote code change summary via helper route: {summary_path.name}",
             )
             return
@@ -7083,10 +6696,10 @@ class Orchestrator:
     ) -> Optional[str]:
         """Try helper-route summary generation and return markdown text."""
 
-        prompt_path = self._docs_file(repository_path, "COPILOT_SUMMARY_PROMPT.md")
+        prompt_path = self._docs_file(repository_path, "CODEX_HELPER_SUMMARY_PROMPT.md")
         prompt_path.write_text(prompt, encoding="utf-8")
 
-        if self._find_configured_template_for_route("copilot_helper"):
+        if self._find_configured_template_for_route("codex_helper"):
             template_variables = {
                 "repository": job.repository,
                 "issue_number": str(job.issue_number),
@@ -7098,15 +6711,15 @@ class Orchestrator:
             }
             try:
                 result = self.command_templates.run_template(
-                    template_name=self._template_for_route("copilot_helper"),
+                    template_name=self._template_for_route("codex_helper"),
                     variables=template_variables,
                     cwd=repository_path,
-                    log_writer=self._actor_log_writer(log_path, "COPILOT"),
+                    log_writer=self._actor_log_writer(log_path, "CODEX_HELPER"),
                 )
             except Exception as error:  # noqa: BLE001 - fallback to built-in command
                 self._append_actor_log(
                     log_path,
-                    "COPILOT",
+                    "CODEX_HELPER",
                     f"Helper route failed without external fallback: {error}",
                 )
                 return None
@@ -7129,84 +6742,33 @@ class Orchestrator:
     ) -> None:
         """Persist test failure reason without aborting the workflow."""
 
-        report_path = repository_path / f"TEST_FAILURE_REASON_{stage.value.upper()}.md"
-        content = [
-            "# TEST FAILURE REASON",
-            "",
-            f"- Stage: `{stage.value}`",
-            f"- Reason: {reason}",
-            "",
-            "## Next Step",
-            "- Continue workflow and let following stages address issues.",
-            "",
-        ]
-        report_path.write_text("\n".join(content), encoding="utf-8")
+        self._shell_test_runtime.write_test_failure_reason(
+            repository_path=repository_path,
+            stage=stage,
+            reason=reason,
+        )
 
     def _resolve_test_command(self, stage: JobStage, secondary: bool) -> str:
         """Pick stage-aware tester command with conservative fallbacks."""
 
-        if stage == JobStage.TEST_AFTER_IMPLEMENT:
-            if secondary:
-                return (
-                    self.settings.test_command_secondary_implement
-                    or self.settings.test_command_secondary
-                    or self.settings.test_command
-                )
-            return self.settings.test_command_implement or self.settings.test_command
-
-        if stage == JobStage.TEST_AFTER_FIX:
-            if secondary:
-                return (
-                    self.settings.test_command_secondary_fix
-                    or self.settings.test_command_secondary
-                    or self.settings.test_command
-                )
-            return self.settings.test_command_fix or self.settings.test_command
-
-        if stage == JobStage.UX_E2E_REVIEW:
-            if secondary:
-                return (
-                    self.settings.test_command_secondary_fix
-                    or self.settings.test_command_secondary
-                    or self.settings.test_command
-                )
-            return self.settings.test_command_fix or self.settings.test_command
-
-        if secondary:
-            return self.settings.test_command_secondary or self.settings.test_command
-        return self.settings.test_command
+        return self._shell_test_runtime.resolve_test_command(stage, secondary)
 
     def _wrap_test_command_with_timeout(self, command: str, log_path: Path) -> str:
         """Wrap test command with shell timeout when available."""
 
-        timeout_seconds = self._test_command_timeout_seconds()
-        if timeout_seconds <= 0:
-            return command
-        if not self._has_timeout_utility():
-            self._append_actor_log(
-                log_path,
-                "ORCHESTRATOR",
-                "timeout utility not found. Running tests without process-level timeout wrapper.",
-            )
-            return command
-        return f"timeout --preserve-status {timeout_seconds}s {command}"
+        return self._shell_test_runtime.wrap_test_command_with_timeout(command, log_path)
 
     @staticmethod
     def _has_timeout_utility() -> bool:
         """Return True when GNU/BSD timeout utility is available."""
 
-        return shutil.which("timeout") is not None
+        return ShellTestRuntime.has_timeout_utility()
 
     @staticmethod
     def _test_command_timeout_seconds() -> int:
         """Read per-test-command timeout in seconds (0 disables wrapping)."""
 
-        raw = (os.getenv("AGENTHUB_TEST_COMMAND_TIMEOUT_SECONDS", "900") or "").strip()
-        try:
-            value = int(raw)
-        except ValueError:
-            return 900
-        return max(0, min(7200, value))
+        return ShellTestRuntime.test_command_timeout_seconds()
 
     def _write_test_report(
         self,
@@ -7218,124 +6780,31 @@ class Orchestrator:
     ) -> Path:
         """Persist stage-level test summary in markdown for dashboard visibility."""
 
-        command = str(getattr(command_result, "command", self.settings.test_command))
-        exit_code = int(getattr(command_result, "exit_code", 1))
-        duration = float(getattr(command_result, "duration_seconds", 0.0))
-        stdout = str(getattr(command_result, "stdout", ""))
-        stderr = str(getattr(command_result, "stderr", ""))
-        passed = exit_code == 0
-
-        counters = self._extract_test_counters(stdout + "\n" + stderr)
-        passed_count = counters.get("passed", 0)
-        failed_count = counters.get("failed", 0)
-        skipped_count = counters.get("skipped", 0)
-        errors_count = counters.get("errors", 0)
-
-        pass_lines: List[str] = []
-        fail_lines: List[str] = []
-        if passed:
-            pass_lines.append("테스트 명령이 종료코드 0으로 완료되었습니다.")
-        else:
-            fail_lines.append(f"테스트 명령이 종료코드 {exit_code}로 실패했습니다.")
-            if exit_code == 124:
-                fail_lines.append(
-                    "테스트 명령이 시간 제한으로 종료되었습니다(timeout, exit 124)."
-                )
-        if passed_count > 0:
-            pass_lines.append(f"통과된 테스트 수를 감지했습니다: {passed_count}")
-        if skipped_count > 0:
-            pass_lines.append(f"스킵된 테스트 수를 감지했습니다: {skipped_count}")
-        if failed_count > 0:
-            fail_lines.append(f"실패한 테스트 수를 감지했습니다: {failed_count}")
-        if errors_count > 0:
-            fail_lines.append(f"에러 테스트 수를 감지했습니다: {errors_count}")
-        if not pass_lines:
-            pass_lines.append("출력에서 명시적인 통과 카운트를 찾지 못했습니다.")
-        if not fail_lines:
-            fail_lines.append("출력에서 명시적인 실패 카운트를 찾지 못했습니다.")
-
-        report = [
-            "# TEST REPORT",
-            "",
-            f"- Stage: `{stage.value}`",
-            f"- Tester: `{tester_name}`",
-            f"- Status: `{'PASS' if passed else 'FAIL'}`",
-            f"- Exit code: `{exit_code}`",
-            f"- Duration: `{duration:.2f}s`",
-            f"- Command: `{command}`",
-            "",
-            "## 통과한 항목",
-        ]
-        report.extend(f"- {line}" for line in pass_lines)
-        report.append("")
-        report.append("## 통과하지 못한 항목")
-        report.extend(f"- {line}" for line in fail_lines)
-        report.append("")
-        report.append("## 요약 카운트")
-        report.append(f"- passed: `{passed_count}`")
-        report.append(f"- failed: `{failed_count}`")
-        report.append(f"- skipped: `{skipped_count}`")
-        report.append(f"- errors: `{errors_count}`")
-        report.append("")
-        report.append("## stdout (tail)")
-        report.append("```text")
-        report.append(self._tail_text(stdout, 120))
-        report.append("```")
-        report.append("")
-        report.append("## stderr (tail)")
-        report.append("```text")
-        report.append(self._tail_text(stderr, 120))
-        report.append("```")
-        report.append("")
-
-        if report_suffix:
-            report_path = repository_path / f"TEST_REPORT_{stage.value.upper()}_{report_suffix}.md"
-        else:
-            report_path = repository_path / f"TEST_REPORT_{stage.value.upper()}.md"
-        report_path.write_text("\n".join(report), encoding="utf-8")
-        return report_path
+        return self._shell_test_runtime.write_test_report(
+            repository_path=repository_path,
+            stage=stage,
+            command_result=command_result,
+            tester_name=tester_name,
+            report_suffix=report_suffix,
+        )
 
     @staticmethod
     def _extract_test_counters(text: str) -> Dict[str, int]:
         """Extract common test counters from pytest/jest/vitest-like outputs."""
 
-        lowered = text.lower()
-        counters: Dict[str, int] = {
-            "passed": 0,
-            "failed": 0,
-            "skipped": 0,
-            "errors": 0,
-        }
-        for key, pattern in {
-            "passed": r"(\d+)\s+passed",
-            "failed": r"(\d+)\s+failed",
-            "skipped": r"(\d+)\s+skipped",
-            "errors": r"(\d+)\s+errors?",
-        }.items():
-            matches = re.findall(pattern, lowered)
-            if matches:
-                counters[key] = int(matches[-1])
-        return counters
+        return ShellTestRuntime.extract_test_counters(text)
 
     @staticmethod
     def _tail_text(text: str, max_lines: int) -> str:
         """Return only tail lines so report size stays readable."""
 
-        stripped = text.strip()
-        if not stripped:
-            return "(empty)"
-        lines = stripped.splitlines()
-        if len(lines) <= max_lines:
-            return "\n".join(lines)
-        return "\n".join(lines[-max_lines:])
+        return ShellTestRuntime.tail_text(text, max_lines)
 
     @staticmethod
     def _safe_slug(value: str) -> str:
         """Convert label text to safe uppercase slug."""
 
-        cleaned = "".join(ch if ch.isalnum() else "_" for ch in (value or "").strip().lower())
-        normalized = re.sub(r"_+", "_", cleaned).strip("_")
-        return normalized or "tester"
+        return ShellTestRuntime.safe_slug(value)
 
     def _stage_commit(
         self,
@@ -7535,10 +7004,10 @@ class Orchestrator:
             for path in unique_paths:
                 prompt_lines.append(f"- {path}")
         prompt = "\n".join(prompt_lines).strip() + "\n"
-        prompt_path = self._docs_file(repository_path, f"COPILOT_COMMIT_PROMPT_{stage_name.upper()}.md")
+        prompt_path = self._docs_file(repository_path, f"CODEX_HELPER_COMMIT_PROMPT_{stage_name.upper()}.md")
         prompt_path.write_text(prompt, encoding="utf-8")
 
-        if self._find_configured_template_for_route("copilot_helper"):
+        if self._find_configured_template_for_route("codex_helper"):
             template_variables = {
                 "repository": job.repository,
                 "issue_number": str(job.issue_number),
@@ -7550,15 +7019,15 @@ class Orchestrator:
             }
             try:
                 result = self.command_templates.run_template(
-                    template_name=self._template_for_route("copilot_helper"),
+                    template_name=self._template_for_route("codex_helper"),
                     variables=template_variables,
                     cwd=repository_path,
-                    log_writer=self._actor_log_writer(log_path, "COPILOT"),
+                    log_writer=self._actor_log_writer(log_path, "CODEX_HELPER"),
                 )
             except Exception as error:  # noqa: BLE001
                 self._append_actor_log(
                     log_path,
-                    "COPILOT",
+                    "CODEX_HELPER",
                     f"Helper commit summary template failed: {error}",
                 )
                 return ""
@@ -7882,7 +7351,7 @@ class Orchestrator:
                 purpose="check docker cli",
             )
 
-            self.shell_executor(
+            self._execute_shell_command(
                 command=f"docker rm -f {shlex.quote(container_name)}",
                 cwd=repository_path,
                 log_writer=self._actor_log_writer(log_path, "DOCKER"),
@@ -8383,6 +7852,7 @@ class Orchestrator:
             "_docs/CODER_PROMPT",
             "_docs/DESIGNER_PROMPT",
             "_docs/REVIEWER_PROMPT",
+            "_docs/CODEX_HELPER_",
             "_docs/COPILOT_",
             "_docs/PR_SUMMARY_PROMPT",
             "_docs/COMMIT_MESSAGE_PROMPT_",
@@ -9901,7 +9371,7 @@ class Orchestrator:
             f"git -C {shlex.quote(str(repository_path))} rev-parse --verify "
             f"{shlex.quote(ref_name)}"
         )
-        result = self.shell_executor(
+        result = self._execute_shell_command(
             command=check_command,
             cwd=repository_path,
             log_writer=self._actor_log_writer(log_path, "GIT"),
@@ -9976,19 +9446,31 @@ class Orchestrator:
     ):
         """Run shell command with shared logging and strict error handling."""
 
-        self._touch_job_heartbeat(force=True)
-        result = self.shell_executor(
+        return self._shell_test_runtime.run_shell(
             command=command,
             cwd=cwd,
-            log_writer=self._actor_log_writer(
-                log_path,
-                self._infer_actor_from_command(command, purpose),
-            ),
-            check=True,
-            command_purpose=purpose,
+            log_path=log_path,
+            purpose=purpose,
         )
-        self._touch_job_heartbeat(force=True)
-        return result
+
+    def _execute_shell_command(
+        self,
+        *,
+        command: str,
+        cwd: Path,
+        log_writer,
+        check: bool,
+        command_purpose: str,
+    ):
+        """Run one shell command and attach heartbeat hooks when supported."""
+
+        return self._shell_test_runtime.execute_shell_command(
+            command=command,
+            cwd=cwd,
+            log_writer=log_writer,
+            check=check,
+            command_purpose=command_purpose,
+        )
 
     def _actor_log_writer(self, log_path: Path, actor: str):
         """Return a log writer that annotates each line with actor information."""

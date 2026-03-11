@@ -1,0 +1,114 @@
+"""Tests for conversational assistant API."""
+
+from __future__ import annotations
+
+from fastapi.testclient import TestClient
+
+from app.models import JobRecord, JobStage, JobStatus, utc_now_iso
+
+
+def _make_job(job_id: str = "job-chat-1") -> JobRecord:
+    now = utc_now_iso()
+    return JobRecord(
+        job_id=job_id,
+        repository="owner/repo",
+        issue_number=42,
+        issue_title="assistant chat test",
+        issue_url="https://github.com/owner/repo/issues/42",
+        status=JobStatus.FAILED.value,
+        stage=JobStage.IMPLEMENT_WITH_CODEX.value,
+        attempt=2,
+        max_attempts=3,
+        branch_name="agenthub/default/issue-42",
+        pr_url=None,
+        error_message="heartbeat stale",
+        log_file=f"{job_id}.log",
+        created_at=now,
+        updated_at=now,
+        started_at=now,
+        finished_at=None,
+    )
+
+
+def test_assistant_chat_runs_selected_provider_with_history_and_focus_job(app_components, monkeypatch):
+    settings, store, app = app_components
+    job = _make_job("job-chat-run")
+    store.create_job(job)
+    (settings.logs_debug_dir / job.log_file).write_text(
+        "[2026-03-08T00:00:00Z] [ORCHESTRATOR] running heartbeat stale detected\n",
+        encoding="utf-8",
+    )
+
+    captured = {"assistant": "", "prompt": ""}
+
+    def fake_run_chat_provider(*, assistant, prompt, templates):
+        captured["assistant"] = assistant
+        captured["prompt"] = prompt
+        return f"{assistant} replied"
+
+    monkeypatch.setattr("app.dashboard._run_assistant_chat_provider", fake_run_chat_provider)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/assistant/chat",
+        json={
+            "assistant": "gemini",
+            "message": "원인을 더 좁혀줘",
+            "job_id": job.job_id,
+            "history": [
+                {"role": "user", "content": "최근 실패 요약해줘"},
+                {"role": "assistant", "content": "stale heartbeat가 핵심입니다."},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["provider"] == "gemini"
+    assert payload["assistant"] == "gemini replied"
+    assert captured["assistant"] == "gemini"
+    assert "[대화 이력]" in captured["prompt"]
+    assert "assistant: stale heartbeat가 핵심입니다." in captured["prompt"]
+    assert "Focused job" in captured["prompt"]
+    assert "running heartbeat stale detected" in captured["prompt"]
+    assert "[최신 사용자 메시지]" in captured["prompt"]
+
+
+def test_assistant_chat_rejects_unknown_assistant(app_components):
+    _, _, app = app_components
+    client = TestClient(app)
+    response = client.post(
+        "/api/assistant/chat",
+        json={"assistant": "unknown", "message": "분석"},
+    )
+    assert response.status_code == 400
+    assert "지원하지 않는 assistant" in response.json()["detail"]
+
+
+def test_legacy_codex_chat_route_forwards_to_conversational_endpoint(app_components, monkeypatch):
+    _, _, app = app_components
+    captured = {"assistant": "", "prompt": ""}
+
+    def fake_run_chat_provider(*, assistant, prompt, templates):
+        captured["assistant"] = assistant
+        captured["prompt"] = prompt
+        return "codex replied"
+
+    monkeypatch.setattr("app.dashboard._run_assistant_chat_provider", fake_run_chat_provider)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/assistant/codex-chat",
+        json={
+            "message": "최근 실패 요약해줘",
+            "history": [{"role": "user", "content": "첫 질문"}],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["provider"] == "codex"
+    assert payload["assistant"] == "codex replied"
+    assert captured["assistant"] == "codex"

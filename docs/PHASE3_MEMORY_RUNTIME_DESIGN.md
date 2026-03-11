@@ -32,12 +32,12 @@
 | Structured memory artifacts | `DONE` | `MEMORY_LOG.jsonl`, `DECISION_HISTORY.json`, `FAILURE_PATTERNS.json`, `CONVENTIONS.json` 생성 | file artifact가 여전히 1차 생성물이며 DB query source 전환은 아직 아님 |
 | Controlled retrieval | `PARTIAL` | `MEMORY_SELECTION.json`, `MEMORY_CONTEXT.json`, `MEMORY_TRACE.json`, planner/reviewer/coder prompt injection, DB-backed retrieval with file fallback | rejected candidate trace, pure-DB rollout control 부족 |
 | Convention extraction | `PARTIAL` | repo 구조/manifest/test pattern 기반 convention 추출 | convention confidence lifecycle, 수동 승인/차단, 지속 보정 부족 |
-| Memory quality scoring | `PARTIAL` | `MEMORY_FEEDBACK.json`, `MEMORY_RANKINGS.json`, banned-memory avoidance, DB stale decay/effectiveness refresh | 장기 통계, operator control, cross-repo ranking policy 부족 |
+| Memory quality scoring | `PARTIAL` | `MEMORY_FEEDBACK.json`, `MEMORY_RANKINGS.json`, banned-memory avoidance, DB stale decay/effectiveness refresh, manual promote/ban/archive override | 장기 통계, cross-repo ranking policy, richer ranking explanations 부족 |
 | Strategy shadow | `PARTIAL` | `STRATEGY_SHADOW_REPORT.json` 생성, memory-aware strategy 비교 | shadow 결과를 backlog와 rollout 의사결정으로 묶는 계층 부족 |
-| Memory storage backend | `PARTIAL` | SQLite-based `memory_runtime.db`, canonical tables, zero-dependency JSON/TF-IDF prototype | retrieval query layer, operator tooling, backlog write path 부족 |
-| Artifact -> DB ingest | `PARTIAL` | job 종료 시 artifact ingest skeleton이 `memory_runtime.db`로 episodic/decision/failure/convention/retrieval/feedback를 적재 | backfill, migration, ingest health metrics, autonomous backlog ingest 없음 |
-| Autonomous dev companion loop | `NOT STARTED` | next tasks / improvement artifacts는 있음 | memory DB 기반 recurring backlog, self-initiated improvement queue 없음 |
-| Operator memory tooling | `PARTIAL` | feature flag UI, 일부 admin metrics, job detail retrieval source/trace visibility | memory search, retrieval trace filter/search, promote/ban UI 없음 |
+| Memory storage backend | `PARTIAL` | SQLite-based `memory_runtime.db`, canonical tables, DB-first retrieval, autonomous backlog candidate table | richer retrieval query layer, backlog approval workflow, cross-workspace health metrics 부족 |
+| Artifact -> DB ingest | `PARTIAL` | job 종료 시 artifact ingest skeleton이 `memory_runtime.db`로 episodic/decision/failure/convention/retrieval/feedback/backlog candidate를 적재 | backfill, migration, ingest health metrics 부족 |
+| Autonomous dev companion loop | `PARTIAL` | next tasks / improvement artifacts를 DB backlog candidate queue로 적재 | recurring failure clustering, self-initiated improvement queue, operator approve->execution bridge 없음 |
+| Operator memory tooling | `PARTIAL` | feature flag UI, admin metrics, job detail retrieval source/trace visibility, memory search/detail, promote/ban UI, backlog queue visibility | retrieval trace filter/search, memory source artifact drilldown, backlog approval controls 부족 |
 
 ## 5. What Is Already Implemented
 
@@ -102,7 +102,7 @@
   - improvement 단계 종료 후 artifact가 `memory_runtime.db`에 자동 반영된다.
 - 한계:
   - retrieval source는 DB 우선으로 전환됐지만 아직 fallback을 유지하는 혼합 단계다.
-  - backlog candidate write path와 operator search/inspect UI는 아직 없다.
+  - backlog candidate는 적재되지만 승인/실행 큐까지 이어지지는 않는다.
 
 ### 5.6 DB-Backed Retrieval Exists
 - `app/orchestrator.py`의 retrieval 생성은 이제 `memory_runtime.db`를 우선 조회하고, 후보가 없을 때만 file artifact로 fallback한다.
@@ -121,8 +121,17 @@
   - retrieval 전에 ranking refresh가 실행되어 decayed/banned memory가 우선순위에 반영된다.
   - ingest 시점에도 DB writeback이 일어나 memory state가 file artifact에만 머물지 않는다.
 - 한계:
-  - ranking change reason을 operator UI에서 세부적으로 설명하지는 못한다.
-  - 수동 promote/ban override와 장기 통계 리포트는 아직 없다.
+  - ranking reason은 저장되지만 장기 통계 리포트는 아직 없다.
+  - cross-repo policy나 state transition audit trail은 아직 약하다.
+
+### 5.8 Autonomous Backlog Queue Exists
+- `app/memory/runtime_ingest.py`가 이제 `IMPROVEMENT_BACKLOG.json`, `NEXT_IMPROVEMENT_TASKS.json`, `QUALITY_TREND.json`, `STRATEGY_SHADOW_REPORT.json`에서 backlog 후보를 추출해 `memory_backlog_candidates`에 적재한다.
+- 현재 의미:
+  - improvement 결과가 file artifact에만 남지 않고 DB 후보 큐로 연결된다.
+  - operator는 admin 화면에서 현재 repo/app/workflow 기준 backlog 후보를 읽기 전용으로 확인할 수 있다.
+- 한계:
+  - backlog candidate는 아직 `candidate` 상태로만 적재된다.
+  - approve / dismiss / execute 같은 운영 action은 아직 없다.
 
 ## 6. What Phase 3 Must Deliver
 
@@ -244,6 +253,8 @@
   - 도움이 된 memory와 오염된 memory가 분리 관리된다.
 
 ### Phase 3-E. Autonomous Backlog
+- Status:
+  - `PARTIAL`
 - Deliverables:
   - recurring failure summarizer
   - memory-backed backlog candidates
@@ -252,6 +263,8 @@
   - 시스템이 memory 기반으로 `다음 개선 작업`을 제안한다.
 
 ### Phase 3-F. Operator Visibility
+- Status:
+  - `PARTIAL`
 - Deliverables:
   - memory search UI
   - retrieval trace UI

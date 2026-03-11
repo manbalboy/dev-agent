@@ -17,10 +17,11 @@
 1. Product pipeline 강제력 확보
 2. Improvement loop 실행력 확보
 3. Memory runtime / adaptive learning engine 확보
-4. Job recovery / long-running 운영성 확보
-5. Observability / operator tooling 확보
-6. Durable backend / workspace hygiene 확보
-7. 무중단/HA 도입
+4. Agentic runtime adoption (`MCP` / `Qdrant` / `LangGraph`) 확보
+5. Job recovery / long-running 운영성 확보
+6. Observability / operator tooling 확보
+7. Durable backend / workspace hygiene 확보
+8. 무중단/HA 도입
 
 ## AI Role Policy
 - `Gemini`: 제품 정의, 기획, 리뷰, 우선순위 판단의 주 역할
@@ -70,7 +71,17 @@
   - memory가 planner/reviewer/coder의 다음 행동을 auditable하게 바꾼다.
   - 상세 설계/현재 상태: [PHASE3_MEMORY_RUNTIME_DESIGN.md](./PHASE3_MEMORY_RUNTIME_DESIGN.md)
 
-### Phase 4. Continuous Job Operations
+### Phase 4. Agentic Runtime Adoption
+- 목적: 이미 있는 workflow/runtime 위에 외부 agent framework를 작은 단위부터 붙여 tool 사용, semantic retrieval, subgraph 실행력을 확장한다.
+- 핵심 작업:
+  - MCP tool layer
+  - Qdrant vector retrieval
+  - LangGraph planner/recovery subgraph
+- 완료 조건:
+  - top-level orchestrator를 유지한 채 외부 프레임워크가 shadow/opt-in/default 순서로 안전하게 들어간다.
+  - 상세 설계/도입 순서: [PHASE4_AGENTIC_RUNTIME_ADOPTION_PLAN.md](./PHASE4_AGENTIC_RUNTIME_ADOPTION_PLAN.md)
+
+### Phase 5. Continuous Job Operations
 - 목적: 장기 운영 시 stuck job / provider outage / worker restart에 견디게 만든다.
 - 핵심 작업:
   - heartbeat / timeout / stuck detection
@@ -80,7 +91,7 @@
 - 완료 조건:
   - worker 재시작 후 running 고착 작업을 자동 정리/복구
 
-### Phase 5. Observability
+### Phase 6. Observability
 - 목적: 실패 원인과 품질 추세를 운영자가 즉시 파악할 수 있게 만든다.
 - 핵심 작업:
   - stage latency
@@ -88,7 +99,7 @@
   - review score trend
   - alert / dead-letter / recovery action
 
-### Phase 6. Durable Runtime
+### Phase 7. Durable Runtime
 - 목적: 365일 운영을 위한 저장소/워크스페이스/백업 기반을 강화한다.
 - 핵심 작업:
   - durable queue/state
@@ -96,7 +107,7 @@
   - backup / restore
   - periodic self-check
 
-### Phase 7. Zero-Downtime / HA
+### Phase 8. Zero-Downtime / HA
 - 목적: 마지막 단계에서 다중 인스턴스와 무중단 배포를 도입한다.
 - 핵심 작업:
   - multi-worker claim model

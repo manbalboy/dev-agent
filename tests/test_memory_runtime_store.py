@@ -339,6 +339,7 @@ def test_memory_runtime_ingest_populates_entries_feedback_and_retrieval_runs(tmp
         "evidence": 2,
         "feedback": 2,
         "retrieval_runs": 3,
+        "backlog_candidates": 0,
     }
 
     entry_map = {item["memory_id"]: item for item in store.list_entries()}
@@ -372,6 +373,108 @@ def test_memory_runtime_ingest_populates_entries_feedback_and_retrieval_runs(tmp
         "conv_pytest_file_pattern",
     ]
     assert retrieval_runs["reviewer"]["context"][0]["id"] == "persistent_low:test_coverage"
+
+
+def test_memory_runtime_ingest_populates_backlog_candidates_from_improvement_artifacts(tmp_path: Path) -> None:
+    repository_path = tmp_path / "repo"
+    repository_path.mkdir(parents=True, exist_ok=True)
+    paths = build_workflow_artifact_paths(repository_path)
+    job = _make_job("job-memory-backlog")
+    store = MemoryRuntimeStore(tmp_path / "memory" / "memory_runtime.db")
+
+    paths["improvement_backlog"].write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-03-11T01:00:00+00:00",
+                "items": [
+                    {
+                        "id": "tests_regression",
+                        "title": "회귀 테스트 보강",
+                        "priority": "P1",
+                        "reason": "테스트 저점이 반복됨",
+                        "action": "핵심 흐름 회귀 테스트를 추가",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    paths["next_improvement_tasks"].write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-03-11T01:01:00+00:00",
+                "strategy": "test_hardening",
+                "scope_restriction": "P1_only",
+                "tasks": [
+                    {
+                        "task_id": "next_1",
+                        "source_issue_id": "tests_regression",
+                        "title": "핵심 회귀 테스트 작성",
+                        "priority": "P1",
+                        "reason": "품질 게이트를 안정화해야 함",
+                        "action": "테스트 리포트 기준으로 빠진 시나리오를 추가",
+                        "selected_by_strategy": "test_hardening",
+                        "recommended_node_type": "coder_fix_from_test_report",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    paths["quality_trend"].write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-03-11T01:02:00+00:00",
+                "trend_direction": "stable",
+                "delta_from_previous": 0.0,
+                "review_round_count": 3,
+                "persistent_low_categories": ["test_coverage"],
+                "stagnant_categories": ["maintainability"],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    paths["strategy_shadow_report"].write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-03-11T01:03:00+00:00",
+                "shadow_strategy": "feature_expansion",
+                "decision_mode": "memory_divergence",
+                "diverged": True,
+                "confidence": 0.81,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    counts = ingest_memory_runtime_artifacts(
+        store,
+        job=job,
+        execution_repository=job.repository,
+        paths=paths,
+    )
+
+    assert counts["backlog_candidates"] == 5
+    candidates = store.list_backlog_candidates(repository=job.repository, limit=10)
+    assert [item["priority"] for item in candidates] == ["P1", "P1", "P1", "P1", "P2"]
+    candidate_map = {item["candidate_id"]: item for item in candidates}
+    assert candidate_map["improvement_backlog:job-memory-backlog:tests_regression"]["payload"]["source_kind"] == "improvement_backlog"
+    assert candidate_map["next_improvement_task:job-memory-backlog:next_1"]["payload"]["recommended_node_type"] == "coder_fix_from_test_report"
+    assert candidate_map["quality_trend_persistent_low:job-memory-backlog:test_coverage"]["payload"]["category"] == "test_coverage"
+    assert candidate_map["quality_trend_stagnant:job-memory-backlog:maintainability"]["payload"]["category"] == "maintainability"
+    assert candidate_map["strategy_shadow:job-memory-backlog:feature_expansion"]["payload"]["diverged"] is True
 
 
 def test_memory_runtime_store_refresh_rankings_applies_staleness_and_effectiveness(tmp_path: Path) -> None:
@@ -520,3 +623,62 @@ def test_memory_runtime_store_refresh_rankings_applies_staleness_and_effectivene
     assert entry_map["mem-banned"]["state"] == "banned"
     assert entry_map["mem-banned"]["negative_count"] == 3
     assert entry_map["mem-banned"]["retrieval_count"] == 4
+
+
+def test_memory_runtime_store_manual_override_persists_across_refresh(tmp_path: Path) -> None:
+    store = MemoryRuntimeStore(tmp_path / "memory" / "memory_runtime.db")
+
+    store.upsert_entry(
+        {
+            "memory_id": "mem-manual",
+            "memory_type": "episodic",
+            "repository": "owner/repo",
+            "execution_repository": "owner/repo",
+            "app_code": "web",
+            "workflow_id": "wf-memory",
+            "job_id": "job-manual",
+            "title": "manual memory",
+            "summary": "needs manual ban",
+            "baseline_score": 3.2,
+            "baseline_confidence": 0.8,
+            "score": 3.2,
+            "confidence": 0.8,
+            "updated_at": "2026-03-10T00:00:00+00:00",
+        }
+    )
+    store.upsert_feedback(
+        {
+            "feedback_id": "fb-manual",
+            "memory_id": "mem-manual",
+            "job_id": "job-manual",
+            "generated_at": "2026-03-10T01:00:00+00:00",
+            "verdict": "promote",
+            "score_delta": 2.0,
+            "routes": ["planner"],
+        }
+    )
+
+    baseline_counts = store.refresh_rankings(as_of="2026-03-11T00:00:00+00:00")
+    assert baseline_counts["promoted"] >= 1
+    assert store.get_entry("mem-manual")["state"] == "promoted"
+
+    updated = store.set_manual_override("mem-manual", state="banned", note="regression during review")
+    assert updated is not None
+    assert updated["state"] == "banned"
+    assert updated["manual_state_override"] == "banned"
+    assert updated["manual_override_note"] == "regression during review"
+    assert updated["state_reason"] == "manual override: regression during review"
+
+    counts = store.refresh_rankings(as_of="2026-03-12T00:00:00+00:00")
+    assert counts["banned"] >= 1
+    refreshed = store.get_entry("mem-manual")
+    assert refreshed is not None
+    assert refreshed["state"] == "banned"
+    assert refreshed["manual_state_override"] == "banned"
+    assert refreshed["state_reason"] == "manual override: regression during review"
+
+    cleared = store.set_manual_override("mem-manual", state="", note="")
+    assert cleared is not None
+    assert cleared["manual_state_override"] == ""
+    assert cleared["state"] == "promoted"
+    assert cleared["state_reason"] == "high cumulative score"

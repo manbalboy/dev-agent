@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 from app.config import AppSettings
 from app.dependencies import get_settings, get_store
 from app.feature_flags import feature_flags_payload, read_feature_flags, write_feature_flags
+from app.memory import MemoryRuntimeStore
 from app.models import JobRecord, JobStage, JobStatus, utc_now_iso
 from app.store import JobStore
 from app.workflow_design import (
@@ -158,8 +159,10 @@ class FeatureFlagsRequest(BaseModel):
 class AssistantChatRequest(BaseModel):
     """Payload for dashboard assistant chat."""
 
+    assistant: str = Field(default="codex", min_length=1, max_length=20)
     message: str = Field(min_length=1, max_length=8000)
     history: List[Dict[str, str]] = Field(default_factory=list)
+    job_id: str = Field(default="", max_length=128)
 
 
 class AssistantLogAnalysisRequest(BaseModel):
@@ -175,6 +178,13 @@ class WorkflowManualRetryRequest(BaseModel):
 
     mode: str = Field(min_length=1, max_length=40)
     node_id: str = Field(default="", max_length=120)
+    note: str = Field(default="", max_length=300)
+
+
+class MemoryOverrideRequest(BaseModel):
+    """Payload for manual memory state override."""
+
+    state: str = Field(default="", max_length=20)
     note: str = Field(default="", max_length=300)
 
 
@@ -502,6 +512,55 @@ def _latest_non_empty(values: List[str]) -> str:
     return max(normalized)
 
 
+def _memory_runtime_db_path(settings: AppSettings) -> Path:
+    """Return canonical SQLite DB path for memory runtime."""
+
+    return settings.resolved_memory_dir / "memory_runtime.db"
+
+
+def _get_memory_runtime_store(settings: AppSettings) -> MemoryRuntimeStore:
+    """Return canonical memory runtime store for admin/search APIs."""
+
+    return MemoryRuntimeStore(_memory_runtime_db_path(settings))
+
+
+def _normalize_memory_state(value: str) -> str:
+    """Normalize one optional memory state filter/override."""
+
+    normalized = str(value or "").strip().lower()
+    if normalized in {"", "active", "candidate", "promoted", "decayed", "banned", "archived"}:
+        return normalized
+    return ""
+
+
+def _normalize_backlog_priority(value: str) -> str:
+    """Normalize one optional backlog priority filter."""
+
+    normalized = str(value or "").strip().upper()
+    if normalized in {"", "P0", "P1", "P2", "P3"}:
+        return normalized
+    return ""
+
+
+def _build_memory_detail_payload(
+    runtime_store: MemoryRuntimeStore,
+    *,
+    memory_id: str,
+) -> Dict[str, Any] | None:
+    """Return one detailed memory payload for operator inspection."""
+
+    entry = runtime_store.get_entry(memory_id)
+    if entry is None:
+        return None
+    feedback_rows = runtime_store.list_feedback(memory_id=memory_id)
+    evidence_rows = runtime_store.list_evidence(memory_id)
+    return {
+        "entry": entry,
+        "evidence": evidence_rows[:20],
+        "feedback": list(reversed(feedback_rows[-20:])),
+    }
+
+
 def _build_admin_metrics(store: JobStore, settings: AppSettings) -> Dict[str, Any]:
     """Aggregate read-only admin metrics from jobs and workspace artifacts."""
 
@@ -628,6 +687,12 @@ def _build_admin_metrics(store: JobStore, settings: AppSettings) -> Dict[str, An
     retrieval_generated_ats: List[str] = []
     scoring_generated_ats: List[str] = []
     shadow_generated_ats: List[str] = []
+    runtime_store = _get_memory_runtime_store(settings)
+    backlog_candidates = runtime_store.list_backlog_candidates(limit=200)
+    backlog_state_counter: Counter[str] = Counter()
+    for item in backlog_candidates:
+        backlog_state = str(item.get("state", "")).strip() or "candidate"
+        backlog_state_counter[backlog_state] += 1
 
     for workspace in workspace_paths.values():
         docs_dir = workspace / "_docs"
@@ -832,7 +897,9 @@ def _build_admin_metrics(store: JobStore, settings: AppSettings) -> Dict[str, An
         },
         "memory": {
             **memory_totals,
+            "backlog_candidates": len(backlog_candidates),
             "ranking_state_counts": _top_counter_items(ranking_state_counter, limit=8),
+            "backlog_state_counts": _top_counter_items(backlog_state_counter, limit=8),
         },
         "feature_flags": feature_flags,
         "capabilities": capabilities,
@@ -946,6 +1013,141 @@ def admin_metrics_api(
     """Return read-only admin metrics for dashboard management view."""
 
     return JSONResponse(_build_admin_metrics(store, settings))
+
+
+@router.get("/api/admin/memory/search", response_class=JSONResponse)
+def admin_memory_search_api(
+    q: str = Query(default="", max_length=200),
+    state: str = Query(default="", max_length=20),
+    memory_type: str = Query(default="", max_length=40),
+    repository: str = Query(default="", max_length=200),
+    execution_repository: str = Query(default="", max_length=200),
+    app_code: str = Query(default="", max_length=32),
+    workflow_id: str = Query(default="", max_length=120),
+    limit: int = Query(default=12, ge=1, le=100),
+    settings: AppSettings = Depends(get_settings),
+) -> JSONResponse:
+    """Search memory runtime entries with lightweight filters for admin UI."""
+
+    normalized_state = _normalize_memory_state(state)
+    if state.strip() and not normalized_state:
+        raise HTTPException(status_code=400, detail=f"지원하지 않는 memory state 입니다: {state}")
+    runtime_store = _get_memory_runtime_store(settings)
+    runtime_store.refresh_rankings(as_of=utc_now_iso())
+    items = runtime_store.search_entries(
+        query=q,
+        state=normalized_state,
+        memory_type=memory_type,
+        repository=repository,
+        execution_repository=execution_repository,
+        app_code=app_code,
+        workflow_id=workflow_id,
+        limit=limit,
+    )
+    return JSONResponse(
+        {
+            "items": items,
+            "count": len(items),
+            "filters": {
+                "q": q.strip(),
+                "state": normalized_state,
+                "memory_type": memory_type.strip().lower(),
+                "repository": repository.strip(),
+                "execution_repository": execution_repository.strip(),
+                "app_code": app_code.strip(),
+                "workflow_id": workflow_id.strip(),
+                "limit": limit,
+            },
+        }
+    )
+
+
+@router.get("/api/admin/memory/backlog", response_class=JSONResponse)
+def admin_memory_backlog_api(
+    q: str = Query(default="", max_length=200),
+    state: str = Query(default="", max_length=40),
+    priority: str = Query(default="", max_length=4),
+    repository: str = Query(default="", max_length=200),
+    execution_repository: str = Query(default="", max_length=200),
+    app_code: str = Query(default="", max_length=32),
+    workflow_id: str = Query(default="", max_length=120),
+    limit: int = Query(default=12, ge=1, le=100),
+    settings: AppSettings = Depends(get_settings),
+) -> JSONResponse:
+    """List memory-backed autonomous backlog candidates for admin review."""
+
+    normalized_priority = _normalize_backlog_priority(priority)
+    if priority.strip() and not normalized_priority:
+        raise HTTPException(status_code=400, detail=f"지원하지 않는 backlog priority 입니다: {priority}")
+    runtime_store = _get_memory_runtime_store(settings)
+    items = runtime_store.list_backlog_candidates(
+        query=q,
+        state=state,
+        priority=normalized_priority,
+        repository=repository,
+        execution_repository=execution_repository,
+        app_code=app_code,
+        workflow_id=workflow_id,
+        limit=limit,
+    )
+    return JSONResponse(
+        {
+            "items": items,
+            "count": len(items),
+            "filters": {
+                "q": q.strip(),
+                "state": state.strip().lower(),
+                "priority": normalized_priority,
+                "repository": repository.strip(),
+                "execution_repository": execution_repository.strip(),
+                "app_code": app_code.strip(),
+                "workflow_id": workflow_id.strip(),
+                "limit": limit,
+            },
+        }
+    )
+
+
+@router.get("/api/admin/memory/{memory_id:path}", response_class=JSONResponse)
+def admin_memory_detail_api(
+    memory_id: str,
+    settings: AppSettings = Depends(get_settings),
+) -> JSONResponse:
+    """Return one detailed memory payload including evidence and feedback."""
+
+    runtime_store = _get_memory_runtime_store(settings)
+    runtime_store.refresh_rankings(as_of=utc_now_iso())
+    payload = _build_memory_detail_payload(runtime_store, memory_id=memory_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail=f"memory_id를 찾을 수 없습니다: {memory_id}")
+    return JSONResponse(payload)
+
+
+@router.post("/api/admin/memory/{memory_id:path}/override", response_class=JSONResponse)
+def admin_memory_override_api(
+    memory_id: str,
+    payload: MemoryOverrideRequest,
+    settings: AppSettings = Depends(get_settings),
+) -> JSONResponse:
+    """Apply or clear one manual memory state override."""
+
+    normalized_state = _normalize_memory_state(payload.state)
+    if payload.state.strip() and not normalized_state:
+        raise HTTPException(status_code=400, detail=f"지원하지 않는 memory override state 입니다: {payload.state}")
+    runtime_store = _get_memory_runtime_store(settings)
+    updated = runtime_store.set_manual_override(memory_id, state=normalized_state, note=payload.note)
+    if updated is None:
+        raise HTTPException(status_code=404, detail=f"memory_id를 찾을 수 없습니다: {memory_id}")
+    detail = _build_memory_detail_payload(runtime_store, memory_id=memory_id)
+    return JSONResponse(
+        {
+            "saved": True,
+            "memory_id": memory_id,
+            "manual_state_override": normalized_state,
+            "entry": updated,
+            "detail": detail,
+        }
+    )
 
 
 @router.get("/api/jobs/options", response_class=JSONResponse)
@@ -1518,152 +1720,70 @@ def codex_assistant_chat(
     settings: AppSettings = Depends(get_settings),
     store: JobStore = Depends(get_store),
 ) -> JSONResponse:
-    """Run one Codex CLI turn and return assistant text output."""
+    """Legacy Codex-only chat route kept for compatibility."""
+
+    payload.assistant = "codex"
+    return assistant_chat(payload=payload, settings=settings, store=store)
+
+
+@router.post("/api/assistant/chat", response_class=JSONResponse)
+def assistant_chat(
+    payload: AssistantChatRequest,
+    settings: AppSettings = Depends(get_settings),
+    store: JobStore = Depends(get_store),
+) -> JSONResponse:
+    """Run one conversational assistant turn with selected provider."""
+
+    requested_assistant = str(payload.assistant or "").strip().lower()
+    allowed = _PRIMARY_ASSISTANT_PROVIDERS | set(_ASSISTANT_PROVIDER_ALIASES)
+    if requested_assistant not in allowed:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"지원하지 않는 assistant 입니다: {requested_assistant}. "
+                f"공식 지원: {', '.join(sorted(_PRIMARY_ASSISTANT_PROVIDERS))}. "
+                f"호환 별칭: {', '.join(sorted(_ASSISTANT_PROVIDER_ALIASES))}"
+            ),
+        )
+    assistant = _canonical_cli_name(requested_assistant)
 
     raw_message = payload.message.strip()
     if not raw_message:
         raise HTTPException(status_code=400, detail="메시지를 입력해주세요.")
 
-    history_lines: List[str] = []
-    for item in payload.history[-12:]:
-        role = str(item.get("role", "")).strip().lower()
-        content = str(item.get("content", "")).strip()
-        if role not in {"user", "assistant"} or not content:
-            continue
-        if role == "assistant":
-            history_lines.append(f"assistant: {content}")
-        else:
-            history_lines.append(f"user: {content}")
+    focus_job_id = payload.job_id.strip()
+    focus_context = ""
+    if focus_job_id:
+        job = store.get_job(focus_job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail=f"job_id를 찾을 수 없습니다: {focus_job_id}")
+        focus_context = _build_focus_job_log_context(job, settings)
 
-    conversation_context = "\n".join(history_lines)
     runtime_context = _build_agent_observability_context(store, settings)
-    full_prompt = (
-        "You are 'AgentHub Ops Assistant', a diagnosis chatbot for AI-agent workflows.\n"
-        "Primary mission: analyze what happened in agent runs, identify likely root causes, "
-        "and provide practical next actions.\n"
-        "Rules:\n"
-        "- Reply in concise Korean unless user asks another language.\n"
-        "- Use evidence from provided runtime context first.\n"
-        "- Clearly separate: 사실(관측), 추정(가설), 조치(실행 단계).\n"
-        "- If evidence is insufficient, say exactly what is missing.\n"
-        "- Do not fabricate logs, job ids, or command outputs.\n\n"
-        f"Runtime context:\n{runtime_context}\n\n"
-        f"Conversation so far:\n{conversation_context or '(none)'}\n\n"
-        f"Latest user message:\n{raw_message}\n"
+    prompt = _build_assistant_chat_prompt(
+        assistant=assistant,
+        message=raw_message,
+        history=payload.history,
+        runtime_context=runtime_context,
+        focus_context=focus_context,
     )
     try:
         templates = _read_command_templates(settings.command_config)
     except HTTPException:
         templates = {}
-    codex_prefix = _resolve_codex_command_prefix(templates)
 
-    output_file = tempfile.NamedTemporaryFile(
-        prefix="agenthub-codex-chat-",
-        suffix=".txt",
-        delete=False,
+    output_text = _run_assistant_chat_provider(
+        assistant=assistant,
+        prompt=prompt,
+        templates=templates,
     )
-    output_path = Path(output_file.name)
-    output_file.close()
-
-    command = [
-        *codex_prefix,
-        "exec",
-        "-C",
-        str(Path.cwd()),
-        "--skip-git-repo-check",
-        "--color",
-        "never",
-        "--output-last-message",
-        str(output_path),
-        full_prompt,
-    ]
-
-    try:
-        process = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=180,
-        )
-    except subprocess.TimeoutExpired as error:
-        try:
-            output_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise HTTPException(
-            status_code=504,
-            detail="Codex 응답이 시간 제한(180초)을 초과했습니다.",
-        ) from error
-    except OSError as error:
-        try:
-            output_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise HTTPException(
-            status_code=500,
-            detail=f"Codex 실행 실패: {error}",
-        ) from error
-
-    output_text = ""
-    if output_path.exists():
-        try:
-            output_text = output_path.read_text(encoding="utf-8", errors="replace").strip()
-        except OSError:
-            output_text = ""
-    try:
-        output_path.unlink(missing_ok=True)
-    except OSError:
-        pass
-
-    if process.returncode != 0:
-        raw_error = (process.stderr or process.stdout or "").strip()
-        lowered_error = raw_error.lower()
-        stderr_preview = raw_error[:1000]
-        if (
-            "operation not permitted" in lowered_error
-            or "error sending request for url" in lowered_error
-            or "failed to connect to websocket" in lowered_error
-            or "stream disconnected before completion" in lowered_error
-            or "chatgpt.com/backend-api/codex/responses" in lowered_error
-        ):
-            raise HTTPException(
-                status_code=503,
-                detail=(
-                    "Codex 외부 연결이 차단되어 응답을 생성하지 못했습니다. "
-                    "서버에서 chatgpt.com 으로의 아웃바운드 네트워크를 허용하거나, "
-                    "로컬 OSS 모델(ollama/lmstudio) 구성을 사용해주세요. "
-                    f"원본 오류: {stderr_preview or '(no output)'}"
-                ),
-            )
-        if "not logged in" in lowered_error or "login" in lowered_error:
-            raise HTTPException(
-                status_code=401,
-                detail=(
-                    "Codex 로그인 상태가 유효하지 않습니다. "
-                    "서버 계정에서 `codex login` 후 다시 시도해주세요. "
-                    f"원본 오류: {stderr_preview or '(no output)'}"
-                ),
-            )
-        raise HTTPException(
-            status_code=502,
-            detail=(
-                "Codex 응답 생성 실패. "
-                f"exit={process.returncode}, output={stderr_preview or '(no output)'}"
-            ),
-        )
-
-    if not output_text:
-        output_text = (process.stdout or "").strip()
-    if not output_text:
-        output_text = "응답이 비어 있습니다. 다시 시도해주세요."
-
     return JSONResponse(
         {
             "ok": True,
             "assistant": output_text,
-            "model": "codex-cli",
-            "cwd": str(Path.cwd()),
-            "data_dir": str(settings.data_dir),
+            "provider": assistant,
+            "requested_provider": requested_assistant,
+            "focus_job_id": focus_job_id,
         }
     )
 
@@ -3082,6 +3202,40 @@ def _build_log_analysis_prompt(
     )
 
 
+def _build_assistant_chat_prompt(
+    *,
+    assistant: str,
+    message: str,
+    history: List[Dict[str, str]],
+    runtime_context: str,
+    focus_context: str,
+) -> str:
+    """Create multi-turn prompt for the assistant tab."""
+
+    history_lines: List[str] = []
+    for item in history[-12:]:
+        role = str(item.get("role", "")).strip().lower()
+        content = str(item.get("content", "")).strip()
+        if role not in {"user", "assistant"} or not content:
+            continue
+        history_lines.append(f"{role}: {content}")
+
+    return (
+        f"당신은 AgentHub 운영 AI 도우미({assistant})입니다.\n"
+        "목표: 사용자의 질문에 대해 AgentHub 실행 상태, 로그, 워크플로우, 운영 리스크를 근거로 답하세요.\n\n"
+        "응답 규칙:\n"
+        "- 한국어로 간결하게 작성\n"
+        "- 사실(관측), 추정(가설), 조치(다음 단계)를 구분해서 답변\n"
+        "- 로그/상태 근거가 부족하면 무엇이 부족한지 명확히 말할 것\n"
+        "- 이전 대화 문맥을 이어받되, 최신 질문에 직접 답할 것\n"
+        "- 시스템 범위를 벗어나는 일반 잡담보다 운영/개발 진단을 우선할 것\n\n"
+        + (f"[대화 이력]\n{chr(10).join(history_lines)}\n\n" if history_lines else "")
+        + f"[런타임 컨텍스트]\n{runtime_context}\n\n"
+        + (f"[집중 분석 대상]\n{focus_context}\n\n" if focus_context else "")
+        + f"[최신 사용자 메시지]\n{message}\n"
+    )
+
+
 def _run_log_analyzer(
     *,
     assistant: str,
@@ -3095,6 +3249,110 @@ def _run_log_analyzer(
     if assistant == "gemini":
         return _run_gemini_log_analysis(prompt, templates)
     raise HTTPException(status_code=400, detail=f"지원하지 않는 assistant: {assistant}")
+
+
+def _run_assistant_chat_provider(
+    *,
+    assistant: str,
+    prompt: str,
+    templates: Dict[str, str],
+) -> str:
+    """Dispatch one multi-turn assistant request to selected provider CLI."""
+
+    if assistant == "codex":
+        return _run_codex_chat_completion(prompt, templates)
+    if assistant == "gemini":
+        return _run_gemini_chat_completion(prompt, templates)
+    raise HTTPException(status_code=400, detail=f"지원하지 않는 assistant: {assistant}")
+
+
+def _run_codex_chat_completion(prompt: str, templates: Dict[str, str]) -> str:
+    """Run Codex CLI for the assistant tab and return text output."""
+
+    codex_prefix = _resolve_codex_command_prefix(templates)
+    output_file = tempfile.NamedTemporaryFile(
+        prefix="agenthub-assistant-codex-",
+        suffix=".txt",
+        delete=False,
+    )
+    output_path = Path(output_file.name)
+    output_file.close()
+
+    try:
+        process = subprocess.run(
+            [
+                *codex_prefix,
+                "exec",
+                "-C",
+                str(Path.cwd()),
+                "--skip-git-repo-check",
+                "--color",
+                "never",
+                "--output-last-message",
+                str(output_path),
+                prompt,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+    except subprocess.TimeoutExpired as error:
+        output_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=504, detail="Codex 대화 응답이 시간 제한(180초)을 초과했습니다.") from error
+    except OSError as error:
+        output_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail=f"Codex 실행 실패: {error}") from error
+
+    output_text = ""
+    if output_path.exists():
+        try:
+            output_text = output_path.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            output_text = ""
+    output_path.unlink(missing_ok=True)
+    if process.returncode != 0:
+        raw_error = (process.stderr or process.stdout or "").strip()[:1000]
+        raise HTTPException(
+            status_code=502,
+            detail=f"Codex 대화 응답 실패(exit={process.returncode}): {raw_error or '(no output)'}",
+        )
+    if not output_text:
+        output_text = (process.stdout or "").strip()
+    return output_text or "응답이 비어 있습니다."
+
+
+def _run_gemini_chat_completion(prompt: str, templates: Dict[str, str]) -> str:
+    """Run Gemini CLI for the assistant tab and return text output."""
+
+    prefix = _resolve_cli_command_prefix("gemini", templates, env_var="AGENTHUB_GEMINI_BIN")
+    try:
+        process = subprocess.run(
+            [
+                *prefix,
+                "-p",
+                prompt,
+                "--approval-mode",
+                "yolo",
+                "--model",
+                "gemini-3.1-pro-preview",
+                "--output-format",
+                "text",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise HTTPException(status_code=504, detail="Gemini 대화 응답이 시간 제한(180초)을 초과했습니다.") from error
+    except OSError as error:
+        raise HTTPException(status_code=500, detail=f"Gemini 실행 실패: {error}") from error
+    if process.returncode != 0:
+        raw_error = (process.stderr or process.stdout or "").strip()[:1000]
+        raise HTTPException(
+            status_code=502,
+            detail=f"Gemini 대화 응답 실패(exit={process.returncode}): {raw_error or '(no output)'}",
+        )
+    return (process.stdout or "").strip() or "응답이 비어 있습니다."
 
 
 def _run_codex_log_analysis(prompt: str, templates: Dict[str, str]) -> str:
@@ -3566,7 +3824,7 @@ def _default_roles_payload() -> Dict[str, Any]:
     """Default role catalog for role-management MVP."""
 
     role_rows = [
-        ("ai-helper", "AI 도우미", "codex", "", "요청/문제 정리", "분석/조치안"),
+        ("ai-helper", "AI 도우미", "codex", "codex_helper", "요청/문제 정리", "분석/조치안"),
         ("log-analyzer-codex", "로그 분석 도우미(Codex)", "codex", "coder", "워크플로우 로그", "문제점/조치안"),
         ("log-analyzer-gemini", "로그 분석 도우미(Gemini)", "gemini", "reviewer", "워크플로우 로그", "문제점/조치안"),
         ("coder", "코더", "codex", "coder", "SPEC/PLAN", "코드 변경"),
@@ -3585,8 +3843,8 @@ def _default_roles_payload() -> Dict[str, Any]:
         ("accessibility", "접근성 전문가", "bash", "", "UI", "접근성 점검"),
         ("test-automation", "테스트 자동화 엔지니어", "bash", "", "테스트 전략", "자동화 코드"),
         ("release-manager", "배포 관리자", "bash", "", "릴리즈 계획", "배포 체크"),
-        ("incident-analyst", "장애 원인 분석가", "codex", "", "로그/지표", "RCA"),
-        ("orchestration-helper", "오케스트레이션 도우미", "codex", "copilot", "워크플로우 상태/로그", "다음 단계/재시도 전략"),
+        ("incident-analyst", "장애 원인 분석가", "codex", "codex_helper", "로그/지표", "RCA"),
+        ("orchestration-helper", "오케스트레이션 도우미", "codex", "codex_helper", "워크플로우 상태/로그", "다음 단계/재시도 전략"),
         ("system-owner", "시스템 오너", "gemini", "planner", "이슈 본문/SPEC.md", "확정 스펙/우선순위"),
         ("tech-writer", "기술 문서 작성가", "codex", "documentation_writer", "SPEC/PLAN/REVIEW", "README.md, COPYRIGHT.md, DEVELOPMENT_GUIDE.md"),
         ("product-analyst", "제품 분석가", "gemini", "planner", "지표/요구", "개선 우선순위"),
@@ -3594,7 +3852,7 @@ def _default_roles_payload() -> Dict[str, Any]:
         ("research-agent", "정보검색 도우미", "python3", "research_search", "질문/키워드", "SEARCH_CONTEXT.md"),
         ("refactor-specialist", "리팩토링 전문가", "codex", "coder", "코드베이스", "구조 개선"),
         ("requirements-manager", "요구사항 관리자", "gemini", "planner", "이해관계자 요청", "명세"),
-        ("data-ai-engineer", "데이터/AI 엔지니어", "codex", "copilot", "데이터 과제", "파이프라인/모델 개선"),
+        ("data-ai-engineer", "데이터/AI 엔지니어", "codex", "codex_helper", "데이터 과제", "파이프라인/모델 개선"),
     ]
     roles = [
         {

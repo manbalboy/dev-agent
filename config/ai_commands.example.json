@@ -16,6 +16,8 @@
   "documentation_writer__claude": "cat {prompt_file} | codex exec - --dangerously-bypass-approvals-and-sandbox -C {work_dir} --color never --output-last-message {docs_bundle_path}",
   "documentation_writer__copilot": "cat {prompt_file} | codex exec - --dangerously-bypass-approvals-and-sandbox -C {work_dir} --color never --output-last-message {docs_bundle_path}",
   "research_search": "mkdir -p \"{work_dir}/_docs\" && python3 /home/docker/agentHub/workspaces/main/scripts/search_research_tool.py --query \"{query}\" --api-key \"${SEARCH_API_KEY}\" --json-out \"{work_dir}/_docs/SEARCH_RESULT.json\" --md-out \"{work_dir}/_docs/SEARCH_CONTEXT.md\"",
+  "codex_helper": "cat {prompt_file} | codex exec - --dangerously-bypass-approvals-and-sandbox -C {work_dir} --color never",
+  "codex_helper__codex": "cat {prompt_file} | codex exec - --dangerously-bypass-approvals-and-sandbox -C {work_dir} --color never",
   "copilot": "cat {prompt_file} | codex exec - --dangerously-bypass-approvals-and-sandbox -C {work_dir} --color never",
   "copilot__codex": "cat {prompt_file} | codex exec - --dangerously-bypass-approvals-and-sandbox -C {work_dir} --color never",
   "copilot__copilot": "cat {prompt_file} | codex exec - --dangerously-bypass-approvals-and-sandbox -C {work_dir} --color never",

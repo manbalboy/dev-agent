@@ -11,6 +11,7 @@ from typing import Callable, Dict
 
 
 LogWriter = Callable[[str], None]
+HeartbeatCallback = Callable[[], None]
 
 
 @dataclass
@@ -80,6 +81,8 @@ class CommandTemplateRunner:
             log_writer=log_writer,
             check=True,
             command_purpose=f"AI template '{template_name}'",
+            heartbeat_callback=getattr(self, "heartbeat_callback", None),
+            heartbeat_interval_seconds=float(getattr(self, "heartbeat_interval_seconds", 15.0) or 15.0),
         )
 
     def _load_templates(self) -> Dict[str, str]:
@@ -125,6 +128,8 @@ def run_shell_command(
     log_writer: LogWriter,
     check: bool = False,
     command_purpose: str = "command",
+    heartbeat_callback: HeartbeatCallback | None = None,
+    heartbeat_interval_seconds: float = 15.0,
 ) -> CommandResult:
     """Execute one shell command through bash.
 
@@ -135,19 +140,43 @@ def run_shell_command(
     start_time = time.monotonic()
     log_writer(f"[RUN] {command}")
 
-    process = subprocess.run(  # noqa: S603,S607 - intentional shell execution.
-        ["bash", "-lc", command],
-        cwd=str(cwd),
-        capture_output=True,
-        text=True,
-    )
+    use_heartbeat_loop = heartbeat_callback is not None and heartbeat_interval_seconds > 0
+    if use_heartbeat_loop:
+        process = subprocess.Popen(  # noqa: S603,S607 - intentional shell execution.
+            ["bash", "-lc", command],
+            cwd=str(cwd),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        stdout = ""
+        stderr = ""
+        while True:
+            try:
+                stdout, stderr = process.communicate(timeout=heartbeat_interval_seconds)
+                break
+            except subprocess.TimeoutExpired:
+                try:
+                    heartbeat_callback()
+                except Exception:
+                    pass
+    else:
+        completed = subprocess.run(  # noqa: S603,S607 - intentional shell execution.
+            ["bash", "-lc", command],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+        )
+        process = completed
+        stdout = completed.stdout
+        stderr = completed.stderr
 
     duration_seconds = time.monotonic() - start_time
     result = CommandResult(
         command=command,
         exit_code=process.returncode,
-        stdout=process.stdout,
-        stderr=process.stderr,
+        stdout=stdout,
+        stderr=stderr,
         duration_seconds=duration_seconds,
     )
 
