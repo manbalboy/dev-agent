@@ -651,6 +651,7 @@ def test_admin_metrics_api_aggregates_system_quality_and_memory_signals(app_comp
     assert capability_map["memory_retrieval"]["enabled"] is False
     assert capability_map["memory_scoring"]["enabled"] is True
     assert capability_map["strategy_shadow"]["enabled"] is True
+    assert capability_map["mcp_tools_shadow"]["enabled"] is False
     phase_map = {item["phase"]: item for item in payload["phase_status"]}
     assert phase_map["Phase 1"]["status"] == "closed"
     assert phase_map["Phase 2-F"]["status"] == "implemented"

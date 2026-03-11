@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 from typing import Any, Callable, Dict, Optional
 
+from app.mcp_tool_client import MCPToolClient
 from app.models import JobRecord
 
 
@@ -48,6 +49,8 @@ class ToolRuntime:
         actor_log_writer,
         append_actor_log: Callable[[Path, str, str], None],
         build_local_evidence_fallback,
+        feature_enabled: Callable[[str], bool] | None = None,
+        mcp_tool_client: MCPToolClient | None = None,
     ) -> None:
         self.command_templates = command_templates
         self.docs_file = docs_file
@@ -56,6 +59,8 @@ class ToolRuntime:
         self.actor_log_writer = actor_log_writer
         self.append_actor_log = append_actor_log
         self.build_local_evidence_fallback = build_local_evidence_fallback
+        self.feature_enabled = feature_enabled or (lambda _flag_name: False)
+        self.mcp_tool_client = mcp_tool_client or MCPToolClient()
         self._handlers: Dict[str, Callable[..., ToolResult]] = {
             "research_search": self._execute_research_search,
         }
@@ -113,13 +118,20 @@ class ToolRuntime:
         handler = self._handlers.get(request.tool)
         if handler is None:
             raise ValueError(f"unsupported tool: {request.tool}")
-        return handler(
+        result = handler(
             job=job,
             repository_path=repository_path,
             paths=paths,
             log_path=log_path,
             request=request,
         )
+        self._run_shadow_if_enabled(
+            log_path=log_path,
+            repository_path=repository_path,
+            request=request,
+            primary_result=result,
+        )
+        return result
 
     @staticmethod
     def build_planner_tool_context_addendum(*, request: ToolRequest, result: ToolResult) -> str:
@@ -228,3 +240,35 @@ class ToolRuntime:
                 context_text=str(fallback.get("context_text", "")).strip()[:20_000],
                 error=str(error),
             )
+
+    def _run_shadow_if_enabled(
+        self,
+        *,
+        log_path: Path,
+        repository_path: Path,
+        request: ToolRequest,
+        primary_result: ToolResult,
+    ) -> None:
+        """Run MCP shadow adapter without affecting the primary tool result."""
+
+        if not self.feature_enabled("mcp_tools_shadow"):
+            return
+        shadow_result = self.mcp_tool_client.call_tool_shadow(
+            tool_name=request.tool,
+            arguments={"query": request.query, "reason": request.reason},
+        )
+        trace_path = self.docs_file(repository_path, "MCP_TOOL_SHADOW.jsonl")
+        payload = {
+            "tool": request.tool,
+            "query": request.query,
+            "reason": request.reason,
+            "primary_result": primary_result.to_dict(),
+            "shadow_result": shadow_result.to_dict(),
+        }
+        with trace_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        self.append_actor_log(
+            log_path,
+            "ORCHESTRATOR",
+            f"MCP shadow recorded for tool={request.tool} detail={shadow_result.detail}",
+        )

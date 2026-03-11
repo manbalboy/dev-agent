@@ -17,6 +17,7 @@ DEFAULT_FEATURE_FLAGS: Dict[str, bool] = {
     "convention_extraction": True,
     "memory_scoring": True,
     "strategy_shadow": True,
+    "mcp_tools_shadow": False,
 }
 
 FEATURE_FLAG_LABELS: Dict[str, str] = {
@@ -25,6 +26,7 @@ FEATURE_FLAG_LABELS: Dict[str, str] = {
     "convention_extraction": "Convention Extraction",
     "memory_scoring": "Memory Quality Scoring",
     "strategy_shadow": "Adaptive Strategy Shadow",
+    "mcp_tools_shadow": "MCP Tool Shadow",
 }
 
 FEATURE_FLAG_DESCRIPTIONS: Dict[str, str] = {
@@ -33,6 +35,7 @@ FEATURE_FLAG_DESCRIPTIONS: Dict[str, str] = {
     "convention_extraction": "repo 구조/매니페스트/테스트 패턴에서 conventions를 추출합니다.",
     "memory_scoring": "memory feedback/rankings를 계산해 promote/decay/banned 상태를 갱신합니다.",
     "strategy_shadow": "실제 전략은 유지한 채 memory-aware shadow strategy를 비교 기록합니다.",
+    "mcp_tools_shadow": "기존 도구 실행 결과는 유지한 채 MCP shadow client를 병행 호출해 trace만 기록합니다.",
 }
 
 

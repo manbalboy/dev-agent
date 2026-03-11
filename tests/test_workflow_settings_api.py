@@ -104,6 +104,7 @@ def test_feature_flags_api_returns_defaults_when_config_missing(app_components, 
     assert payload["flags"]["memory_logging"] is True
     assert payload["flags"]["memory_retrieval"] is True
     assert payload["flags"]["strategy_shadow"] is True
+    assert payload["flags"]["mcp_tools_shadow"] is False
 
 
 def test_feature_flags_api_persists_updated_values(app_components, monkeypatch, tmp_path: Path):

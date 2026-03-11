@@ -181,6 +181,7 @@ class Orchestrator:
             actor_log_writer=self._actor_log_writer,
             append_actor_log=self._append_actor_log,
             build_local_evidence_fallback=self._build_local_evidence_fallback,
+            feature_enabled=self._feature_enabled,
         )
         self._install_command_template_heartbeat()
 

@@ -33,7 +33,13 @@ def _make_job(job_id: str = "job-tool-runtime") -> JobRecord:
     )
 
 
-def _build_runtime(tmp_path: Path, *, should_fail: bool = False):
+def _build_runtime(
+    tmp_path: Path,
+    *,
+    should_fail: bool = False,
+    shadow_enabled: bool = False,
+    shadow_result=None,
+):
     logs: list[tuple[str, str]] = []
 
     class FakeTemplateRunner:
@@ -59,6 +65,12 @@ def _build_runtime(tmp_path: Path, *, should_fail: bool = False):
         target.parent.mkdir(parents=True, exist_ok=True)
         return target
 
+    class FakeMCPToolClient:
+        def call_tool_shadow(self, *, tool_name: str, arguments: dict[str, str]):
+            if shadow_result is None:
+                raise AssertionError("shadow_result must be provided when shadow is enabled")
+            return shadow_result
+
     runtime = ToolRuntime(
         command_templates=FakeTemplateRunner(),
         docs_file=docs_file,
@@ -73,6 +85,8 @@ def _build_runtime(tmp_path: Path, *, should_fail: bool = False):
                 f"- reason: {error_text}\n"
             )
         },
+        feature_enabled=lambda flag_name: shadow_enabled if flag_name == "mcp_tools_shadow" else False,
+        mcp_tool_client=FakeMCPToolClient(),
     )
     return runtime, logs
 
@@ -135,3 +149,40 @@ def test_tool_runtime_falls_back_to_local_context_when_search_fails(tmp_path: Pa
     assert (repository_path / "_docs" / "SEARCH_CONTEXT.md").exists()
     assert (repository_path / "_docs" / "SEARCH_RESULT.json").exists()
     assert any("Fallback to local evidence pack" in message for _, message in logs)
+
+
+def test_tool_runtime_records_mcp_shadow_trace_when_enabled(tmp_path: Path) -> None:
+    from app.mcp_tool_client import MCPToolCallResult
+
+    runtime, logs = _build_runtime(
+        tmp_path,
+        should_fail=False,
+        shadow_enabled=True,
+        shadow_result=MCPToolCallResult(
+            enabled=True,
+            available=False,
+            ok=False,
+            tool="research_search",
+            server_command="python -m fake_mcp_server",
+            detail="mcp_sdk_not_installed",
+        ),
+    )
+    repository_path = tmp_path / "repo"
+    repository_path.mkdir(parents=True, exist_ok=True)
+
+    result = runtime.execute(
+        job=_make_job(),
+        repository_path=repository_path,
+        paths={},
+        log_path=tmp_path / "job.log",
+        request=ToolRequest(tool="research_search", query="agent memory", reason="need evidence"),
+    )
+
+    assert result.ok is True
+    trace_path = repository_path / "_docs" / "MCP_TOOL_SHADOW.jsonl"
+    assert trace_path.exists()
+    payload = json.loads(trace_path.read_text(encoding="utf-8").splitlines()[0])
+    assert payload["tool"] == "research_search"
+    assert payload["primary_result"]["mode"] == "search_api"
+    assert payload["shadow_result"]["detail"] == "mcp_sdk_not_installed"
+    assert any("MCP shadow recorded for tool=research_search" in message for _, message in logs)

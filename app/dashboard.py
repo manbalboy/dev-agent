@@ -796,6 +796,7 @@ def _build_admin_metrics(store: JobStore, settings: AppSettings) -> Dict[str, An
     retrieval_enabled = bool(feature_flags.get("memory_retrieval"))
     scoring_enabled = bool(feature_flags.get("memory_scoring"))
     shadow_enabled = bool(feature_flags.get("strategy_shadow"))
+    mcp_tools_shadow_enabled = bool(feature_flags.get("mcp_tools_shadow"))
     capabilities = [
         {
             "id": "workflow_control_nodes",
@@ -832,6 +833,12 @@ def _build_admin_metrics(store: JobStore, settings: AppSettings) -> Dict[str, An
             "label": "Adaptive Strategy Shadow",
             "enabled": shadow_enabled,
             "detail": f"실제 전략은 유지한 채 memory-aware shadow strategy를 비교 기록합니다. active workspace {memory_totals['workspaces_with_strategy_shadow']}",
+        },
+        {
+            "id": "mcp_tools_shadow",
+            "label": "MCP Tool Shadow",
+            "enabled": mcp_tools_shadow_enabled,
+            "detail": "기존 tool 실행 결과는 유지한 채 MCP shadow client를 병행 호출해 trace만 기록합니다.",
         },
     ]
     phase_status = [
