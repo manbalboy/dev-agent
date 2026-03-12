@@ -11,7 +11,20 @@ import time
 from typing import Callable, Dict
 
 from app.command_runner import CommandExecutionError
+from app.failure_classification import build_failure_evidence_summary
 from app.models import JobRecord, JobStage
+from app.provider_failure_counter_runtime import (
+    evaluate_provider_circuit_breaker,
+    evaluate_provider_cooldown,
+    evaluate_provider_quarantine,
+    format_provider_circuit_breaker_reason,
+    format_provider_cooldown_reason,
+    format_provider_quarantine_reason,
+    record_provider_failure,
+    should_track_provider_failure,
+)
+from app.retry_policy import resolve_retry_policy, should_retry_attempt
+from app.runtime_recovery_trace import append_runtime_recovery_trace
 
 
 class RecoveryRuntime:
@@ -68,6 +81,7 @@ class RecoveryRuntime:
         timebox_seconds = self.hard_gate_timebox_seconds()
         start = time.monotonic()
         signatures: Dict[str, int] = {}
+        selected_policy = None
 
         for attempt in range(1, max_attempts + 1):
             passed = self.stage_run_tests(
@@ -85,6 +99,75 @@ class RecoveryRuntime:
                 return
 
             signature = self.latest_test_failure_signature(repository_path, stage)
+            failure_reason = self.latest_test_failure_reason(repository_path, stage) or (
+                f"Hard gate failed at {gate_label}."
+            )
+            evidence = build_failure_evidence_summary(
+                reason=failure_reason,
+                stage=stage.value,
+                source="recovery_runtime",
+                error_message=failure_reason,
+            )
+            selected_policy = resolve_retry_policy(
+                failure_class=str(evidence.get("failure_class", "")),
+                provider_hint=str(evidence.get("provider_hint", "")),
+                stage_family=str(evidence.get("stage_family", "")),
+                default_retry_budget=max_attempts,
+            )
+            provider_hint = str(evidence.get("provider_hint", "")).strip()
+            counter_snapshot = {}
+            if should_track_provider_failure(provider_hint):
+                counter_snapshot = record_provider_failure(
+                    repository_path,
+                    provider_hint=provider_hint,
+                    failure_class=str(evidence.get("failure_class", "")).strip(),
+                    stage_family=str(evidence.get("stage_family", "")).strip(),
+                    reason_code=str(selected_policy.failure_class or evidence.get("failure_class", "")).strip(),
+                    reason=failure_reason,
+                    job_id=job.job_id,
+                    attempt=int(job.attempt or 0),
+                    occurrence_key=f"hard_gate:{gate_label}:{attempt}",
+                )
+            effective_attempt_budget = min(max_attempts, int(selected_policy.retry_budget or max_attempts))
+            self.append_actor_log(
+                log_path,
+                "ORCHESTRATOR",
+                (
+                    f"[HARD_GATE:{gate_label}] retry policy "
+                    f"class={selected_policy.failure_class} "
+                    f"budget={effective_attempt_budget} "
+                    f"path={selected_policy.recovery_path}"
+                    f"{' needs_human' if selected_policy.needs_human_recommended else ''}"
+                ),
+            )
+            cooldown = (
+                evaluate_provider_cooldown(
+                    provider_hint=provider_hint,
+                    failure_class=str(evidence.get("failure_class", "")).strip(),
+                    counter_snapshot=counter_snapshot,
+                    retry_policy=selected_policy.to_dict(),
+                )
+                if counter_snapshot and not selected_policy.needs_human_recommended
+                else {"active": False}
+            )
+            quarantine = (
+                evaluate_provider_quarantine(
+                    provider_hint=provider_hint,
+                    failure_class=str(evidence.get("failure_class", "")).strip(),
+                    counter_snapshot=counter_snapshot,
+                )
+                if counter_snapshot and not selected_policy.needs_human_recommended
+                else {"active": False}
+            )
+            circuit_breaker = (
+                evaluate_provider_circuit_breaker(
+                    provider_hint=provider_hint,
+                    failure_class=str(evidence.get("failure_class", "")).strip(),
+                    counter_snapshot=counter_snapshot,
+                )
+                if counter_snapshot and not selected_policy.needs_human_recommended
+                else {"active": False}
+            )
             if signature:
                 signatures[signature] = signatures.get(signature, 0) + 1
 
@@ -104,7 +187,118 @@ class RecoveryRuntime:
                     "ORCHESTRATOR",
                     f"[SOFT_TIMEOUT:{gate_label}] timeout reached ({elapsed}s). Continuing workflow by policy.",
                 )
+                append_runtime_recovery_trace(
+                    repository_path,
+                    source="recovery_runtime",
+                    reason_code="hard_gate_timeout",
+                    reason=(
+                        f"Hard gate timeout at {gate_label} ({elapsed}s/{timebox_seconds}s). "
+                        "Workflow continues by policy."
+                    ),
+                    decision="continue_by_policy",
+                    stage=stage.value,
+                    gate_label=gate_label,
+                    job_id=job.job_id,
+                    attempt=int(job.attempt or 0),
+                    recovery_status="continued_by_policy",
+                    recovery_count=int(job.recovery_count or 0),
+                    details={
+                        "elapsed_seconds": elapsed,
+                        "timebox_seconds": timebox_seconds,
+                        "retry_policy": selected_policy.to_dict(),
+                    },
+                )
                 return
+            if circuit_breaker.get("active"):
+                circuit_reason = format_provider_circuit_breaker_reason(circuit_breaker)
+                self.append_actor_log(
+                    log_path,
+                    "ORCHESTRATOR",
+                    f"[HARD_GATE:{gate_label}] provider circuit-breaker active: {circuit_reason}",
+                )
+                append_runtime_recovery_trace(
+                    repository_path,
+                    source="recovery_runtime",
+                    reason_code=str(selected_policy.failure_class or evidence.get("failure_class", "")),
+                    reason=circuit_reason,
+                    decision="provider_circuit_open",
+                    stage=stage.value,
+                    gate_label=gate_label,
+                    job_id=job.job_id,
+                    attempt=int(job.attempt or 0),
+                    recovery_status="provider_circuit_open",
+                    recovery_count=int(job.recovery_count or 0),
+                    details={
+                        "retry_policy": {**selected_policy.to_dict(), "recovery_path": "provider_circuit_breaker"},
+                        "provider_failure_counter": counter_snapshot,
+                        "circuit_breaker": circuit_breaker,
+                        "recommended_route_action": "alternate_provider_circuit_breaker_or_manual_handoff",
+                    },
+                )
+                raise CommandExecutionError(
+                    f"Hard gate '{gate_label}' stopped because {circuit_reason}. "
+                    "Next action: keep this provider open-circuited and switch route or hand off."
+                )
+
+            if quarantine.get("active"):
+                quarantine_reason = format_provider_quarantine_reason(quarantine)
+                self.append_actor_log(
+                    log_path,
+                    "ORCHESTRATOR",
+                    f"[HARD_GATE:{gate_label}] provider quarantine active: {quarantine_reason}",
+                )
+                append_runtime_recovery_trace(
+                    repository_path,
+                    source="recovery_runtime",
+                    reason_code=str(selected_policy.failure_class or evidence.get("failure_class", "")),
+                    reason=quarantine_reason,
+                    decision="provider_quarantined",
+                    stage=stage.value,
+                    gate_label=gate_label,
+                    job_id=job.job_id,
+                    attempt=int(job.attempt or 0),
+                    recovery_status="provider_quarantined",
+                    recovery_count=int(job.recovery_count or 0),
+                    details={
+                        "retry_policy": {**selected_policy.to_dict(), "recovery_path": "provider_quarantine"},
+                        "provider_failure_counter": counter_snapshot,
+                        "quarantine": quarantine,
+                        "recommended_route_action": "alternate_provider_or_manual_handoff",
+                    },
+                )
+                raise CommandExecutionError(
+                    f"Hard gate '{gate_label}' stopped because {quarantine_reason}. "
+                    "Next action: switch provider route or hand off to operator."
+                )
+            if cooldown.get("active"):
+                cooldown_reason = format_provider_cooldown_reason(cooldown)
+                self.append_actor_log(
+                    log_path,
+                    "ORCHESTRATOR",
+                    f"[HARD_GATE:{gate_label}] provider cooldown active: {cooldown_reason}",
+                )
+                append_runtime_recovery_trace(
+                    repository_path,
+                    source="recovery_runtime",
+                    reason_code=str(selected_policy.failure_class or evidence.get("failure_class", "")),
+                    reason=cooldown_reason,
+                    decision="cooldown_wait",
+                    stage=stage.value,
+                    gate_label=gate_label,
+                    job_id=job.job_id,
+                    attempt=int(job.attempt or 0),
+                    recovery_status="cooldown_wait",
+                    recovery_count=int(job.recovery_count or 0),
+                    details={
+                        "retry_policy": selected_policy.to_dict(),
+                        "provider_failure_counter": counter_snapshot,
+                        "cooldown": cooldown,
+                    },
+                )
+                raise CommandExecutionError(
+                    f"Hard gate '{gate_label}' stopped because {cooldown_reason}. "
+                    "Next action: wait for provider recovery or switch route."
+                )
             if signature and signatures.get(signature, 0) >= 2:
                 if self.is_recovery_mode_enabled():
                     recovered = self.try_recovery_flow(
@@ -140,13 +334,13 @@ class RecoveryRuntime:
                     f"Hard gate '{gate_label}' stopped due to repeated failure signature. "
                     "Next action: resolve root cause before retrying."
                 )
-            if attempt >= max_attempts:
+            if not should_retry_attempt(attempt=attempt, retry_budget=effective_attempt_budget):
                 break
 
             self.append_actor_log(
                 log_path,
                 "ORCHESTRATOR",
-                f"[HARD_GATE:{gate_label}] failed attempt {attempt}/{max_attempts}. Running fix and retry.",
+                f"[HARD_GATE:{gate_label}] failed attempt {attempt}/{effective_attempt_budget}. Running fix and retry.",
             )
             self.stage_fix_with_codex(job, repository_path, paths, log_path)
             self.commit_markdown_changes_after_stage(
@@ -156,6 +350,32 @@ class RecoveryRuntime:
                 log_path,
             )
 
+        if selected_policy and selected_policy.needs_human_recommended:
+            append_runtime_recovery_trace(
+                repository_path,
+                source="recovery_runtime",
+                reason_code=str(selected_policy.failure_class or "unknown_runtime"),
+                reason=(
+                    f"Hard gate '{gate_label}' stopped by retry policy "
+                    f"{selected_policy.failure_class}/{selected_policy.recovery_path}. "
+                    "Next action: verify credentials/quota/workflow contract before retrying."
+                ),
+                decision="needs_human",
+                stage=stage.value,
+                gate_label=gate_label,
+                job_id=job.job_id,
+                attempt=int(job.attempt or 0),
+                recovery_status="needs_human",
+                recovery_count=int(job.recovery_count or 0),
+                details={
+                    "retry_policy": selected_policy.to_dict(),
+                },
+            )
+            raise CommandExecutionError(
+                f"Hard gate '{gate_label}' stopped by retry policy "
+                f"{selected_policy.failure_class}/{selected_policy.recovery_path}. "
+                "Next action: verify credentials/quota/workflow contract before retrying."
+            )
         if self.is_recovery_mode_enabled():
             recovered = self.try_recovery_flow(
                 job=job,
@@ -285,6 +505,20 @@ class RecoveryRuntime:
                 recovery_attempted=False,
                 recovery_succeeded=False,
             )
+            append_runtime_recovery_trace(
+                repository_path,
+                source="recovery_runtime",
+                reason_code="recovery_not_recoverable",
+                reason=reason,
+                decision="continue_by_policy",
+                stage=stage.value,
+                gate_label=gate_label,
+                job_id=job.job_id,
+                attempt=int(job.attempt or 0),
+                recovery_status="continued_by_policy",
+                recovery_count=int(job.recovery_count or 0),
+                details={"analysis_written": analysis_written},
+            )
             return False
         self.append_actor_log(
             log_path,
@@ -320,6 +554,20 @@ class RecoveryRuntime:
                 recovery_attempted=True,
                 recovery_succeeded=True,
             )
+            append_runtime_recovery_trace(
+                repository_path,
+                source="recovery_runtime",
+                reason_code="recovery_succeeded",
+                reason=reason,
+                decision="resume_workflow",
+                stage=stage.value,
+                gate_label=gate_label,
+                job_id=job.job_id,
+                attempt=int(job.attempt or 0),
+                recovery_status="auto_recovered",
+                recovery_count=int(job.recovery_count or 0),
+                details={"analysis_written": analysis_written},
+            )
             return True
         self.append_actor_log(
             log_path,
@@ -335,6 +583,20 @@ class RecoveryRuntime:
             recoverable=True,
             recovery_attempted=True,
             recovery_succeeded=False,
+        )
+        append_runtime_recovery_trace(
+            repository_path,
+            source="recovery_runtime",
+            reason_code="recovery_failed",
+            reason=reason,
+            decision="continue_by_policy",
+            stage=stage.value,
+            gate_label=gate_label,
+            job_id=job.job_id,
+            attempt=int(job.attempt or 0),
+            recovery_status="continued_by_policy",
+            recovery_count=int(job.recovery_count or 0),
+            details={"analysis_written": analysis_written},
         )
         return False
 
@@ -466,17 +728,23 @@ class RecoveryRuntime:
     def latest_test_failure_signature(self, repository_path: Path, stage: JobStage) -> str:
         """Build compact signature from latest failure reason text."""
 
-        reason_path = repository_path / f"TEST_FAILURE_REASON_{stage.value.upper()}.md"
-        text = ""
-        if reason_path.exists():
-            try:
-                text = reason_path.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                text = ""
+        text = self.latest_test_failure_reason(repository_path, stage)
         if not text:
             return ""
         normalized = re.sub(r"\s+", " ", text).strip().lower()[:600]
         return hashlib.sha256(normalized.encode("utf-8", errors="ignore")).hexdigest()[:16]
+
+    @staticmethod
+    def latest_test_failure_reason(repository_path: Path, stage: JobStage) -> str:
+        """Read the latest test failure reason text when available."""
+
+        reason_path = repository_path / f"TEST_FAILURE_REASON_{stage.value.upper()}.md"
+        if not reason_path.exists():
+            return ""
+        try:
+            return reason_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return ""
 
     def run_fix_retry_loop_after_test_failure(
         self,

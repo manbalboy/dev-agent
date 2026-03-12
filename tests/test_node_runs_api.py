@@ -376,6 +376,36 @@ def test_job_detail_api_includes_runtime_signals(app_components):
         ),
         encoding="utf-8",
     )
+    build_workflow_artifact_paths(docs_dir.parent)["runtime_recovery_trace"].write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-03-10T02:05:00+00:00",
+                "latest_event_at": "2026-03-10T02:05:00+00:00",
+                "event_count": 1,
+                "events": [
+                    {
+                        "generated_at": "2026-03-10T02:05:00+00:00",
+                        "source": "worker_stale_recovery",
+                        "job_id": job.job_id,
+                        "attempt": job.attempt,
+                        "stage": job.stage,
+                        "gate_label": "",
+                        "reason_code": "stale_heartbeat",
+                        "reason": "running heartbeat stale detected after 1803s",
+                        "decision": "requeue",
+                        "failure_class": "stale_heartbeat",
+                        "recovery_status": "auto_recovered",
+                        "recovery_count": 1,
+                        "details": {"stale_seconds": 1803},
+                    }
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     response = client.get(f"/api/jobs/{job.job_id}")
 
@@ -400,6 +430,512 @@ def test_job_detail_api_includes_runtime_signals(app_components):
     assert payload["runtime_signals"]["retrieval_route_counts"]["planner"] == 2
     assert payload["memory_trace"]["source"] == "db"
     assert payload["memory_trace"]["routes"]["reviewer"]["selected_count"] == 1
+    assert payload["runtime_recovery_trace"]["event_count"] == 1
+    assert payload["runtime_recovery_trace"]["latest_failure_class"] == "stale_heartbeat"
+    assert payload["runtime_recovery_trace"]["latest_provider_hint"] == "runtime"
+    assert payload["runtime_recovery_trace"]["latest_stage_family"] == "runtime_recovery"
+    assert payload["runtime_recovery_trace"]["events"][0]["reason_code"] == "stale_heartbeat"
+    assert payload["runtime_recovery_trace"]["events"][0]["decision"] == "requeue"
+    assert payload["failure_classification"]["failure_class"] == "stale_heartbeat"
+    assert payload["failure_classification"]["source"] == "runtime_recovery_trace"
+    assert payload["failure_classification"]["provider_hint"] == "runtime"
+    assert payload["failure_classification"]["stage_family"] == "runtime_recovery"
+
+
+def test_job_detail_page_renders_failure_visibility_shell(app_components):
+    _, store, app = app_components
+    client = TestClient(app)
+    job = _make_job("job-detail-failure-shell")
+    store.create_job(job)
+
+    response = client.get(f"/jobs/{job.job_id}")
+
+    assert response.status_code == 200
+    assert "실패 분류" in response.text
+    assert "실패 공급자" in response.text
+    assert "실패 단계군" in response.text
+
+
+def test_job_detail_api_includes_needs_human_summary(app_components):
+    _, store, app = app_components
+    client = TestClient(app)
+    job = _make_job("job-detail-needs-human")
+    job.status = JobStatus.FAILED.value
+    job.stage = JobStage.IMPLEMENT_WITH_CODEX.value
+    job.error_message = "402 You have no quota remaining"
+    job.recovery_status = "needs_human"
+    job.recovery_reason = "provider_quota -> needs_human_candidate"
+    store.create_job(job)
+
+    response = client.get(f"/api/jobs/{job.job_id}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["needs_human_summary"]["active"] is True
+    assert payload["needs_human_summary"]["failure_class"] == "provider_quota"
+    assert payload["needs_human_summary"]["manual_resume_recommended"] is True
+
+
+def test_job_detail_api_includes_provider_quarantine_summary(app_components):
+    settings, store, app = app_components
+    client = TestClient(app)
+
+    job = _make_job("job-detail-provider-quarantine")
+    job.status = JobStatus.FAILED.value
+    job.stage = JobStage.IMPLEMENT_WITH_CODEX.value
+    job.error_message = "codex provider quarantined after repeated timeout failures"
+    job.recovery_status = "provider_quarantined"
+    job.recovery_reason = "codex provider quarantined after 4/4 provider_timeout failure(s)"
+    store.create_job(job)
+
+    workspace_path = dashboard._job_workspace_path(job, settings)
+    trace_path = build_workflow_artifact_paths(workspace_path)["runtime_recovery_trace"]
+    trace_path.write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-03-12T00:00:00+00:00",
+                "latest_event_at": "2026-03-12T00:00:00+00:00",
+                "event_count": 1,
+                "events": [
+                    {
+                        "generated_at": "2026-03-12T00:00:00+00:00",
+                        "source": "job_failure_runtime",
+                        "job_id": job.job_id,
+                        "attempt": 2,
+                        "stage": "implement_with_codex",
+                        "gate_label": "",
+                        "reason_code": "provider_timeout",
+                        "reason": "codex provider quarantined after 4/4 provider_timeout failure(s)",
+                        "decision": "provider_quarantined",
+                        "recovery_status": "provider_quarantined",
+                        "recovery_count": 0,
+                        "details": {
+                            "retry_policy": {
+                                "failure_class": "provider_timeout",
+                                "retry_budget": 2,
+                                "recovery_path": "provider_quarantine",
+                                "cooldown_seconds": 120,
+                                "needs_human_recommended": False,
+                            }
+                        },
+                        "failure_class": "provider_timeout",
+                        "provider_hint": "codex",
+                        "stage_family": "implementation",
+                        "needs_human_summary": {
+                            "active": True,
+                            "title": "공급자 문제로 운영자 확인 필요",
+                            "summary": "현재 실패는 공급자 timeout 반복으로 격리됐습니다.",
+                            "failure_class": "provider_timeout",
+                            "provider_hint": "codex",
+                            "stage_family": "implementation",
+                            "reason_code": "provider_timeout",
+                            "reason": "codex provider quarantined after 4/4 provider_timeout failure(s)",
+                            "recovery_path": "provider_quarantine",
+                            "source": "job_failure_runtime",
+                            "generated_at": "2026-03-12T00:00:00+00:00",
+                            "recommended_actions": ["공급자 route를 바꾸거나 운영자가 확인합니다."],
+                            "manual_resume_recommended": True,
+                            "cooldown_seconds": 120,
+                            "effective_retry_budget": 2,
+                        },
+                    }
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    response = client.get(f"/api/jobs/{job.job_id}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["needs_human_summary"]["active"] is True
+    assert payload["needs_human_summary"]["recovery_path"] == "provider_quarantine"
+    assert payload["failure_classification"]["provider_hint"] == "codex"
+
+
+def test_job_detail_api_includes_provider_circuit_open_summary(app_components):
+    settings, store, app = app_components
+    client = TestClient(app)
+
+    job = _make_job("job-detail-provider-circuit-open")
+    job.status = JobStatus.FAILED.value
+    job.stage = JobStage.PLAN_WITH_GEMINI.value
+    job.error_message = "gemini provider circuit open after repeated timeout failures"
+    job.recovery_status = "provider_circuit_open"
+    job.recovery_reason = "gemini provider circuit open after 6/6 provider_timeout failure(s)"
+    store.create_job(job)
+
+    workspace_path = dashboard._job_workspace_path(job, settings)
+    trace_path = build_workflow_artifact_paths(workspace_path)["runtime_recovery_trace"]
+    trace_path.write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-03-13T00:00:00+00:00",
+                "latest_event_at": "2026-03-13T00:00:00+00:00",
+                "event_count": 1,
+                "events": [
+                    {
+                        "generated_at": "2026-03-13T00:00:00+00:00",
+                        "source": "job_failure_runtime",
+                        "job_id": job.job_id,
+                        "attempt": 2,
+                        "stage": "plan_with_gemini",
+                        "gate_label": "",
+                        "reason_code": "provider_timeout",
+                        "reason": "gemini provider circuit open after 6/6 provider_timeout failure(s)",
+                        "decision": "provider_circuit_open",
+                        "recovery_status": "provider_circuit_open",
+                        "recovery_count": 0,
+                        "details": {
+                            "retry_policy": {
+                                "failure_class": "provider_timeout",
+                                "retry_budget": 2,
+                                "recovery_path": "provider_circuit_breaker",
+                                "cooldown_seconds": 120,
+                                "needs_human_recommended": False,
+                            }
+                        },
+                        "failure_class": "provider_timeout",
+                        "provider_hint": "gemini",
+                        "stage_family": "planning",
+                        "needs_human_summary": {
+                            "active": True,
+                            "title": "공급자 장애 또는 지연 확인 필요",
+                            "summary": "현재 실패는 공급자 응답 지연 또는 장애 징후로 분류되었습니다. 같은 공급자에 계속 재시도하기보다 route 전환 또는 잠시 격리가 우선입니다.",
+                            "failure_class": "provider_timeout",
+                            "provider_hint": "gemini",
+                            "stage_family": "planning",
+                            "reason_code": "provider_timeout",
+                            "reason": "gemini provider circuit open after 6/6 provider_timeout failure(s)",
+                            "recovery_path": "provider_circuit_breaker",
+                            "source": "job_failure_runtime",
+                            "generated_at": "2026-03-13T00:00:00+00:00",
+                            "recommended_actions": ["fallback route 또는 대체 공급자로 전환합니다."],
+                            "manual_resume_recommended": True,
+                            "cooldown_seconds": 120,
+                            "effective_retry_budget": 2,
+                        },
+                    }
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    response = client.get(f"/api/jobs/{job.job_id}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["needs_human_summary"]["active"] is True
+    assert payload["needs_human_summary"]["recovery_path"] == "provider_circuit_breaker"
+    assert payload["failure_classification"]["provider_hint"] == "gemini"
+
+
+def test_job_detail_api_includes_dead_letter_summary(app_components):
+    settings, store, app = app_components
+    client = TestClient(app)
+
+    job = _make_job("job-detail-dead-letter")
+    job.status = JobStatus.FAILED.value
+    job.stage = JobStage.FAILED.value
+    job.error_message = "snapshot mismatch"
+    job.recovery_status = "dead_letter"
+    job.recovery_reason = "dead-letter after retry budget exhausted: snapshot mismatch"
+    store.create_job(job)
+
+    workspace_path = dashboard._job_workspace_path(job, settings)
+    trace_path = build_workflow_artifact_paths(workspace_path)["runtime_recovery_trace"]
+    trace_path.write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-03-12T00:00:00+00:00",
+                "latest_event_at": "2026-03-12T00:00:00+00:00",
+                "event_count": 1,
+                "events": [
+                    {
+                        "generated_at": "2026-03-12T00:00:00+00:00",
+                        "source": "job_failure_runtime",
+                        "job_id": job.job_id,
+                        "attempt": 3,
+                        "stage": "failed",
+                        "gate_label": "",
+                        "reason_code": "dead_letter",
+                        "reason": "dead-letter after retry budget exhausted: snapshot mismatch",
+                        "decision": "dead_letter",
+                        "recovery_status": "dead_letter",
+                        "recovery_count": 0,
+                        "details": {"upstream_recovery_status": ""},
+                        "failure_class": "test_failure",
+                        "provider_hint": "unknown",
+                        "stage_family": "test",
+                        "dead_letter_summary": {
+                            "active": True,
+                            "title": "테스트 반복 실패로 작업이 격리됨",
+                            "summary": "dead-letter after retry budget exhausted: snapshot mismatch",
+                            "failure_class": "test_failure",
+                            "provider_hint": "unknown",
+                            "stage_family": "test",
+                            "reason_code": "dead_letter",
+                            "source": "job_failure_runtime",
+                            "generated_at": "2026-03-12T00:00:00+00:00",
+                            "upstream_recovery_status": "",
+                            "manual_resume_recommended": True,
+                            "retry_from_scratch_recommended": True,
+                            "recommended_actions": ["원인 로그와 STATUS.md를 확인한 뒤 재실행 여부를 결정합니다."],
+                        },
+                    }
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    response = client.get(f"/api/jobs/{job.job_id}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["dead_letter_summary"]["active"] is True
+    assert payload["dead_letter_summary"]["failure_class"] == "test_failure"
+    assert payload["dead_letter_summary"]["retry_from_scratch_recommended"] is True
+
+
+def test_job_detail_api_hides_dead_letter_summary_after_requeue(app_components):
+    settings, store, app = app_components
+    client = TestClient(app)
+
+    job = _make_job("job-detail-dead-letter-hidden")
+    job.status = JobStatus.QUEUED.value
+    job.stage = JobStage.QUEUED.value
+    job.recovery_status = "dead_letter_requeued"
+    job.recovery_reason = "운영자가 dead-letter 작업을 다시 큐에 넣었습니다."
+    store.create_job(job)
+
+    workspace_path = dashboard._job_workspace_path(job, settings)
+    trace_path = build_workflow_artifact_paths(workspace_path)["runtime_recovery_trace"]
+    trace_path.write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-03-12T00:00:00+00:00",
+                "latest_event_at": "2026-03-12T00:01:00+00:00",
+                "event_count": 2,
+                "events": [
+                    {
+                        "generated_at": "2026-03-12T00:00:00+00:00",
+                        "source": "job_failure_runtime",
+                        "job_id": job.job_id,
+                        "attempt": 3,
+                        "stage": "failed",
+                        "gate_label": "",
+                        "reason_code": "dead_letter",
+                        "reason": "dead-letter after retry budget exhausted: snapshot mismatch",
+                        "decision": "dead_letter",
+                        "recovery_status": "dead_letter",
+                        "recovery_count": 0,
+                        "details": {"upstream_recovery_status": ""},
+                        "failure_class": "test_failure",
+                        "provider_hint": "unknown",
+                        "stage_family": "test",
+                        "dead_letter_summary": {
+                            "active": True,
+                            "title": "테스트 반복 실패로 작업이 격리됨",
+                            "summary": "dead-letter after retry budget exhausted: snapshot mismatch",
+                            "failure_class": "test_failure",
+                            "provider_hint": "unknown",
+                            "stage_family": "test",
+                            "reason_code": "dead_letter",
+                            "source": "job_failure_runtime",
+                            "generated_at": "2026-03-12T00:00:00+00:00",
+                            "upstream_recovery_status": "",
+                            "manual_resume_recommended": True,
+                            "retry_from_scratch_recommended": True,
+                            "recommended_actions": ["원인 로그와 STATUS.md를 확인한 뒤 재실행 여부를 결정합니다."],
+                        },
+                    },
+                    {
+                        "generated_at": "2026-03-12T00:01:00+00:00",
+                        "source": "dashboard_dead_letter_retry",
+                        "job_id": job.job_id,
+                        "attempt": 0,
+                        "stage": "queued",
+                        "gate_label": "",
+                        "reason_code": "dead_letter_retry",
+                        "reason": "운영자가 dead-letter 작업을 다시 큐에 넣었습니다.",
+                        "decision": "retry_from_dead_letter",
+                        "recovery_status": "dead_letter_requeued",
+                        "recovery_count": 0,
+                        "details": {
+                            "previous_recovery_status": "dead_letter",
+                            "retry_from_scratch": True,
+                        },
+                        "failure_class": "unknown_runtime",
+                        "provider_hint": "unknown",
+                        "stage_family": "unknown",
+                    },
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    response = client.get(f"/api/jobs/{job.job_id}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["dead_letter_summary"] == {}
+    assert len(payload["dead_letter_action_trail"]) == 2
+    assert payload["dead_letter_action_trail"][0]["decision"] == "retry_from_dead_letter"
+    assert payload["dead_letter_action_trail"][0]["previous_recovery_status"] == "dead_letter"
+
+
+def test_job_detail_api_includes_requeue_reason_summary(app_components):
+    settings, store, app = app_components
+    client = TestClient(app)
+
+    job = _make_job("job-detail-requeue-summary")
+    job.status = JobStatus.QUEUED.value
+    job.stage = JobStage.QUEUED.value
+    job.recovery_status = "dead_letter_requeued"
+    job.recovery_reason = "운영자가 dead-letter 작업을 다시 큐에 넣었습니다."
+    store.create_job(job)
+
+    workspace_path = dashboard._job_workspace_path(job, settings)
+    trace_path = build_workflow_artifact_paths(workspace_path)["runtime_recovery_trace"]
+    trace_path.write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-03-12T00:00:00+00:00",
+                "latest_event_at": "2026-03-12T00:01:00+00:00",
+                "event_count": 1,
+                "events": [
+                    {
+                        "generated_at": "2026-03-12T00:01:00+00:00",
+                        "source": "dashboard_dead_letter_retry",
+                        "job_id": job.job_id,
+                        "attempt": 0,
+                        "stage": "queued",
+                        "gate_label": "",
+                        "reason_code": "dead_letter_retry",
+                        "reason": "운영자가 dead-letter 작업을 다시 큐에 넣었습니다.",
+                        "decision": "retry_from_dead_letter",
+                        "recovery_status": "dead_letter_requeued",
+                        "recovery_count": 0,
+                        "details": {
+                            "previous_recovery_status": "dead_letter",
+                            "previous_reason": "dead-letter after retry budget exhausted",
+                            "operator_note": "API key를 넣었으니 다시 시도",
+                            "retry_from_scratch": True,
+                        },
+                        "failure_class": "unknown_runtime",
+                        "provider_hint": "unknown",
+                        "stage_family": "unknown",
+                        "requeue_reason_summary": {
+                            "active": True,
+                            "title": "운영자 판단으로 dead-letter 작업을 다시 큐에 넣음",
+                            "summary": "운영자가 dead-letter 작업을 다시 큐에 넣었습니다.",
+                            "source": "dashboard_dead_letter_retry",
+                            "reason_code": "dead_letter_retry",
+                            "decision": "retry_from_dead_letter",
+                            "recovery_status": "dead_letter_requeued",
+                            "generated_at": "2026-03-12T00:01:00+00:00",
+                            "trigger": "operator_dead_letter_retry",
+                            "retry_from_scratch": True,
+                            "operator_note": "API key를 넣었으니 다시 시도",
+                            "previous_recovery_status": "dead_letter",
+                            "previous_reason": "dead-letter after retry budget exhausted",
+                            "target_node_id": "",
+                        },
+                    }
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    response = client.get(f"/api/jobs/{job.job_id}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["requeue_reason_summary"]["active"] is True
+    assert payload["requeue_reason_summary"]["source"] == "dashboard_dead_letter_retry"
+    assert payload["requeue_reason_summary"]["trigger"] == "operator_dead_letter_retry"
+    assert payload["requeue_reason_summary"]["previous_recovery_status"] == "dead_letter"
+
+
+def test_job_detail_api_includes_dead_letter_action_trail_with_operator_note(app_components):
+    settings, store, app = app_components
+    client = TestClient(app)
+
+    job = _make_job("job-detail-dead-letter-trail")
+    job.status = JobStatus.QUEUED.value
+    job.stage = JobStage.QUEUED.value
+    job.recovery_status = "dead_letter_requeued"
+    job.recovery_reason = "운영자가 다시 큐에 넣었습니다."
+    store.create_job(job)
+
+    workspace_path = dashboard._job_workspace_path(job, settings)
+    trace_path = build_workflow_artifact_paths(workspace_path)["runtime_recovery_trace"]
+    trace_path.write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-03-12T00:00:00+00:00",
+                "latest_event_at": "2026-03-12T00:01:00+00:00",
+                "event_count": 1,
+                "events": [
+                    {
+                        "generated_at": "2026-03-12T00:01:00+00:00",
+                        "source": "dashboard_dead_letter_retry",
+                        "job_id": job.job_id,
+                        "attempt": 0,
+                        "stage": "queued",
+                        "gate_label": "",
+                        "reason_code": "dead_letter_retry",
+                        "reason": "운영자가 다시 큐에 넣었습니다.",
+                        "decision": "retry_from_dead_letter",
+                        "recovery_status": "dead_letter_requeued",
+                        "recovery_count": 0,
+                        "details": {
+                            "previous_recovery_status": "dead_letter",
+                            "previous_reason": "dead-letter after retry budget exhausted",
+                            "operator_note": "API key를 넣었으니 다시 시도",
+                            "retry_from_scratch": True,
+                        },
+                        "failure_class": "unknown_runtime",
+                        "provider_hint": "unknown",
+                        "stage_family": "unknown",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    response = client.get(f"/api/jobs/{job.job_id}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["dead_letter_summary"] == {}
+    assert len(payload["dead_letter_action_trail"]) == 1
+    assert payload["dead_letter_action_trail"][0]["operator_note"] == "API key를 넣었으니 다시 시도"
+    assert payload["dead_letter_action_trail"][0]["previous_reason"] == "dead-letter after retry budget exhausted"
 
 
 def test_job_detail_api_includes_manual_retry_options(app_components):

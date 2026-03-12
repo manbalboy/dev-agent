@@ -94,6 +94,9 @@
             {% endif %}
           </dd>
           <dt>오류</dt><dd id="job-error">{{ job.error_message or "-" }}</dd>
+          <dt>실패 분류</dt><dd id="job-failure-class">-</dd>
+          <dt>실패 공급자</dt><dd id="job-failure-provider">-</dd>
+          <dt>실패 단계군</dt><dd id="job-failure-stage-family">-</dd>
           <dt>로그 채널</dt><dd id="job-logs">-</dd>
           <dt>생성</dt><dd id="job-created" class="js-time" data-utc="{{ job.created_at }}">{{ job.created_at }}</dd>
           <dt>시작</dt><dd id="job-started" class="js-time" data-utc="{{ job.started_at or '' }}">{{ job.started_at or "-" }}</dd>
@@ -128,6 +131,10 @@
         <section id="detail-tab-debug" class="detail-tab-panel">
           <div id="log-ops-board" class="failure-summary"></div>
           <div id="assistant-diagnosis-board" class="failure-summary"></div>
+          <div id="failure-classification-board" class="failure-summary"></div>
+          <div id="needs-human-board" class="failure-summary"></div>
+          <div id="dead-letter-board" class="failure-summary"></div>
+          <div id="requeue-reason-board" class="failure-summary"></div>
           <div id="failure-summary" class="failure-summary"></div>
           <div id="debug-flow-summary" class="failure-summary"></div>
           <div class="terminal-wrap">
@@ -210,6 +217,11 @@
       let runtimeSignalsCache = null;
       let memoryTraceCache = null;
       let assistantDiagnosisTraceCache = null;
+      let failureClassificationCache = null;
+      let needsHumanSummaryCache = null;
+      let deadLetterSummaryCache = null;
+      let deadLetterActionTrailCache = [];
+      let requeueReasonSummaryCache = null;
       let jobLineageCache = null;
       let logSummaryCache = null;
       let operatorInputsCache = null;
@@ -340,6 +352,55 @@
         if (stopButton) {
           stopButton.disabled = !(job.status === "queued" || job.status === "running");
         }
+      }
+
+      function failureClassLabel(value) {
+        const key = String(value || "").trim().toLowerCase();
+        const map = {
+          provider_quota: "Provider quota",
+          provider_timeout: "Provider timeout",
+          provider_auth: "Provider auth",
+          stale_heartbeat: "Heartbeat stale",
+          git_conflict: "Git conflict",
+          test_failure: "Test failure",
+          tool_failure: "Tool failure",
+          workflow_contract: "Workflow contract",
+          unknown_runtime: "Unknown runtime",
+        };
+        return map[key] || key || "-";
+      }
+
+      function providerHintLabel(value) {
+        const key = String(value || "").trim().toLowerCase();
+        const map = {
+          gemini: "Gemini",
+          codex: "Codex",
+          github: "GitHub",
+          git: "Git",
+          runtime: "Runtime",
+          test_runner: "Test Runner",
+          tool: "Tool Runtime",
+          mcp: "MCP",
+          unknown: "Unknown",
+        };
+        return map[key] || key || "-";
+      }
+
+      function stageFamilyLabel(value) {
+        const key = String(value || "").trim().toLowerCase();
+        const map = {
+          runtime_recovery: "Runtime Recovery",
+          git_provider: "Git Provider",
+          test: "Test",
+          review: "Review",
+          implementation: "Implementation",
+          planning: "Planning",
+          content: "Content",
+          workflow: "Workflow",
+          tool: "Tool",
+          unknown: "Unknown",
+        };
+        return map[key] || key || "-";
       }
 
       function workflowResolutionSourceLabel(source) {
@@ -556,6 +617,260 @@
         `;
       }
 
+      function renderFailureClassificationBoard(failureClassification, runtimeRecoveryTrace) {
+        const board = document.getElementById("failure-classification-board");
+        if (!board) return;
+        const summary = failureClassification && typeof failureClassification === "object" ? failureClassification : {};
+        const trace = runtimeRecoveryTrace && typeof runtimeRecoveryTrace === "object" ? runtimeRecoveryTrace : {};
+        const latestEvent = Array.isArray(trace.events) && trace.events.length ? trace.events[trace.events.length - 1] : null;
+        const failureClass = String(summary.failure_class || trace.latest_failure_class || "").trim();
+        const providerHint = String(summary.provider_hint || trace.latest_provider_hint || "").trim();
+        const stageFamily = String(summary.stage_family || trace.latest_stage_family || "").trim();
+        const reasonCode = String(summary.reason_code || latestEvent?.reason_code || "").trim();
+        const stage = String(summary.stage || latestEvent?.stage || "").trim();
+        const reason = String(summary.reason || latestEvent?.reason || "").trim();
+        const generatedAt = String(summary.generated_at || latestEvent?.generated_at || "").trim();
+        const source = String(summary.source || "").trim() || (latestEvent ? "runtime_recovery_trace" : "");
+        if (!failureClass && !reason && !providerHint && !stageFamily) {
+          board.innerHTML = `<p class="failure-empty">정규화된 실패 분류 정보가 아직 없습니다.</p>`;
+          return;
+        }
+        board.innerHTML = `
+          <h3>실패 분류</h3>
+          <ul class="failure-list">
+            <li class="failure-item type-error">
+              <span class="failure-type">분류</span>
+              <span class="failure-text"><code>${esc(failureClass || "-")}</code> · ${esc(failureClassLabel(failureClass))}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">공급자</span>
+              <span class="failure-text"><code>${esc(providerHint || "-")}</code> · ${esc(providerHintLabel(providerHint))}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">단계군</span>
+              <span class="failure-text"><code>${esc(stageFamily || "-")}</code> · ${esc(stageFamilyLabel(stageFamily))}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">reason code</span>
+              <span class="failure-text">${esc(reasonCode || "-")}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">단계</span>
+              <span class="failure-text">${esc(stage || "-")}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">출처</span>
+              <span class="failure-text">${esc(source || "-")}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">최종 근거</span>
+              <span class="failure-text">${esc(reason || "-")}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">갱신</span>
+              <span class="failure-text">${esc(formatKstDateTime(generatedAt || ""))}</span>
+            </li>
+          </ul>
+        `;
+        const classNode = document.getElementById("job-failure-class");
+        if (classNode) classNode.innerHTML = failureClass ? `<code>${esc(failureClass)}</code> · ${esc(failureClassLabel(failureClass))}` : "-";
+        const providerNode = document.getElementById("job-failure-provider");
+        if (providerNode) providerNode.innerHTML = providerHint ? `<code>${esc(providerHint)}</code> · ${esc(providerHintLabel(providerHint))}` : "-";
+        const familyNode = document.getElementById("job-failure-stage-family");
+        if (familyNode) familyNode.innerHTML = stageFamily ? `<code>${esc(stageFamily)}</code> · ${esc(stageFamilyLabel(stageFamily))}` : "-";
+      }
+
+      function renderNeedsHumanBoard(summary) {
+        const board = document.getElementById("needs-human-board");
+        if (!board) return;
+        const item = summary && typeof summary === "object" ? summary : {};
+        if (!item.active) {
+          board.innerHTML = `<p class="failure-empty">현재 사람 개입이 필요한 상태는 아닙니다.</p>`;
+          return;
+        }
+        const actions = Array.isArray(item.recommended_actions) ? item.recommended_actions : [];
+        const actionItems = actions.length
+          ? actions.map((action) => `<li class="failure-item"><span class="failure-type">조치</span><span class="failure-text">${esc(String(action || ""))}</span></li>`).join("")
+          : `<li class="failure-item"><span class="failure-type">조치</span><span class="failure-text">운영자 검토가 필요합니다.</span></li>`;
+        board.innerHTML = `
+          <h3>사람 확인 필요</h3>
+          <ul class="failure-list">
+            <li class="failure-item type-warn">
+              <span class="failure-type">제목</span>
+              <span class="failure-text">${esc(String(item.title || "운영자 확인 필요"))}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">요약</span>
+              <span class="failure-text">${esc(String(item.summary || "-"))}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">복구 경로</span>
+              <span class="failure-text"><code>${esc(String(item.recovery_path || "-"))}</code></span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">수동 재개</span>
+              <span class="failure-text">${item.manual_resume_recommended ? "권장" : "상황 확인 후 결정"}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">cooldown</span>
+              <span class="failure-text">${esc(String(item.cooldown_seconds || 0))}초</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">자동 재시도 예산</span>
+              <span class="failure-text">${esc(String(item.effective_retry_budget || 0))}회</span>
+            </li>
+            ${actionItems}
+          </ul>
+        `;
+      }
+
+      function renderDeadLetterBoard(summary, actionTrail) {
+        const board = document.getElementById("dead-letter-board");
+        if (!board) return;
+        const item = summary && typeof summary === "object" ? summary : {};
+        const trailItems = Array.isArray(actionTrail) ? actionTrail : [];
+        if (!item.active && !trailItems.length) {
+          board.innerHTML = `<p class="failure-empty">현재 격리된 dead-letter 상태는 아닙니다.</p>`;
+          return;
+        }
+        const actions = Array.isArray(item.recommended_actions) ? item.recommended_actions : [];
+        const actionItems = actions.length
+          ? actions.map((action) => `<li class="failure-item"><span class="failure-type">조치</span><span class="failure-text">${esc(String(action || ""))}</span></li>`).join("")
+          : `<li class="failure-item"><span class="failure-type">조치</span><span class="failure-text">운영자 검토 후 재실행 여부를 결정합니다.</span></li>`;
+        const trailHtml = trailItems.length
+          ? trailItems.map((entry) => {
+              const note = String(entry.operator_note || "").trim();
+              const previousReason = String(entry.previous_reason || "").trim();
+              return `
+                <li class="failure-item">
+                  <span class="failure-type">${esc(formatKstDateTime(String(entry.generated_at || "")) || "-")}</span>
+                  <span class="failure-text">
+                    <code>${esc(String(entry.decision || "-"))}</code>
+                    · ${esc(String(entry.reason || "-"))}
+                    ${note ? `<br><strong>운영자 메모:</strong> ${esc(note)}` : ""}
+                    ${previousReason ? `<br><strong>이전 사유:</strong> ${esc(previousReason)}` : ""}
+                  </span>
+                </li>
+              `;
+            }).join("")
+          : `<li class="failure-item"><span class="failure-type">기록</span><span class="failure-text">dead-letter 관련 조치 기록이 아직 없습니다.</span></li>`;
+        const retryPanel = item.active
+          ? `
+          <div class="workflow-manual-panel">
+            <label class="field-label" for="dead-letter-retry-note">운영자 메모</label>
+            <textarea id="dead-letter-retry-note" rows="3" placeholder="왜 다시 큐에 넣는지 간단히 남깁니다."></textarea>
+            <button id="dead-letter-retry-submit" type="button" class="action-button">Dead Letter 다시 큐에 넣기</button>
+            <p id="dead-letter-retry-status" class="form-hint">격리된 작업을 운영자 판단으로 다시 큐에 넣습니다.</p>
+          </div>`
+          : `<p id="dead-letter-retry-status" class="form-hint">현재는 dead-letter 상태가 아니므로 재큐잉 버튼을 숨깁니다.</p>`;
+        board.innerHTML = `
+          <h3>Dead Letter 격리</h3>
+          <ul class="failure-list">
+            ${item.active ? `
+            <li class="failure-item type-warn">
+              <span class="failure-type">제목</span>
+              <span class="failure-text">${esc(String(item.title || "작업 격리됨"))}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">요약</span>
+              <span class="failure-text">${esc(String(item.summary || "-"))}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">상위 복구 상태</span>
+              <span class="failure-text"><code>${esc(String(item.upstream_recovery_status || "-"))}</code></span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">수동 재개</span>
+              <span class="failure-text">${item.manual_resume_recommended ? "가능" : "권장하지 않음"}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">새 작업 재시도</span>
+              <span class="failure-text">${item.retry_from_scratch_recommended ? "권장" : "상황 확인 후 결정"}</span>
+            </li>
+            ${actionItems}
+            ` : `<li class="failure-item"><span class="failure-type">현재 상태</span><span class="failure-text">최근 dead-letter 조치 이력만 표시합니다.</span></li>`}
+          </ul>
+          <section class="stage-snapshot">
+            <h4>최근 조치 이력</h4>
+            <ul class="failure-list">${trailHtml}</ul>
+          </section>
+          ${retryPanel}
+        `;
+        const retryButton = document.getElementById("dead-letter-retry-submit");
+        if (retryButton) retryButton.onclick = submitDeadLetterRetry;
+      }
+
+      function renderRequeueReasonBoard(summary) {
+        const board = document.getElementById("requeue-reason-board");
+        if (!board) return;
+        const item = summary && typeof summary === "object" ? summary : {};
+        if (!item.active) {
+          board.innerHTML = `<p class="failure-empty">최근 재큐잉 사유가 아직 없습니다.</p>`;
+          return;
+        }
+        const operatorNote = String(item.operator_note || "").trim();
+        const previousStatus = String(item.previous_recovery_status || "").trim();
+        const previousReason = String(item.previous_reason || "").trim();
+        const targetNodeId = String(item.target_node_id || "").trim();
+        board.innerHTML = `
+          <h3>재큐잉 사유</h3>
+          <ul class="failure-list">
+            <li class="failure-item type-warn">
+              <span class="failure-type">제목</span>
+              <span class="failure-text">${esc(String(item.title || "재큐잉 사유"))}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">요약</span>
+              <span class="failure-text">${esc(String(item.summary || "-"))}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">트리거</span>
+              <span class="failure-text"><code>${esc(String(item.trigger || "-"))}</code></span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">출처</span>
+              <span class="failure-text"><code>${esc(String(item.source || "-"))}</code></span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">결정</span>
+              <span class="failure-text"><code>${esc(String(item.decision || "-"))}</code></span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">복구 상태</span>
+              <span class="failure-text"><code>${esc(String(item.recovery_status || "-"))}</code></span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">처음부터 재시도</span>
+              <span class="failure-text">${item.retry_from_scratch ? "예" : "아니오"}</span>
+            </li>
+            ${targetNodeId ? `
+            <li class="failure-item">
+              <span class="failure-type">시작 노드</span>
+              <span class="failure-text"><code>${esc(targetNodeId)}</code></span>
+            </li>` : ""}
+            ${previousStatus ? `
+            <li class="failure-item">
+              <span class="failure-type">이전 복구 상태</span>
+              <span class="failure-text"><code>${esc(previousStatus)}</code></span>
+            </li>` : ""}
+            ${previousReason ? `
+            <li class="failure-item">
+              <span class="failure-type">이전 사유</span>
+              <span class="failure-text">${esc(previousReason)}</span>
+            </li>` : ""}
+            ${operatorNote ? `
+            <li class="failure-item">
+              <span class="failure-type">운영자 메모</span>
+              <span class="failure-text">${esc(operatorNote)}</span>
+            </li>` : ""}
+            <li class="failure-item">
+              <span class="failure-type">기록 시각</span>
+              <span class="failure-text">${esc(formatKstDateTime(String(item.generated_at || "")))}</span>
+            </li>
+          </ul>
+        `;
+      }
+
       function isNearBottom(element) {
         const threshold = 40;
         return element.scrollHeight - element.scrollTop - element.clientHeight < threshold;
@@ -667,6 +982,8 @@
 
       function classifyLogEntry(entry) {
         const msg = String(entry.message || "");
+        const actor = String(entry.actor || "ORCHESTRATOR").toUpperCase();
+        const optionalActors = new Set(["TECH_WRITER", "TECH_WRITER_CODEX", "PR_SUMMARY", "CODEX_HELPER", "COPILOT"]);
         if (msg.startsWith("Attempt ") && msg.includes(" failed:")) return "error";
         if (/^\[(LONG|ULTRA10|ULTRA)\]\s+.*failed:/i.test(msg)) return "error";
         if (msg.includes("Maximum retry count reached")) return "error";
@@ -676,8 +993,16 @@
         if (msg.startsWith("[RUN] ")) return "run";
         if (msg.startsWith("[DONE] ")) {
           const matched = msg.match(/exit_code=(\d+)/);
-          if (matched && Number(matched[1]) !== 0) return "error";
+          if (matched && Number(matched[1]) !== 0) {
+            return optionalActors.has(actor) ? "warn" : "error";
+          }
           return "done";
+        }
+        if (
+          optionalActors.has(actor)
+          && /(route unavailable|falling back|using deterministic fallback|using default pr body|fallback to coder route)/i.test(msg)
+        ) {
+          return "warn";
         }
         if (msg.startsWith("[STDERR]")) return "warn";
         return "info";
@@ -759,6 +1084,8 @@
           DESIGNER: "디자이너",
           COPYWRITER: "카피라이터",
           TECH_WRITER: "기술 문서 작성가",
+          TECH_WRITER_CODEX: "문서 보조 코더",
+          PR_SUMMARY: "PR 요약기",
           TESTER_GPT: "테스터(gpt)",
           TESTER_GEMINI: "테스터(gemini)",
           TESTER: "테스터",
@@ -775,6 +1102,8 @@
 
       function humanizeLogMessage(message) {
         const msg = String(message || "");
+        const loginHint = /verify cli login\/state|login\/state|login required|please login|authentication|unauthorized|not logged/i.test(msg);
+        const quotaHint = /quota|no quota|rate limit|usage limit/i.test(msg);
         const stageMatch = msg.match(/^\[STAGE\]\s+([a-zA-Z0-9_:-]+)/);
         if (stageMatch) {
           return `단계 전환: ${stageDisplayName(stageMatch[1])}`;
@@ -816,6 +1145,27 @@
         }
         if (msg.startsWith("[DONE]")) {
           return msg.replace("[DONE]", "명령 종료").trim();
+        }
+        if (msg.startsWith("Commit summary route unavailable;")) {
+          return `커밋 요약 생성 실패, 기본 요약으로 대체${loginHint ? " · CLI 로그인/인증 상태 확인 필요" : quotaHint ? " · 사용량/쿼터 확인 필요" : ""}`;
+        }
+        if (msg.startsWith("Helper commit summary route unavailable;")) {
+          return `보조 커밋 요약 생성 실패, 템플릿/기본 요약으로 대체${loginHint ? " · CLI 로그인/인증 상태 확인 필요" : quotaHint ? " · 사용량/쿼터 확인 필요" : ""}`;
+        }
+        if (msg.startsWith("PR summary route unavailable;")) {
+          return `PR 요약 생성 실패, 기본 PR 본문으로 대체${loginHint ? " · CLI 로그인/인증 상태 확인 필요" : quotaHint ? " · 사용량/쿼터 확인 필요" : ""}`;
+        }
+        if (msg.startsWith("Documentation route failed.") || msg.startsWith("Documentation route unavailable")) {
+          return `문서화 보조 단계 실패, 코더 경로로 대체${loginHint ? " · CLI 로그인/인증 상태 확인 필요" : quotaHint ? " · 사용량/쿼터 확인 필요" : ""}`;
+        }
+        if (msg.startsWith("Failure assistant failed:")) {
+          return `실패 분석 보조 단계 실패${loginHint ? " · CLI 로그인/인증 상태 확인 필요" : quotaHint ? " · 사용량/쿼터 확인 필요" : ""}`;
+        }
+        if (loginHint) {
+          return `CLI 실행 실패 · 로그인/인증 상태 확인 필요`;
+        }
+        if (quotaHint) {
+          return `CLI 실행 실패 · 사용량/쿼터 확인 필요`;
         }
         return msg;
       }
@@ -1527,6 +1877,8 @@
         const debugChannel = channels.debug && typeof channels.debug === "object" ? channels.debug : {};
         const userChannel = channels.user && typeof channels.user === "object" ? channels.user : {};
         const latestError = summary.latest_error && typeof summary.latest_error === "object" ? summary.latest_error : {};
+        const latestOptionalError = summary.latest_optional_error && typeof summary.latest_optional_error === "object" ? summary.latest_optional_error : {};
+        const latestAuthHint = summary.latest_auth_hint && typeof summary.latest_auth_hint === "object" ? summary.latest_auth_hint : {};
         const latestCommand = summary.latest_command && typeof summary.latest_command === "object" ? summary.latest_command : {};
         const topActors = Array.isArray(summary.top_actors) ? summary.top_actors : [];
         const actorSummary = topActors.length
@@ -1553,15 +1905,23 @@
             </li>
             <li class="failure-item">
               <span class="failure-type">오류 신호</span>
-              <span class="failure-text">${esc(String(summary.error_count || 0))}개 · nonzero done ${esc(String(summary.nonzero_done_count || 0))}</span>
+              <span class="failure-text">핵심 ${esc(String(summary.error_count || 0))}개 · 보조 ${esc(String(summary.optional_error_count || 0))}개 · nonzero done ${esc(String(summary.nonzero_done_count || 0))}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">인증 힌트</span>
+              <span class="failure-text">${esc(String(latestAuthHint.message || "-"))}</span>
             </li>
             <li class="failure-item">
               <span class="failure-type">최근 명령</span>
               <span class="failure-text">${esc(String(latestCommand.message || "-"))}</span>
             </li>
             <li class="failure-item">
-              <span class="failure-type">최근 오류</span>
+              <span class="failure-type">최근 핵심 오류</span>
               <span class="failure-text">${esc(String(latestError.message || "-").split("\n")[0] || "-")}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">최근 보조 실패</span>
+              <span class="failure-text">${esc(String(latestOptionalError.message || "-").split("\n")[0] || "-")}</span>
             </li>
             <li class="failure-item">
               <span class="failure-type">주요 actor</span>
@@ -1749,6 +2109,36 @@
           statusNode.textContent = "네트워크 오류로 수동 재개 요청에 실패했습니다.";
         } finally {
           submitButton.disabled = false;
+        }
+      }
+
+      async function submitDeadLetterRetry() {
+        const retryButton = document.getElementById("dead-letter-retry-submit");
+        const noteInput = document.getElementById("dead-letter-retry-note");
+        const statusNode = document.getElementById("dead-letter-retry-status");
+        if (!retryButton || !statusNode) return;
+        const note = noteInput ? String(noteInput.value || "").trim() : "";
+
+        retryButton.disabled = true;
+        statusNode.textContent = "dead-letter 작업을 다시 큐에 넣는 중...";
+        try {
+          const response = await fetch(`/api/jobs/${JOB_ID}/dead-letter/retry`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ note }),
+          });
+          const payload = await response.json().catch(() => ({}));
+          if (!response.ok) {
+            statusNode.textContent = payload.detail || "dead-letter 재시도 요청에 실패했습니다.";
+            return;
+          }
+          statusNode.textContent = payload.reason || "dead-letter 작업이 다시 큐에 등록되었습니다.";
+          if (noteInput) noteInput.value = "";
+          await refreshJob();
+        } catch {
+          statusNode.textContent = "네트워크 오류로 dead-letter 재시도 요청에 실패했습니다.";
+        } finally {
+          retryButton.disabled = false;
         }
       }
 
@@ -2556,7 +2946,7 @@
                 const firstLine = String(item.message || "").split("\n")[0];
                 return `<li class="failure-item type-${item.type}">
                   <span class="failure-type">${displayLabel(item.type)}</span>
-                  <span class="failure-actor">${esc(item.actor || "ORCHESTRATOR")}</span>
+                  <span class="failure-actor">${esc(actorDisplayName(item.actor || "ORCHESTRATOR"))}</span>
                   <span class="failure-text">${esc(firstLine)}</span>
                 </li>`;
               })
@@ -2729,6 +3119,21 @@
           assistantDiagnosisTraceCache = payload.assistant_diagnosis_trace && typeof payload.assistant_diagnosis_trace === "object"
             ? payload.assistant_diagnosis_trace
             : null;
+          failureClassificationCache = payload.failure_classification && typeof payload.failure_classification === "object"
+            ? payload.failure_classification
+            : null;
+          needsHumanSummaryCache = payload.needs_human_summary && typeof payload.needs_human_summary === "object"
+            ? payload.needs_human_summary
+            : null;
+          deadLetterSummaryCache = payload.dead_letter_summary && typeof payload.dead_letter_summary === "object"
+            ? payload.dead_letter_summary
+            : null;
+          deadLetterActionTrailCache = Array.isArray(payload.dead_letter_action_trail)
+            ? payload.dead_letter_action_trail
+            : [];
+          requeueReasonSummaryCache = payload.requeue_reason_summary && typeof payload.requeue_reason_summary === "object"
+            ? payload.requeue_reason_summary
+            : null;
           jobLineageCache = payload.job_lineage && typeof payload.job_lineage === "object"
             ? payload.job_lineage
             : null;
@@ -2748,6 +3153,10 @@
           renderRuntimeHealth(runtimeSignalsCache);
           renderLogOpsBoard(logSummaryCache);
           renderAssistantDiagnosisBoard(assistantDiagnosisTraceCache);
+          renderFailureClassificationBoard(failureClassificationCache, payload.runtime_recovery_trace);
+          renderNeedsHumanBoard(needsHumanSummaryCache);
+          renderDeadLetterBoard(deadLetterSummaryCache, deadLetterActionTrailCache);
+          renderRequeueReasonBoard(requeueReasonSummaryCache);
           renderWorkflowLane(debugEntriesCache, currentStageCode);
           renderWorkflowManualPanel(manualRetryOptionsCache, resumeStateCache);
           if (docsChanged && firstUserLogLoaded && lastUserLogText) {

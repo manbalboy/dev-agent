@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 .env
+.webhook_secret.txt
 config/ai_commands.json
 config/apps.json
 config/app_ports.json

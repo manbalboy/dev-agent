@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -184,6 +185,36 @@ def test_jobs_api_filters_by_status_stage_app_track_and_query(app_components):
         "applied": True,
     }
     assert "product_review" in payload["filter_options"]["stages"]
+
+
+def test_jobs_api_includes_normalized_failure_class(app_components):
+    _, store, app = app_components
+    client = TestClient(app)
+
+    store.create_job(
+        _make_job(
+            "job-git-conflict",
+            issue_number=203,
+            issue_title="Push rejected after review",
+            status="failed",
+            stage="push_branch",
+            app_code="admin",
+            track="bug",
+            created_at="2026-03-08T01:40:00+00:00",
+            updated_at="2026-03-08T01:45:00+00:00",
+            error_message="git push rejected: non-fast-forward update failed",
+        )
+    )
+
+    response = client.get("/api/jobs", params={"q": "git_conflict"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert [item["job_id"] for item in payload["jobs"]] == ["job-git-conflict"]
+    assert payload["jobs"][0]["failure_class"] == "git_conflict"
+    assert payload["jobs"][0]["failure_classification"]["source"] == "job_record"
+    assert payload["jobs"][0]["failure_provider_hint"] == "git"
+    assert payload["jobs"][0]["failure_stage_family"] == "git_provider"
 
 
 def test_job_options_api_returns_compact_combobox_items(app_components):
@@ -376,6 +407,36 @@ def test_dashboard_root_renders_shell_without_preloading_jobs(app_components):
     assert response.status_code == 200
     assert "작업 목록을 불러오는 중..." in response.text
     assert "앱 목록 불러오는 중..." in response.text
+    assert "Codex 위험 모드" in response.text
+    assert "위험 플래그 제거" in response.text
+    assert "현재 입력 기준 위험 플래그를 점검합니다." in response.text
+    assert "상태 / 실패 분류" in response.text
+
+
+def test_agent_models_api_reports_dangerous_codex_templates(app_components):
+    settings, _, app = app_components
+    settings.command_config.write_text(
+        json.dumps(
+            {
+                "planner": "cat {prompt_file} | gemini --model gemini-3.1-pro-preview > {plan_path}",
+                "coder": "cat {prompt_file} | codex exec - --dangerously-bypass-approvals-and-sandbox -C {work_dir} --color never",
+                "reviewer": "cat {prompt_file} | gemini --model gemini-3.1-pro-preview > {review_path}",
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    client = TestClient(app)
+
+    response = client.get("/api/agents/models")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["codex"]["danger_mode"] is True
+    assert payload["codex"]["danger_template_keys"] == ["coder"]
+    assert payload["gemini"]["danger_mode"] is False
 
 
 def test_admin_metrics_api_aggregates_system_quality_and_memory_signals(app_components, monkeypatch, tmp_path: Path):
@@ -496,7 +557,8 @@ def test_admin_metrics_api_aggregates_system_quality_and_memory_signals(app_comp
         updated_at="2026-03-08T05:10:00+00:00",
         workflow_id="adaptive_quality_loop_v1",
     )
-    job.recovery_status = "auto_recovered"
+    job.recovery_status = "dead_letter"
+    job.recovery_reason = "dead-letter after retry budget exhausted: snapshot mismatch"
     store.create_job(job)
     default_job = _make_job(
         "job-admin-default",
@@ -638,6 +700,94 @@ def test_admin_metrics_api_aggregates_system_quality_and_memory_signals(app_comp
         + "\n",
         encoding="utf-8",
     )
+    build_workflow_artifact_paths(docs_dir.parent)["provider_failure_counters"].write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-03-10T05:21:00+00:00",
+                "latest_updated_at": "2026-03-10T05:21:00+00:00",
+                "providers": {
+                    "codex": {
+                        "provider_hint": "codex",
+                        "total_failures": 3,
+                        "recent_failure_count": 3,
+                        "last_failure_class": "provider_quota",
+                        "last_stage_family": "implementation",
+                        "last_reason_code": "provider_quota",
+                        "last_reason": "402 quota exceeded",
+                        "last_job_id": job.job_id,
+                        "last_attempt": 1,
+                        "last_failed_at": "2026-03-10T05:21:00+00:00",
+                        "recent_failures": [],
+                    }
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    build_workflow_artifact_paths(docs_dir.parent)["runtime_recovery_trace"].write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-03-10T05:26:00+00:00",
+                "latest_event_at": "2026-03-10T05:26:00+00:00",
+                "event_count": 3,
+                "events": [
+                    {
+                        "generated_at": "2026-03-10T05:26:00+00:00",
+                        "source": "dashboard_dead_letter_retry",
+                        "job_id": job.job_id,
+                        "attempt": 2,
+                        "stage": "improvement_stage",
+                        "reason_code": "manual_retry",
+                        "reason": "operator approved retry from dead-letter",
+                        "decision": "retry_from_dead_letter",
+                        "recovery_status": "dead_letter_requeued",
+                        "failure_class": "unknown_runtime",
+                        "provider_hint": "runtime",
+                        "stage_family": "runtime_recovery",
+                        "details": {
+                            "operator_note": "retry after fixture update",
+                            "previous_recovery_status": "dead_letter",
+                        },
+                    },
+                    {
+                        "generated_at": "2026-03-10T05:25:00+00:00",
+                        "source": "job_failure_runtime",
+                        "job_id": job.job_id,
+                        "attempt": 2,
+                        "stage": "improvement_stage",
+                        "reason_code": "dead_letter",
+                        "reason": "dead-letter after retry budget exhausted: snapshot mismatch",
+                        "decision": "dead_letter",
+                        "recovery_status": "dead_letter",
+                        "failure_class": "test_failure",
+                        "provider_hint": "test_runner",
+                        "stage_family": "test",
+                    },
+                    {
+                        "generated_at": "2026-03-10T05:24:00+00:00",
+                        "source": "job_failure_runtime",
+                        "job_id": job.job_id,
+                        "attempt": 2,
+                        "stage": "improvement_stage",
+                        "reason_code": "provider_timeout",
+                        "reason": "codex provider circuit open after 6/6 provider_timeout failure(s)",
+                        "decision": "provider_circuit_open",
+                        "recovery_status": "provider_circuit_open",
+                        "failure_class": "provider_timeout",
+                        "provider_hint": "codex",
+                        "stage_family": "implementation",
+                    },
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     default_docs_dir = settings.repository_workspace_path(default_job.repository, default_job.app_code) / "_docs"
     default_docs_dir.mkdir(parents=True, exist_ok=True)
@@ -654,6 +804,138 @@ def test_admin_metrics_api_aggregates_system_quality_and_memory_signals(app_comp
                     {"tool": "log_lookup", "ok": True, "mode": "internal"},
                     {"tool": "memory_search", "ok": True, "mode": "internal"},
                 ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    build_workflow_artifact_paths(default_docs_dir.parent)["provider_failure_counters"].write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-03-10T05:05:00+00:00",
+                "latest_updated_at": "2026-03-10T05:05:00+00:00",
+                "providers": {
+                    "github": {
+                        "provider_hint": "github",
+                        "total_failures": 1,
+                        "recent_failure_count": 1,
+                        "last_failure_class": "provider_auth",
+                        "last_stage_family": "git_provider",
+                        "last_reason_code": "provider_auth",
+                        "last_reason": "403 forbidden",
+                        "last_job_id": default_job.job_id,
+                        "last_attempt": 1,
+                        "last_failed_at": "2026-03-10T05:05:00+00:00",
+                        "recent_failures": [],
+                    }
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    build_workflow_artifact_paths(default_docs_dir.parent)["runtime_recovery_trace"].write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-03-10T05:06:00+00:00",
+                "latest_event_at": "2026-03-10T05:06:00+00:00",
+                "event_count": 1,
+                "events": [
+                    {
+                        "generated_at": "2026-03-10T05:06:00+00:00",
+                        "source": "worker_stale_recovery",
+                        "job_id": default_job.job_id,
+                        "attempt": 1,
+                        "stage": "done",
+                        "reason_code": "stale_heartbeat",
+                        "reason": "running heartbeat stale detected after 1800s",
+                        "decision": "requeue",
+                        "recovery_status": "auto_recovered",
+                        "failure_class": "stale_heartbeat",
+                        "provider_hint": "runtime",
+                        "stage_family": "runtime_recovery",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (settings.data_dir / "worker_startup_sweep_trace.json").write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-03-10T05:30:00+00:00",
+                "latest_event_at": "2026-03-10T05:30:00+00:00",
+                "event_count": 1,
+                "events": [
+                    {
+                        "generated_at": "2026-03-10T05:30:00+00:00",
+                        "orphan_running_node_runs_interrupted": 1,
+                        "stale_running_jobs_recovered": 2,
+                        "orphan_queued_jobs_recovered": 0,
+                        "running_node_job_mismatches_detected": 3,
+                        "running_node_job_mismatches_remaining": 1,
+                        "queue_size_before": 0,
+                        "queue_size_after": 2,
+                        "details": {
+                            "mismatch_audit_before": {
+                                "counts": {
+                                    "running_job_missing_current_running_node": 2,
+                                    "non_running_job_has_running_node_runs": 1,
+                                }
+                            },
+                            "mismatch_audit_after": {
+                                "counts": {
+                                    "running_job_missing_current_running_node": 1,
+                                }
+                            },
+                        },
+                    }
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    pids_dir = settings.data_dir / "pids"
+    pids_dir.mkdir(parents=True, exist_ok=True)
+    (pids_dir / "app_food.json").write_text(
+        json.dumps(
+            {
+                "app_code": "food",
+                "repository": "owner/repo",
+                "mode": "expo-android",
+                "command": "exec npx expo start --android",
+                "log_file": str(settings.data_dir / "logs" / "apps" / "food.log"),
+                "pid": str(os.getpid()),
+                "port": "",
+                "updated_at": "2026-03-10T05:31:00+00:00",
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (pids_dir / "app_default.json").write_text(
+        json.dumps(
+            {
+                "app_code": "default",
+                "repository": "owner/repo",
+                "mode": "web",
+                "command": "exec npm start",
+                "log_file": str(settings.data_dir / "logs" / "apps" / "default.log"),
+                "pid": "999999",
+                "port": "3100",
+                "updated_at": "2026-03-10T05:29:00+00:00",
             },
             ensure_ascii=False,
             indent=2,
@@ -678,6 +960,50 @@ def test_admin_metrics_api_aggregates_system_quality_and_memory_signals(app_comp
     assert payload["runtime"]["workflow_counts"][0]["name"] == "adaptive_quality_loop_v1"
     assert payload["runtime"]["adaptive_job_count"] == 1
     assert payload["runtime"]["default_job_count"] == 1
+    assert payload["runtime"]["provider_failure_counts"][0]["name"] == "codex"
+    assert payload["runtime"]["provider_failure_counts"][0]["count"] == 3
+    assert payload["runtime"]["provider_failure_workspaces"] == 2
+    assert payload["runtime"]["dead_letter_jobs"][0]["job_id"] == job.job_id
+    assert payload["runtime"]["dead_letter_jobs"][0]["recovery_status"] == "dead_letter"
+    assert payload["runtime"]["dead_letter_summary"]["app_counts"][0]["name"] == "food"
+    assert payload["runtime"]["dead_letter_summary"]["failure_class_counts"][0]["name"] == "test_failure"
+    assert payload["runtime"]["dead_letter_jobs"][0]["failure_provider_hint"] in {
+        item["name"] for item in payload["runtime"]["dead_letter_summary"]["provider_counts"]
+    }
+    assert payload["runtime"]["recovery_history"]["event_counts"][0]["name"] == "dead_letter"
+    assert "codex" in {item["name"] for item in payload["runtime"]["recovery_history"]["provider_counts"]}
+    assert "implementation" in {item["name"] for item in payload["runtime"]["recovery_history"]["stage_family_counts"]}
+    assert payload["runtime"]["recovery_history"]["recent_events"][0]["job_id"] == job.job_id
+    assert payload["runtime"]["recovery_history"]["recent_events"][0]["decision"] == "retry_from_dead_letter"
+    assert payload["runtime"]["recovery_action_groups"]["action_counts"][0]["name"] in {
+        "requeue",
+        "dead_letter",
+        "provider_outage",
+    }
+    assert "dashboard_dead_letter_retry" in {
+        item["name"] for item in payload["runtime"]["recovery_action_groups"]["source_counts"]
+    }
+    assert payload["runtime"]["operator_action_trail"]["recent_events"][0]["job_id"] == job.job_id
+    assert payload["runtime"]["operator_action_trail"]["recent_events"][0]["operator_note"] == "retry after fixture update"
+    assert payload["runtime"]["operator_action_trail"]["recent_events"][0]["decision"] == "retry_from_dead_letter"
+    assert payload["runtime"]["provider_outage_history"]["event_counts"][0]["name"] == "provider_circuit_open"
+    assert payload["runtime"]["provider_outage_history"]["provider_counts"][0]["name"] == "codex"
+    assert payload["runtime"]["provider_outage_history"]["recent_events"][0]["job_id"] == job.job_id
+    assert payload["runtime"]["provider_outage_history"]["recent_events"][0]["provider_hint"] == "codex"
+    assert payload["runtime"]["provider_outage_history"]["recent_events"][0]["decision"] == "provider_circuit_open"
+    assert payload["runtime"]["app_runner_status"]["active_count"] == 2
+    assert payload["runtime"]["app_runner_status"]["mobile_count"] == 1
+    assert payload["runtime"]["app_runner_status"]["web_count"] == 1
+    assert {item["name"] for item in payload["runtime"]["app_runner_status"]["mode_counts"]} == {"expo-android", "web"}
+    assert {item["name"] for item in payload["runtime"]["app_runner_status"]["state_counts"]} == {"running", "stopped"}
+    assert {item["app_code"] for item in payload["runtime"]["app_runner_status"]["recent_runs"]} == {"food", "default"}
+    assert payload["runtime"]["startup_sweep"]["stale_running_jobs_recovered"] == 2
+    assert payload["runtime"]["startup_sweep"]["running_node_job_mismatches_detected"] == 3
+    assert payload["runtime"]["startup_sweep"]["running_node_job_mismatches_remaining"] == 1
+    assert payload["runtime"]["startup_sweep"]["mismatch_counts_before"][0]["name"] == "running_job_missing_current_running_node"
+    assert payload["runtime"]["startup_sweep_history"][0]["stale_running_jobs_recovered"] == 2
+    assert payload["runtime"]["startup_sweep_history"][0]["running_node_job_mismatches_detected"] == 3
+    assert payload["runtime"]["startup_sweep_history"][0]["mismatch_counts_before"][0]["name"] == "running_job_missing_current_running_node"
     assert payload["quality"]["average_review_overall"] == 3.6
     assert payload["quality"]["average_maturity_score"] == 74.0
     assert payload["quality"]["trend_direction_counts"][0]["name"] == "improving"

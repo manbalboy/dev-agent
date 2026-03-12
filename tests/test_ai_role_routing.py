@@ -8,6 +8,7 @@ from pathlib import Path
 from app.ai_role_routing import AIRoleRouter, default_ai_role_routing_payload
 from app.command_runner import CommandResult
 from app.orchestrator import Orchestrator
+from app.provider_failure_counter_runtime import record_provider_failure
 
 
 def _write_roles(path: Path) -> None:
@@ -167,6 +168,68 @@ def test_orchestrator_prefers_provider_specific_template_variant(app_components,
 
     assert orchestrator._template_for_route("planner") == "planner__codex"
     assert orchestrator._template_for_route("coder") == "coder__codex"
+
+
+def test_orchestrator_uses_planner_fallback_when_workspace_provider_quarantined(app_components, tmp_path: Path) -> None:
+    settings, store, _ = app_components
+    roles_path = tmp_path / "roles.json"
+    routing_path = tmp_path / "ai_role_routing.json"
+    _write_roles(roles_path)
+    routing_path.write_text(json.dumps(default_ai_role_routing_payload(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    orchestrator = Orchestrator(
+        settings=settings,
+        store=store,
+        command_templates=_TemplateProbeRunner({"planner", "planner_fallback", "reviewer", "reviewer_fallback"}),
+        ai_role_router=AIRoleRouter(roles_path=roles_path, routing_path=routing_path),
+    )
+    repository_path = tmp_path / "repo"
+    for attempt in range(1, 5):
+        record_provider_failure(
+            repository_path,
+            provider_hint="gemini",
+            failure_class="provider_timeout",
+            stage_family="planning",
+            reason_code="provider_timeout",
+            reason="request timeout",
+            job_id="job-planner-fallback",
+            attempt=attempt,
+        )
+
+    assert orchestrator._template_for_route("planner") == "planner"
+    assert orchestrator._template_for_route_in_repository("planner", repository_path) == "planner_fallback"
+    assert orchestrator._template_for_route_in_repository("reviewer", repository_path) == "reviewer_fallback"
+
+
+def test_orchestrator_uses_planner_fallback_when_workspace_provider_circuit_is_open(app_components, tmp_path: Path) -> None:
+    settings, store, _ = app_components
+    roles_path = tmp_path / "roles.json"
+    routing_path = tmp_path / "ai_role_routing.json"
+    _write_roles(roles_path)
+    routing_path.write_text(json.dumps(default_ai_role_routing_payload(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    orchestrator = Orchestrator(
+        settings=settings,
+        store=store,
+        command_templates=_TemplateProbeRunner({"planner", "planner_fallback", "reviewer", "reviewer_fallback"}),
+        ai_role_router=AIRoleRouter(roles_path=roles_path, routing_path=routing_path),
+    )
+    repository_path = tmp_path / "repo"
+    for attempt in range(1, 7):
+        record_provider_failure(
+            repository_path,
+            provider_hint="gemini",
+            failure_class="provider_timeout",
+            stage_family="planning",
+            reason_code="provider_timeout",
+            reason="request timeout",
+            job_id="job-planner-circuit-open",
+            attempt=attempt,
+        )
+
+    assert orchestrator._template_for_route("planner") == "planner"
+    assert orchestrator._template_for_route_in_repository("planner", repository_path) == "planner_fallback"
+    assert orchestrator._template_for_route_in_repository("reviewer", repository_path) == "reviewer_fallback"
 
 
 def test_orchestrator_builds_route_runtime_context_with_skills_and_tools(app_components, tmp_path: Path) -> None:

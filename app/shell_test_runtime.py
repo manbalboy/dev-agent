@@ -6,7 +6,7 @@ from pathlib import Path
 import os
 import re
 import shutil
-from typing import Callable, Dict, List
+from typing import Any, Callable, Dict, List
 
 from app.models import JobRecord, JobStage
 
@@ -27,6 +27,7 @@ class ShellTestRuntime:
         set_stage,
         append_actor_log,
         is_long_track,
+        write_mobile_quality_artifact=None,
     ) -> None:
         self.settings = settings
         self.shell_executor = shell_executor
@@ -38,6 +39,7 @@ class ShellTestRuntime:
         self.set_stage = set_stage
         self.append_actor_log = append_actor_log
         self.is_long_track = is_long_track
+        self.write_mobile_quality_artifact = write_mobile_quality_artifact
 
     def execute_shell_command(
         self,
@@ -172,8 +174,39 @@ class ShellTestRuntime:
                 "ORCHESTRATOR",
                 f"{reason} Continuing workflow by policy.",
             )
+            self._write_mobile_quality_artifact(
+                job=job,
+                repository_path=repository_path,
+                stage=stage,
+                test_results=test_results,
+            )
             return False
+        self._write_mobile_quality_artifact(
+            job=job,
+            repository_path=repository_path,
+            stage=stage,
+            test_results=test_results,
+        )
         return True
+
+    def _write_mobile_quality_artifact(
+        self,
+        *,
+        job: JobRecord,
+        repository_path: Path,
+        stage: JobStage,
+        test_results: List[Dict[str, Any]],
+    ) -> None:
+        """Persist mobile verification artifact when a callback is configured."""
+
+        if not callable(self.write_mobile_quality_artifact):
+            return
+        self.write_mobile_quality_artifact(
+            job=job,
+            repository_path=repository_path,
+            stage=stage,
+            test_results=test_results,
+        )
 
     def resolve_test_command(self, stage: JobStage, secondary: bool) -> str:
         """Pick stage-aware tester command with conservative fallbacks."""

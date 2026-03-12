@@ -50,6 +50,19 @@ OPERATING_ENFORCEMENT_BRIEF = dedent(
 ).strip()
 
 
+MOBILE_APP_RULESET_BRIEF = dedent(
+    """
+    모바일 앱 개발 모드 규칙(app 분류 작업에 적용):
+    - app 분류 작업은 React Native 기준으로 다루고, greenfield면 Expo managed workflow를 우선 고려한다.
+    - 기존 저장소가 bare React Native / Expo prebuild 구조면 현재 구조를 우선 보존한다.
+    - 이번 라운드의 검증 타깃(Android emulator / iOS simulator / manual only)을 계획과 결과에 명시한다.
+    - baseline 테스트는 Jest + React Native Testing Library를 우선하고, Detox는 기존 저장소가 쓰거나 안정화 단계일 때만 요구한다.
+    - safe area, keyboard overlap, loading/empty/error, offline/network failure를 반드시 점검한다.
+    - Google Maps/Firebase/Stripe 같은 모바일 secret은 runtime input registry/env bridge로만 연결하고 하드코딩하지 않는다.
+    """
+).strip()
+
+
 PROMPT_CONTEXT_CHAR_LIMIT = 12000
 
 
@@ -669,6 +682,9 @@ def build_planner_prompt(
         Technology ruleset 섹션 필수 항목:
         - 플랫폼 분류: app / web / api 중 해당 항목 명시
         - app 이면 React Native 기반으로 계획
+        - app 이면 Expo managed / bare RN / 기존 구조 유지 중 무엇인지 명시
+        - app 이면 이번 라운드 emulator/simulator 검증 타깃을 명시
+        - app 이면 Jest + React Native Testing Library 기준 테스트 전략을 함께 작성
         - web 이면 React 또는 Nuxt 기반 라이브러리/프레임워크로 계획
         - api 가 필요하면 FastAPI 기반으로 계획
 
@@ -695,6 +711,8 @@ def build_planner_prompt(
         - improvement strategy가 `test_hardening`이면 신규 기능보다 회귀 테스트/테스트 전략 보강을 우선.
         - improvement strategy가 `ux_clarity_improvement`이면 error/empty/loading 상태와 안내 문구, 사용자 흐름 명확화부터 정리.
         - improvement strategy가 `stabilization`, `rollback_or_stabilize`, `narrow_scope_stabilization`이면 기능 확대 없이 저점 카테고리 안정화에 집중.
+        - app 분류 작업이면 아래 모바일 앱 개발 모드 규칙을 따른다.
+        {MOBILE_APP_RULESET_BRIEF}
         - 실행 가이드에 포트가 필요하면 3000번대 포트만 사용.
         - markdown 본문만 출력하고, 작업 과정 설명은 금지.
         - 도구/터미널/파일 조작 과정 언급 금지.
@@ -855,6 +873,8 @@ def build_coder_prompt(
         - PLAN.md와 DESIGN_SYSTEM.md가 충돌하면 DESIGN_SYSTEM.md를 우선 적용.
         - PLAN.md의 Technology ruleset을 반드시 준수.
         - app 분류 작업은 React Native 기반으로 구현.
+        - greenfield app이면 Expo managed workflow를 우선 고려하고, 기존 bare RN/Expo prebuild 저장소는 현재 구조를 보존.
+        - app 분류 작업이면 이번 라운드 emulator/simulator 검증 타깃을 PLAN/결과에 맞춰 유지.
         - web 분류 작업은 React 또는 Nuxt 기반으로 구현.
         - api 구현이 필요하면 FastAPI를 사용.
         - DESIGN_SYSTEM.md에 명시된 WOW Point 1개를 반드시 구현.
@@ -871,6 +891,8 @@ def build_coder_prompt(
         - UI 변경 시 모바일(360~430px) 우선으로 레이아웃이 깨지지 않게 유지.
         - 화면 복잡도가 이미 높으면 새 UI를 덧대기보다 탭/메뉴/접힘 구조로 분리.
         - 스타일은 모던하고 심플하게 유지하되, 기능이 늘수록 정보 밀도를 낮추는 방향으로 정리.
+        - app 분류 작업이면 아래 모바일 앱 개발 모드 규칙을 따른다.
+        {MOBILE_APP_RULESET_BRIEF}
 
         개발 체크리스트:
         1. 요구사항 충족: SPEC/PLAN/MVP_SCOPE 범위를 벗어나지 않았는가?
@@ -1222,6 +1244,8 @@ def build_reviewer_prompt(
         - 실행/재현 예시에서 포트가 나오면 3100번대만 사용.
         - 같은 문제의 반복 여부와 품질 개선 정체 여부를 반드시 지적한다.
         - "코드가 돌아간다"는 이유만으로 합격 처리하지 말고 제품 품질 기준으로 판단한다.
+        - app 분류 작업이면 아래 모바일 앱 개발 모드 규칙을 따른다.
+        {MOBILE_APP_RULESET_BRIEF}
         - markdown 본문만 출력하고 작업 과정/내부 추론/메타 코멘트 금지.
         - 출력 내 후속 질문 금지.
         """

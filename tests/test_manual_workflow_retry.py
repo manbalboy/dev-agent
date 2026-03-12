@@ -12,6 +12,7 @@ from app.command_runner import CommandResult
 from app.models import JobRecord, JobStage, JobStatus, NodeRunRecord, utc_now_iso
 from app.orchestrator import Orchestrator
 from app.workflow_design import default_workflow_template
+from app.workflow_resume import build_workflow_artifact_paths
 
 
 class FakeTemplateRunner:
@@ -146,6 +147,116 @@ def test_manual_retry_api_rejects_side_effect_node(app_components):
 
     assert response.status_code == 400
     assert "부작용이 있는 노드" in response.json()["detail"]
+
+
+def test_dead_letter_retry_api_requeues_job_with_trace(app_components):
+    settings, store, app = app_components
+    client = TestClient(app)
+
+    job = _make_job("job-dead-letter-retry")
+    job.recovery_status = "dead_letter"
+    job.recovery_reason = "dead-letter after retry budget exhausted"
+    store.create_job(job)
+
+    response = client.post(
+        f"/api/jobs/{job.job_id}/dead-letter/retry",
+        json={"note": "운영자가 근거를 확인하고 다시 실행"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["queued"] is True
+    assert payload["recovery_status"] == "dead_letter_requeued"
+
+    stored = store.get_job(job.job_id)
+    assert stored is not None
+    assert stored.status == JobStatus.QUEUED.value
+    assert stored.stage == JobStage.QUEUED.value
+    assert stored.attempt == 0
+    assert stored.error_message is None
+    assert stored.recovery_status == "dead_letter_requeued"
+    assert "운영자가 근거를 확인하고 다시 실행" in str(stored.recovery_reason or "")
+    assert store.queue_size() == 1
+
+    workspace_path = settings.repository_workspace_path(job.repository, job.app_code)
+    trace_path = build_workflow_artifact_paths(workspace_path)["runtime_recovery_trace"]
+    trace_payload = json.loads(trace_path.read_text(encoding="utf-8"))
+    latest = trace_payload["events"][-1]
+    assert latest["source"] == "dashboard_dead_letter_retry"
+    assert latest["reason_code"] == "dead_letter_retry"
+    assert latest["decision"] == "retry_from_dead_letter"
+    assert latest["recovery_status"] == "dead_letter_requeued"
+    assert latest["details"]["previous_recovery_status"] == "dead_letter"
+    assert latest["details"]["operator_note"] == "운영자가 근거를 확인하고 다시 실행"
+    assert latest["details"]["retry_from_scratch"] is True
+    assert latest["requeue_reason_summary"]["active"] is True
+    assert latest["requeue_reason_summary"]["source"] == "dashboard_dead_letter_retry"
+
+
+def test_manual_retry_api_appends_requeue_reason_trace(app_components):
+    settings, store, app = app_components
+    client = TestClient(app)
+
+    workflow = default_workflow_template()
+    job = _make_job("job-manual-requeue-trace")
+    job.workflow_id = workflow["workflow_id"]
+    job.recovery_status = "needs_human"
+    job.recovery_reason = "운영자가 실패 노드를 직접 골라 다시 시작"
+    store.create_job(job)
+    store.upsert_node_run(
+        NodeRunRecord(
+            node_run_id="api-r4",
+            job_id=job.job_id,
+            workflow_id=workflow["workflow_id"],
+            node_id="n8",
+            node_type="designer_task",
+            node_title="디자인 시스템",
+            status="failed",
+            attempt=3,
+            started_at="2026-03-08T00:00:05+00:00",
+            finished_at="2026-03-08T00:00:06+00:00",
+            error_message="design failed",
+        )
+    )
+
+    response = client.post(
+        f"/api/jobs/{job.job_id}/workflow/manual-retry",
+        json={
+            "mode": "resume_from_node",
+            "node_id": "n7",
+            "note": "플랜 노드부터 다시 확인",
+        },
+    )
+
+    assert response.status_code == 200
+    workspace_path = settings.repository_workspace_path(job.repository, job.app_code)
+    trace_path = build_workflow_artifact_paths(workspace_path)["runtime_recovery_trace"]
+    trace_payload = json.loads(trace_path.read_text(encoding="utf-8"))
+    latest = trace_payload["events"][-1]
+    assert latest["source"] == "dashboard_manual_retry"
+    assert latest["decision"] == "manual_resume_requeue"
+    assert latest["recovery_status"] == "manual_resume_queued"
+    assert latest["details"]["target_node_id"] == "n7"
+    assert latest["details"]["operator_note"] == "플랜 노드부터 다시 확인"
+    assert latest["requeue_reason_summary"]["active"] is True
+    assert latest["requeue_reason_summary"]["target_node_id"] == "n7"
+
+
+def test_dead_letter_retry_api_rejects_non_dead_letter_job(app_components):
+    _, store, app = app_components
+    client = TestClient(app)
+
+    job = _make_job("job-non-dead-letter-retry")
+    job.recovery_status = "needs_human"
+    store.create_job(job)
+
+    response = client.post(
+        f"/api/jobs/{job.job_id}/dead-letter/retry",
+        json={},
+    )
+
+    assert response.status_code == 400
+    assert "dead-letter 상태의 실패 작업만" in response.json()["detail"]
 
 
 def test_manual_retry_override_is_consumed_by_orchestrator(app_components):

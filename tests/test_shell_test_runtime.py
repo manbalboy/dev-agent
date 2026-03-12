@@ -41,6 +41,7 @@ def _build_runtime(
     shell_executor_accepts_env: bool = False,
     is_long_track=None,
     actor_log_messages=None,
+    write_mobile_quality_artifact=None,
 ):
     actor_log_messages = actor_log_messages if actor_log_messages is not None else []
     is_long_track = is_long_track or (lambda job: False)
@@ -64,6 +65,7 @@ def _build_runtime(
         ),
         append_actor_log=append_actor_log,
         is_long_track=is_long_track,
+        write_mobile_quality_artifact=write_mobile_quality_artifact,
     )
 
 
@@ -217,3 +219,43 @@ def test_shell_test_runtime_passes_extra_env_when_supported(app_components, tmp_
     )
 
     assert captured["extra_env"] == {"GOOGLE_MAPS_API_KEY": "secret-value"}
+
+
+def test_shell_test_runtime_calls_mobile_quality_callback_after_tests(app_components, tmp_path: Path) -> None:
+    settings, _, _ = app_components
+    callback_calls: list[dict[str, object]] = []
+
+    def fake_shell(**kwargs):
+        return CommandResult(
+            command=kwargs["command"],
+            exit_code=0,
+            stdout="1 passed\n",
+            stderr="",
+            duration_seconds=0.02,
+        )
+
+    def fake_mobile_artifact(**kwargs) -> None:
+        callback_calls.append(kwargs)
+
+    runtime = _build_runtime(
+        settings,
+        shell_executor=fake_shell,
+        write_mobile_quality_artifact=fake_mobile_artifact,
+    )
+    job = _make_job("job-mobile-quality")
+
+    passed = runtime.stage_run_tests(
+        job=job,
+        repository_path=tmp_path,
+        stage=JobStage.TEST_AFTER_IMPLEMENT,
+        log_path=tmp_path / "job.log",
+    )
+
+    assert passed is True
+    assert len(callback_calls) == 1
+    callback = callback_calls[0]
+    assert callback["job"] == job
+    assert callback["repository_path"] == tmp_path
+    assert callback["stage"] == JobStage.TEST_AFTER_IMPLEMENT
+    assert isinstance(callback["test_results"], list)
+    assert callback["test_results"][0]["name"] == settings.tester_primary_name

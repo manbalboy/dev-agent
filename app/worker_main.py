@@ -11,7 +11,13 @@ from app.command_runner import CommandTemplateRunner
 from app.config import AppSettings
 from app.models import JobRecord, JobStage, JobStatus
 from app.orchestrator import Orchestrator
+from app.retry_policy import resolve_retry_policy
+from app.runtime_recovery_trace import append_runtime_recovery_trace_for_job
 from app.store import JobStore, create_job_store
+from app.worker_startup_sweep_runtime import (
+    append_worker_startup_sweep_trace,
+    audit_running_node_job_mismatches,
+)
 
 
 def _recover_orphan_queued_jobs(store: JobStore) -> int:
@@ -94,8 +100,18 @@ def _recover_stale_running_jobs(store: JobStore, settings: AppSettings) -> int:
             "running heartbeat stale detected "
             f"after {int(stale_seconds)}s at stage={job.stage} attempt={job.attempt}"
         )
+        retry_policy = resolve_retry_policy(
+            failure_class="stale_heartbeat",
+            provider_hint="runtime",
+            stage_family="runtime_recovery",
+            default_retry_budget=settings.worker_max_auto_recoveries,
+        )
+        effective_retry_budget = min(
+            settings.worker_max_auto_recoveries,
+            max(1, int(retry_policy.retry_budget or settings.worker_max_auto_recoveries)),
+        )
         _interrupt_running_node_runs(store, job, reason=reason, finished_at=now.isoformat())
-        if next_recovery_count > settings.worker_max_auto_recoveries:
+        if next_recovery_count > effective_retry_budget:
             store.update_job(
                 job.job_id,
                 status=JobStatus.FAILED.value,
@@ -107,6 +123,23 @@ def _recover_stale_running_jobs(store: JobStore, settings: AppSettings) -> int:
                 recovery_count=next_recovery_count,
                 last_recovered_at=now.isoformat(),
                 finished_at=now.isoformat(),
+            )
+            append_runtime_recovery_trace_for_job(
+                settings,
+                job,
+                source="worker_stale_recovery",
+                reason_code="stale_heartbeat",
+                reason=reason,
+                decision="needs_human",
+                recovery_status="needs_human",
+                recovery_count=next_recovery_count,
+                details={
+                    "stale_seconds": int(stale_seconds),
+                    "worker_stale_running_seconds": settings.worker_stale_running_seconds,
+                    "worker_max_auto_recoveries": settings.worker_max_auto_recoveries,
+                    "effective_retry_budget": effective_retry_budget,
+                    "retry_policy": retry_policy.to_dict(),
+                },
             )
             continue
 
@@ -123,9 +156,64 @@ def _recover_stale_running_jobs(store: JobStore, settings: AppSettings) -> int:
             recovery_count=next_recovery_count,
             last_recovered_at=now.isoformat(),
         )
+        append_runtime_recovery_trace_for_job(
+            settings,
+            job,
+            source="worker_stale_recovery",
+            reason_code="stale_heartbeat",
+            reason=reason,
+            decision="requeue",
+            recovery_status="auto_recovered",
+            recovery_count=next_recovery_count,
+            details={
+                "stale_seconds": int(stale_seconds),
+                "worker_stale_running_seconds": settings.worker_stale_running_seconds,
+                "worker_max_auto_recoveries": settings.worker_max_auto_recoveries,
+                "effective_retry_budget": effective_retry_budget,
+                "retry_policy": retry_policy.to_dict(),
+            },
+        )
         store.enqueue_job(job.job_id)
         recovered += 1
     return recovered
+
+
+def _run_startup_sweep(store: JobStore, settings: AppSettings) -> dict[str, int]:
+    """Run one startup recovery sweep and record a global trace event."""
+
+    queue_size_before = store.queue_size()
+    mismatch_audit_before = audit_running_node_job_mismatches(store)
+    cleaned_nodes = _cleanup_orphan_running_node_runs(store)
+    recovered_running = _recover_stale_running_jobs(store, settings)
+    recovered_queued = _recover_orphan_queued_jobs(store)
+    queue_size_after = store.queue_size()
+    mismatch_audit_after = audit_running_node_job_mismatches(store)
+    append_worker_startup_sweep_trace(
+        settings,
+        orphan_running_node_runs_interrupted=cleaned_nodes,
+        stale_running_jobs_recovered=recovered_running,
+        orphan_queued_jobs_recovered=recovered_queued,
+        running_node_job_mismatches_detected=int(mismatch_audit_before.get("total_mismatches", 0) or 0),
+        running_node_job_mismatches_remaining=int(mismatch_audit_after.get("total_mismatches", 0) or 0),
+        queue_size_before=queue_size_before,
+        queue_size_after=queue_size_after,
+        details={
+            "worker_stale_running_seconds": settings.worker_stale_running_seconds,
+            "worker_max_auto_recoveries": settings.worker_max_auto_recoveries,
+            "worker_poll_seconds": settings.worker_poll_seconds,
+            "mismatch_audit_before": mismatch_audit_before,
+            "mismatch_audit_after": mismatch_audit_after,
+        },
+    )
+    return {
+        "orphan_running_node_runs_interrupted": cleaned_nodes,
+        "stale_running_jobs_recovered": recovered_running,
+        "orphan_queued_jobs_recovered": recovered_queued,
+        "running_node_job_mismatches_detected": int(mismatch_audit_before.get("total_mismatches", 0) or 0),
+        "running_node_job_mismatches_remaining": int(mismatch_audit_after.get("total_mismatches", 0) or 0),
+        "queue_size_before": queue_size_before,
+        "queue_size_after": queue_size_after,
+    }
 
 
 
@@ -140,9 +228,23 @@ def run_worker_forever() -> None:
     store = create_job_store(settings)
     template_runner = CommandTemplateRunner(settings.command_config)
     orchestrator = Orchestrator(settings, store, template_runner)
-    cleaned_nodes = _cleanup_orphan_running_node_runs(store)
+    startup_summary = _run_startup_sweep(store, settings)
+    cleaned_nodes = startup_summary["orphan_running_node_runs_interrupted"]
     if cleaned_nodes > 0:
         print(f"[worker] interrupted {cleaned_nodes} orphan running node(s)")
+    recovered_running = startup_summary["stale_running_jobs_recovered"]
+    if recovered_running > 0:
+        print(f"[worker] auto-recovered {recovered_running} stale running job(s)")
+    recovered_queued = startup_summary["orphan_queued_jobs_recovered"]
+    if recovered_queued > 0:
+        print(f"[worker] recovered {recovered_queued} orphan queued job(s)")
+    mismatch_detected = startup_summary["running_node_job_mismatches_detected"]
+    mismatch_remaining = startup_summary["running_node_job_mismatches_remaining"]
+    if mismatch_detected > 0:
+        print(
+            f"[worker] detected {mismatch_detected} running node/job mismatch(es) during startup sweep"
+            f" (remaining {mismatch_remaining})"
+        )
 
     print("[worker] started")
     while True:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -57,6 +58,7 @@ def _build_runtime(
     tmp_path: Path,
     *,
     stage_results: list[bool] | None = None,
+    failure_reason_text: str = "# TEST FAILURE REASON\n\n- Reason: test failed\n",
     recovery_enabled: bool = False,
     helper_stdout: str = "",
     helper_available: bool = False,
@@ -85,7 +87,7 @@ def _build_runtime(
         call_state["index"] += 1
         if not passed:
             (repository_path / f"TEST_FAILURE_REASON_{stage.value.upper()}.md").write_text(
-                "# TEST FAILURE REASON\n\n- Reason: test failed\n",
+                failure_reason_text,
                 encoding="utf-8",
             )
         return passed
@@ -215,6 +217,178 @@ def test_recovery_runtime_soft_gate_uses_recovery_flow_when_enabled(tmp_path: Pa
     assert built["commit_calls"] == [JobStage.FIX_WITH_CODEX.value]
     assert any("[SOFT_GATE:after_fix] test failed but continuing by policy." in message for _, message in built["logs"])
     assert any("[RECOVERY_MODE:after_fix] recovery succeeded." in message for _, message in built["logs"])
+    trace_payload = json.loads((built["repository_path"] / "_docs" / "RUNTIME_RECOVERY_TRACE.json").read_text(encoding="utf-8"))
+    assert trace_payload["events"][0]["reason_code"] == "recovery_succeeded"
+    assert trace_payload["events"][0]["decision"] == "resume_workflow"
+    assert trace_payload["events"][0]["failure_class"] == "test_failure"
+    assert trace_payload["events"][0]["provider_hint"] == "test_runner"
+    assert trace_payload["events"][0]["stage_family"] == "test"
+
+
+def test_recovery_runtime_hard_gate_timeout_writes_runtime_recovery_trace(tmp_path: Path, monkeypatch) -> None:
+    built = _build_runtime(tmp_path, stage_results=[False])
+    monkeypatch.setenv("AGENTHUB_HARD_GATE_MAX_ATTEMPTS", "3")
+    monkeypatch.setenv("AGENTHUB_HARD_GATE_TIMEBOX_SECONDS", "120")
+
+    original_monotonic = __import__("time").monotonic
+    ticks = iter([0.0, 121.0])
+    monkeypatch.setattr("app.recovery_runtime.time.monotonic", lambda: next(ticks))
+
+    built["runtime"].run_test_hard_gate(
+        job=built["job"],
+        repository_path=built["repository_path"],
+        paths={},
+        log_path=built["log_path"],
+        stage=JobStage.TEST_AFTER_IMPLEMENT,
+        gate_label="after_implement",
+    )
+
+    trace_payload = json.loads((built["repository_path"] / "_docs" / "RUNTIME_RECOVERY_TRACE.json").read_text(encoding="utf-8"))
+    assert trace_payload["events"][0]["reason_code"] == "hard_gate_timeout"
+    assert trace_payload["events"][0]["decision"] == "continue_by_policy"
+    assert trace_payload["events"][0]["failure_class"] == "test_failure"
+    assert trace_payload["events"][0]["provider_hint"] == "test_runner"
+    assert trace_payload["events"][0]["stage_family"] == "test"
+    assert trace_payload["events"][0]["details"]["timebox_seconds"] == 120
+    assert trace_payload["events"][0]["details"]["retry_policy"]["recovery_path"] == "fix_loop"
+
+
+def test_recovery_runtime_hard_gate_fast_fails_provider_quota(tmp_path: Path, monkeypatch) -> None:
+    built = _build_runtime(
+        tmp_path,
+        stage_results=[False],
+        failure_reason_text="# TEST FAILURE REASON\n\n- Reason: 402 quota exceeded while calling provider\n",
+    )
+    monkeypatch.setenv("AGENTHUB_HARD_GATE_MAX_ATTEMPTS", "3")
+    monkeypatch.setenv("AGENTHUB_HARD_GATE_TIMEBOX_SECONDS", "1200")
+
+    with pytest.raises(CommandExecutionError, match="retry policy provider_quota/needs_human_candidate"):
+        built["runtime"].run_test_hard_gate(
+            job=built["job"],
+            repository_path=built["repository_path"],
+            paths={},
+            log_path=built["log_path"],
+            stage=JobStage.IMPLEMENT_WITH_CODEX,
+            gate_label="after_implement",
+        )
+
+    assert built["fix_calls"] == []
+    assert any("class=provider_quota" in message for _, message in built["logs"])
+    trace_payload = json.loads((built["repository_path"] / "_docs" / "RUNTIME_RECOVERY_TRACE.json").read_text(encoding="utf-8"))
+    assert trace_payload["events"][0]["decision"] == "needs_human"
+    assert trace_payload["events"][0]["failure_class"] == "provider_quota"
+    assert trace_payload["events"][0]["needs_human_summary"]["active"] is True
+    provider_payload = json.loads((built["repository_path"] / "_docs" / "PROVIDER_FAILURE_COUNTERS.json").read_text(encoding="utf-8"))
+    assert provider_payload["providers"]["codex"]["total_failures"] == 1
+
+
+def test_recovery_runtime_hard_gate_enters_provider_cooldown_for_repeated_timeout(tmp_path: Path, monkeypatch) -> None:
+    built = _build_runtime(
+        tmp_path,
+        stage_results=[False, False],
+        failure_reason_text="# TEST FAILURE REASON\n\n- Reason: request timeout while waiting for gemini provider\n",
+    )
+    monkeypatch.setenv("AGENTHUB_HARD_GATE_MAX_ATTEMPTS", "3")
+    monkeypatch.setenv("AGENTHUB_HARD_GATE_TIMEBOX_SECONDS", "1200")
+
+    with pytest.raises(CommandExecutionError, match="cooldown active"):
+        built["runtime"].run_test_hard_gate(
+            job=built["job"],
+            repository_path=built["repository_path"],
+            paths={},
+            log_path=built["log_path"],
+            stage=JobStage.PLAN_WITH_GEMINI,
+            gate_label="plan_gate",
+        )
+
+    assert built["fix_calls"] == [built["job"].job_id]
+    assert any("provider cooldown active" in message for _, message in built["logs"])
+    trace_payload = json.loads((built["repository_path"] / "_docs" / "RUNTIME_RECOVERY_TRACE.json").read_text(encoding="utf-8"))
+    assert trace_payload["events"][0]["decision"] == "cooldown_wait"
+    assert trace_payload["events"][0]["recovery_status"] == "cooldown_wait"
+    assert trace_payload["events"][0]["details"]["cooldown"]["active"] is True
+    provider_payload = json.loads((built["repository_path"] / "_docs" / "PROVIDER_FAILURE_COUNTERS.json").read_text(encoding="utf-8"))
+    assert provider_payload["providers"]["gemini"]["total_failures"] == 2
+
+
+def test_recovery_runtime_hard_gate_quarantines_provider_after_burst(tmp_path: Path, monkeypatch) -> None:
+    built = _build_runtime(
+        tmp_path,
+        stage_results=[False],
+        failure_reason_text="# TEST FAILURE REASON\n\n- Reason: request timeout while waiting for gemini provider\n",
+    )
+    provider_path = built["repository_path"]
+    from app.provider_failure_counter_runtime import record_provider_failure
+
+    for attempt in range(1, 4):
+        record_provider_failure(
+            provider_path,
+            provider_hint="gemini",
+            failure_class="provider_timeout",
+            stage_family="planning",
+            reason_code="provider_timeout",
+            reason="request timeout while waiting for gemini provider",
+            job_id=f"older-gemini-{attempt}",
+            attempt=attempt,
+        )
+    monkeypatch.setenv("AGENTHUB_HARD_GATE_MAX_ATTEMPTS", "3")
+    monkeypatch.setenv("AGENTHUB_HARD_GATE_TIMEBOX_SECONDS", "1200")
+
+    with pytest.raises(CommandExecutionError, match="provider quarantined"):
+        built["runtime"].run_test_hard_gate(
+            job=built["job"],
+            repository_path=provider_path,
+            paths={},
+            log_path=built["log_path"],
+            stage=JobStage.PLAN_WITH_GEMINI,
+            gate_label="plan_gate",
+        )
+
+    assert any("provider quarantine active" in message for _, message in built["logs"])
+    trace_payload = json.loads((provider_path / "_docs" / "RUNTIME_RECOVERY_TRACE.json").read_text(encoding="utf-8"))
+    assert trace_payload["events"][0]["decision"] == "provider_quarantined"
+    assert trace_payload["events"][0]["recovery_status"] == "provider_quarantined"
+    assert trace_payload["events"][0]["needs_human_summary"]["recovery_path"] == "provider_quarantine"
+
+
+def test_recovery_runtime_hard_gate_opens_provider_circuit_after_extended_burst(tmp_path: Path, monkeypatch) -> None:
+    built = _build_runtime(
+        tmp_path,
+        stage_results=[False],
+        failure_reason_text="# TEST FAILURE REASON\n\n- Reason: request timeout while waiting for gemini provider\n",
+    )
+    provider_path = built["repository_path"]
+    from app.provider_failure_counter_runtime import record_provider_failure
+
+    for attempt in range(1, 6):
+        record_provider_failure(
+            provider_path,
+            provider_hint="gemini",
+            failure_class="provider_timeout",
+            stage_family="planning",
+            reason_code="provider_timeout",
+            reason="request timeout while waiting for gemini provider",
+            job_id=f"older-gemini-circuit-{attempt}",
+            attempt=attempt,
+        )
+    monkeypatch.setenv("AGENTHUB_HARD_GATE_MAX_ATTEMPTS", "3")
+    monkeypatch.setenv("AGENTHUB_HARD_GATE_TIMEBOX_SECONDS", "1200")
+
+    with pytest.raises(CommandExecutionError, match="provider circuit open"):
+        built["runtime"].run_test_hard_gate(
+            job=built["job"],
+            repository_path=provider_path,
+            paths={},
+            log_path=built["log_path"],
+            stage=JobStage.PLAN_WITH_GEMINI,
+            gate_label="plan_gate",
+        )
+
+    assert any("provider circuit-breaker active" in message for _, message in built["logs"])
+    trace_payload = json.loads((provider_path / "_docs" / "RUNTIME_RECOVERY_TRACE.json").read_text(encoding="utf-8"))
+    assert trace_payload["events"][0]["decision"] == "provider_circuit_open"
+    assert trace_payload["events"][0]["recovery_status"] == "provider_circuit_open"
+    assert trace_payload["events"][0]["needs_human_summary"]["recovery_path"] == "provider_circuit_breaker"
 
 
 def test_recovery_runtime_fix_retry_loop_stops_after_success(tmp_path: Path) -> None:

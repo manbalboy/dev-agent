@@ -13,6 +13,7 @@ DEFAULT_BRANCH="main"
 TEST_COMMAND="echo skip tests"
 ENABLE_ESCALATION="false"
 API_PORT="8321"
+DANGER_MODE="false"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -44,6 +45,10 @@ while [[ $# -gt 0 ]]; do
       TARGET_ROOT="${2:-}"
       shift 2
       ;;
+    --danger-mode)
+      DANGER_MODE="true"
+      shift 1
+      ;;
     -h|--help)
       echo "Usage: bash scripts/setup_local_config.sh [options]"
       echo ""
@@ -55,6 +60,7 @@ while [[ $# -gt 0 ]]; do
       echo "  --api-port <port_number>         default: 8321"
       echo "  --enable-escalation <true|false> default: false"
       echo "  --root <path>                    default: /home/docker/agentHub"
+      echo "  --danger-mode                    opt-in: codex 우회 플래그를 생성 명령에 추가"
       exit 0
       ;;
     *)
@@ -103,8 +109,13 @@ if [[ -z "$ESCALATION_BIN" ]]; then
   ESCALATION_BIN="claude"
 fi
 
+CODER_FLAGS=(exec - -C '{work_dir}' --color never)
+if [[ "$DANGER_MODE" == "true" ]]; then
+  CODER_FLAGS=(exec - --dangerously-bypass-approvals-and-sandbox -C '{work_dir}' --color never)
+fi
+
 PLANNER_COMMAND="cat {prompt_file} | $PLANNER_BIN -p '' --approval-mode yolo --model gemini-3.1-pro-preview --output-format text > {plan_path}"
-CODER_COMMAND="cat {prompt_file} | $CODER_BIN exec - --dangerously-bypass-approvals-and-sandbox -C {work_dir} --color never"
+CODER_COMMAND="cat {prompt_file} | $CODER_BIN ${CODER_FLAGS[*]}"
 REVIEWER_COMMAND="cat {prompt_file} | $PLANNER_BIN -p '' --approval-mode yolo --model gemini-3.1-pro-preview --output-format text > {review_path}"
 
 if [[ -n "$NODE_BIN" && "$PLANNER_BIN" != "gemini" ]]; then
@@ -113,7 +124,7 @@ if [[ -n "$NODE_BIN" && "$PLANNER_BIN" != "gemini" ]]; then
 fi
 
 if [[ -n "$NODE_BIN" && "$CODER_BIN" != "codex" ]]; then
-  CODER_COMMAND="cat {prompt_file} | $NODE_BIN $CODER_BIN exec - --dangerously-bypass-approvals-and-sandbox -C {work_dir} --color never"
+  CODER_COMMAND="cat {prompt_file} | $NODE_BIN $CODER_BIN ${CODER_FLAGS[*]}"
 fi
 
 mkdir -p "$TARGET_ROOT/config" "$TARGET_ROOT/data/logs" "$TARGET_ROOT/workspaces"
@@ -170,4 +181,8 @@ echo "  AGENTHUB_ALLOWED_REPOSITORY=$REPO"
 echo "  AGENTHUB_DEFAULT_BRANCH=$DEFAULT_BRANCH"
 echo "  AGENTHUB_TEST_COMMAND=$TEST_COMMAND"
 echo "  AGENTHUB_API_PORT=$API_PORT"
+echo "  DANGER_MODE=$DANGER_MODE"
+if [[ "$DANGER_MODE" != "true" ]]; then
+  echo "[NOTE] 기본 생성값은 안전 모드입니다. 자동 우회가 필요할 때만 --danger-mode 를 명시적으로 사용하세요."
+fi
 echo "[NEXT] If needed, review CLI command options in ai_commands.json for your installed versions."

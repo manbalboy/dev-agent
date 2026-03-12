@@ -88,12 +88,12 @@
 | Area | Status | Already Exists | Missing |
 | --- | --- | --- | --- |
 | Heartbeat loop | `PARTIAL` | shell command heartbeat callback, template runner heartbeat injection, `heartbeat_at` persisted | stage-level heartbeat policy normalization, long-run budget visibility |
-| Stale running recovery | `PARTIAL` | stale `running` auto-requeue, `recovery_count`, `needs_human`, orphan running node interruption | richer stale reason classification, recovery trace artifact, policy split by failure type |
-| Queue hygiene | `PARTIAL` | orphan queued recovery, orphan running node cleanup | dead-letter queue, retry quarantine, provider outage cooldown |
-| Recovery runtime | `PARTIAL` | failure assistant, recoverable heuristic, fix retry loop, test gate split | explicit failure taxonomy, policy engine, operator approval boundary |
-| Manual intervention path | `PARTIAL` | manual resume metadata, workflow resume state | backlog-like approval flow for failed jobs, dead-letter actions, structured operator notes |
-| Provider outage handling | `NOT STARTED` | implicit command failure handling only | per-provider circuit breaker, outage classification, cooldown window |
-| Runtime supervision trace | `NOT STARTED` | logs and job fields exist | dedicated recovery trace artifact, recovery history summary, restart-safe audit surface |
+| Stale running recovery | `PARTIAL` | stale `running` auto-requeue, `recovery_count`, `needs_human`, orphan running node interruption, structured `needs_human` summary, dead-letter retry flow, startup sweep trace baseline, restart-safe requeue reason baseline, restart-safe mismatch audit trail baseline, startup sweep audit history surface | restart-safe action drilldown |
+| Queue hygiene | `PARTIAL` | orphan queued recovery, orphan running node cleanup, dead-letter state baseline, dead-letter retry action, operator note trail, dead-letter list/action | retry quarantine, dead-letter action drilldown |
+| Recovery runtime | `PARTIAL` | failure assistant, recoverable heuristic, fix retry loop, test gate split, normalized failure classes baseline, class-aware retry policy, structured `needs_human`, provider cooldown baseline, dead-letter baseline, dead-letter retry trace, operator note trail | operator approval boundary, richer route fallback |
+| Manual intervention path | `PARTIAL` | manual resume metadata, workflow resume state, structured `needs_human` handoff summary, dead-letter summary UI, dead-letter retry action, operator note trail | backlog-like approval flow for failed jobs |
+| Provider outage handling | `PARTIAL` | workspace 단위 provider failure counter artifact, standard retry/hard gate counter 누적, admin metrics read surface, repeated `provider_timeout/tool_failure -> cooldown_wait` baseline, repeated burst -> `provider_quarantined` baseline, planner/reviewer route fallback baseline, `provider_circuit_open` baseline, provider outage history surface | richer route fallback, operator-facing action drilldown |
+| Runtime supervision trace | `PARTIAL` | `_docs/RUNTIME_RECOVERY_TRACE.json`, stale auto-recovery trace, recovery runtime trace, job detail API read surface, `data/worker_startup_sweep_trace.json` baseline, recovery history summary UI, restart-safe audit surface | richer reason taxonomy, action drilldown |
 
 ## 7. What Already Exists
 
@@ -123,6 +123,45 @@
 - secret 값은 dashboard/API에서 마스킹되고, prompt-safe artifact와 shell/template env bridge로만 연결된다.
 - 따라서 Phase 5에서는 `입력이 아직 없어서 막힌 job`을 failure classification / human handoff reason으로 다루는 단계가 자연스럽다.
 
+### 7.5 Runtime recovery trace now exists
+- worker stale recovery는 `_docs/RUNTIME_RECOVERY_TRACE.json`에 `stale_heartbeat` reason code와 `requeue / needs_human` decision을 남긴다.
+- recovery runtime도 hard gate timeout / recovery not recoverable / recovery succeeded / recovery failed 판단을 같은 artifact에 남긴다.
+- job detail API는 이 artifact를 `runtime_recovery_trace`로 읽어준다.
+- 즉, Phase 5는 이제 `trace 없음` 상태가 아니라 `trace를 바탕으로 분류와 정책을 얹는 단계`로 넘어갔다.
+
+### 7.6 Failure classification baseline now exists
+- `app/failure_classification.py` 가 runtime failure evidence를 normalized class로 분류한다.
+- 현재 baseline class:
+  - `provider_quota`
+  - `provider_timeout`
+  - `provider_auth`
+  - `stale_heartbeat`
+  - `git_conflict`
+  - `test_failure`
+  - `tool_failure`
+  - `workflow_contract`
+  - `unknown_runtime`
+- runtime recovery trace event는 이제 `failure_class`를 함께 남긴다.
+- jobs API와 job detail API도 failure class summary를 읽을 수 있다.
+- 즉, Phase 5는 이제 `분류 코드 없음` 상태가 아니라 `분류 baseline 위에 mapping/policy를 얹는 단계`로 넘어갔다.
+
+### 7.7 Stage/provider mapping now exists
+- failure summary는 이제 `failure_class`만이 아니라 `provider_hint`와 `stage_family`도 같이 계산한다.
+- runtime recovery trace event는 `provider_hint / stage_family`를 함께 남긴다.
+- job detail API는 `runtime_recovery_trace.latest_provider_hint`, `latest_stage_family`, `failure_classification.provider_hint`, `failure_classification.stage_family`를 반환한다.
+- jobs API도 `failure_provider_hint`, `failure_stage_family`를 반환하고 검색 haystack에 포함한다.
+- 즉, Phase 5는 이제 `분류만 있는 상태`가 아니라 `분류 + provider/stage mapping` 위에서 UI/policy를 얹는 단계로 넘어갔다.
+
+### 7.8 Dashboard visibility now exists
+- dashboard jobs list는 failure classification hint를 보여준다.
+- job detail은 `Failure Classification` 보드와 meta field를 통해 아래를 바로 노출한다.
+  - `failure_class`
+  - `provider_hint`
+  - `stage_family`
+  - `reason_code`
+  - latest evidence reason
+- 즉, Phase 5는 이제 `API에만 있는 상태`가 아니라 `운영자가 바로 읽을 수 있는 UI surface`까지 확보했다.
+
 ## 8. Why It Is Still Not Enough
 - 지금은 “자동 복구가 된다” 수준이지 “어떤 실패를 어떻게 다르게 다루는가”는 아직 약하다.
 - 예를 들어 아래가 아직 분리되지 않았다.
@@ -133,6 +172,10 @@
   - long-running stale heartbeat
   - invalid workflow / invalid config
 - 현재는 이들이 대부분 `실패 -> recovery_count 증가 -> 재시도 또는 needs_human`으로 묶여 있다.
+- baseline은 올라왔다.
+  - standard retry / hard gate / worker stale recovery는 class-aware retry policy를 사용한다.
+  - `needs_human` 전이는 이제 structured handoff summary를 남긴다.
+  - job detail은 title / summary / recommended_actions / manual resume 권장 여부를 직접 보여준다.
 - Phase 5는 이걸 `같은 실패처럼 다루지 않는 단계`다.
 
 ## 9. Phase 5 Architecture Direction
@@ -171,6 +214,7 @@
   - job detail runtime signal summary
 - Success Criteria:
   - stale/timeout/requeue 판단이 artifact와 상태 필드에 함께 남는다.
+  - 현재 상태: `5-A1` implemented, `5-A2~5-A3` pending
 
 ### Phase 5-B. Failure Classification
 - Goal:
@@ -191,6 +235,7 @@
   - `5-B3` dashboard visibility
 - Success Criteria:
   - failed job는 최소 1개의 normalized failure class를 가진다.
+  - 현재 상태: `5-B1~5-B3` implemented
 
 ### Phase 5-C. Retry Policy Split
 - Goal:
@@ -207,6 +252,7 @@
   - `5-C3` `needs_human` escalation rule hardening
 - Success Criteria:
   - 같은 `recovery_count` 기준이 아니라 class-aware retry가 동작한다.
+  - 현재 상태: `5-C1~5-C3` implemented baseline
 
 ### Phase 5-D. Provider Outage Containment
 - Goal:
@@ -215,12 +261,14 @@
   - `5-D1` provider failure counters
   - `5-D2` cooldown window
   - `5-D3` route fallback policy
+  - `5-D4` provider circuit-breaker baseline
 - Examples:
   - Gemini timeout burst
   - Codex auth/quota failure burst
   - MCP server unavailable burst
 - Success Criteria:
-  - 같은 provider failure가 연속 발생하면 무한 재시도 대신 cooldown/alternate path/needs_human으로 전환된다.
+  - 같은 provider failure가 연속 발생하면 무한 재시도 대신 cooldown/alternate path/needs_human/quarantine/circuit-breaker로 전환된다.
+  - 현재 상태: `5-D1~5-D4` implemented baseline
 
 ### Phase 5-E. Dead-Letter And Human Handoff
 - Goal:
@@ -235,6 +283,7 @@
   - human note preservation
 - Success Criteria:
   - 반복 실패 job는 명시적 격리 상태로 보존되고, 재실행 이유도 남는다.
+  - 현재 상태: `5-E1~5-E3` implemented baseline
 
 ### Phase 5-F. Worker Restart Safety
 - Goal:
@@ -245,27 +294,30 @@
   - `5-F3` running node/job mismatch audit
 - Success Criteria:
   - worker 재시작 시 running 고착과 orphan node를 조용히 넘기지 않고 추적 가능하게 정리한다.
+  - 현재 상태: `5-F1~5-F3` implemented baseline
 
 ### Phase 5-G. Minimal Operator Ops Surface
 - Goal:
   - Phase 6 full observability 전이라도 운영자가 핵심 runtime 상태를 볼 수 있어야 한다.
 - Small Slices:
-  - recovery trace API
-  - failure class summary
-  - dead-letter list
+  - `5-G1` dead-letter list / recovery history summary
+  - `5-G2` provider circuit / startup audit history surface
+  - `5-G3` drilldown filters for dead-letter and recovery actions
 - Note:
   - rich charts/alerts는 Phase 6로 넘긴다.
 - Success Criteria:
   - 운영자는 로그 파일을 뒤지지 않고도 실패/복구 상태를 이해할 수 있다.
+  - 현재 상태: `5-G1` implemented baseline
 
 ## 11. Recommended Execution Order
 1. `5-A1` recovery trace artifact
 2. `5-B1` failure classification codes
 3. `5-C1` retry policy table
-4. `5-E1` dead-letter state
-5. `5-D1` provider failure counters
-6. `5-F1` startup sweep trace
-7. `5-G1` minimal operator surface
+4. `5-D1` provider failure counters
+5. `5-D2` cooldown window
+6. `5-E1` dead-letter state
+7. `5-F1` startup sweep trace
+8. `5-G1` minimal operator surface
 
 ## 12. Immediate Entry Gate
 - Phase 5를 본격 시작하기 전 최소 조건은 아래다.
@@ -307,8 +359,26 @@ PYTHONPATH=. .venv/bin/pytest -q
 - 장시간 job 운영 시 “조용히 멈췄는지 / 복구됐는지 / 사람 개입이 필요한지”가 명확해진다.
 
 ## 15. First Slice Recommendation
-- Phase 5의 첫 구현은 `5-A1 Runtime Recovery Trace`가 가장 맞다.
+- Phase 5의 첫 구현은 `5-A1 Runtime Recovery Trace`였고, 이 슬라이스는 완료됐다.
+- 그 다음 `5-B1 Failure Classification`도 구현됐다.
+- 그 다음 `5-B2 stage/provider mapping`도 구현됐다.
+- 그 다음 `5-B3 dashboard visibility`도 구현됐다.
+- 그 다음 `failure transition runtime` 분리도 구현됐다.
+- 그 다음 `5-C1 retry policy table`도 구현됐고, standard retry loop 기준 baseline enforcement가 들어갔다.
+- 그 다음 `5-C2 retry budget enforcement`도 baseline 기준으로 구현됐고, hard gate와 worker stale recovery가 같은 selector를 보기 시작했다.
+- 그 다음 `5-C3 needs_human hardening`도 baseline 기준으로 구현됐다.
+- 그 다음 `5-D1 provider failure counters`도 baseline 기준으로 구현됐다.
+- 그 다음 `5-D2 cooldown window`도 baseline 기준으로 구현됐다.
+- 그 다음 `5-D3 alternate route fallback`도 baseline 기준으로 구현됐다.
+- 그 다음 `5-E1 dead-letter state`도 baseline 기준으로 구현됐다.
+- 그 다음 `5-E2 retry from dead-letter action`도 baseline 기준으로 구현됐다.
+- 그 다음 `5-E3 operator note + approval trail`도 baseline 기준으로 구현됐다.
+- 그 다음 `5-F1 startup sweep trace`도 baseline 기준으로 구현됐다.
+- 그 다음 `5-F2 restart-safe requeue reason`도 baseline 기준으로 구현됐다.
+- 그 다음 `5-F3 running node/job mismatch audit`도 baseline 기준으로 구현됐다.
+- 그 다음 `5-D4 provider circuit-breaker baseline`도 구현됐다.
+- 그 다음 `5-G1 dead-letter list / recovery history summary`도 구현됐다.
+- 다음 우선순위는 `remaining runtime split`이다.
 - 이유:
-  - 기존 동작을 거의 안 건드린다.
-  - recovery/failure/stale 문제를 문서화된 구조로 남길 수 있다.
-  - 이후 classification/policy/dead-letter 모든 슬라이스의 공통 기반이 된다.
+  - 이제 failure class / provider / stage evidence와 `needs_human` / `dead_letter` handoff shape, provider quarantine, provider circuit-breaker, planner/reviewer alternate route fallback, startup sweep trace baseline, restart-safe requeue reason baseline, running node/job mismatch audit baseline, dead-letter list, recovery history summary, provider outage history, startup sweep history, dead-letter / recovery action drilldown, recovery action groups, operator action trail은 충분히 보인다.
+  - 다음은 runtime split과 self-growing bridge 효과성 검증 쪽이다.

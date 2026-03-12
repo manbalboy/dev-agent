@@ -171,7 +171,7 @@
           <div class="jobs-table-panel-head">
             <div>
               <h2>진행 중인 작업과 최근 로그</h2>
-              <p class="hint">막힌 작업을 먼저 보고, 상세 화면에서 로그와 lineage를 확인하세요.</p>
+              <p class="hint">막힌 작업을 먼저 보고, 실패 분류와 복구 흐름은 상세 화면에서 확인하세요.</p>
             </div>
             <div class="issue-form-actions jobs-table-actions">
               <button id="requeue-failed-button" class="action-button" type="button">실패 전체 재큐잉</button>
@@ -184,7 +184,7 @@
                 <tr>
                   <th>작업</th>
                   <th>앱/유형</th>
-                  <th>상태</th>
+                  <th>상태 / 실패 분류</th>
                   <th>단계</th>
                   <th>이슈</th>
                   <th>PR</th>
@@ -440,6 +440,7 @@
             <section id="agent-panel-easy" class="config-panel active">
               <div class="issue-form-actions">
                 <button type="button" id="apply-safe-template" class="action-button">권장 템플릿 적용</button>
+                <button type="button" id="sanitize-agent-danger" class="action-button secondary">위험 플래그 제거</button>
                 <p class="hint">역할별 모델과 실행 경로를 조합해 안전한 명령 템플릿을 만듭니다.</p>
               </div>
 
@@ -487,7 +488,13 @@
                 <input id="easy-gemini-extra" type="text" placeholder="예: --output-format text" />
 
                 <label for="easy-codex-extra">Codex 옵션</label>
-                <input id="easy-codex-extra" type="text" placeholder="예: --dangerously-bypass-approvals-and-sandbox --color never" />
+                <input id="easy-codex-extra" type="text" placeholder="예: --color never" />
+
+                <label for="easy-codex-danger-mode">Codex 위험 모드</label>
+                <label class="toggle-row compact-toggle" for="easy-codex-danger-mode">
+                  <input id="easy-codex-danger-mode" type="checkbox" />
+                  <span>자동 우회 플래그 추가 (비권장, trusted 환경에서만)</span>
+                </label>
 
               </div>
 
@@ -535,6 +542,7 @@
             </div>
             <div id="agent-cli-check-result" class="cli-check-box hint">확인 전</div>
             <div id="agent-model-check-result" class="cli-check-box hint">확인 전</div>
+            <div id="agent-template-safety-result" class="cli-check-box hint">현재 입력 기준 위험 플래그를 점검합니다.</div>
           </form>
         </section>
 
@@ -803,6 +811,92 @@
                 <div id="admin-recovery-list" class="admin-list-body">불러오는 중...</div>
               </article>
               <article class="admin-list-card">
+                <h3>공급자 실패 카운터</h3>
+                <div id="admin-provider-failure-list" class="admin-list-body">불러오는 중...</div>
+              </article>
+              <article class="admin-list-card">
+                <h3>Dead Letter 작업</h3>
+                <p class="hint">격리된 실패 작업과 마지막 사유를 빠르게 확인합니다.</p>
+                <div class="admin-drilldown-filters">
+                  <label>
+                    <span>앱</span>
+                    <select id="admin-dead-letter-filter-app">
+                      <option value="">전체 앱</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>실패 분류</span>
+                    <select id="admin-dead-letter-filter-failure-class">
+                      <option value="">전체 실패 분류</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>공급자</span>
+                    <select id="admin-dead-letter-filter-provider">
+                      <option value="">전체 공급자</option>
+                    </select>
+                  </label>
+                </div>
+                <p id="admin-dead-letter-summary" class="hint">불러오는 중...</p>
+                <div id="admin-dead-letter-list" class="admin-list-body">불러오는 중...</div>
+              </article>
+              <article class="admin-list-card">
+                <h3>최근 복구 이력</h3>
+                <p class="hint">재큐잉, handoff, cooldown, circuit-open 같은 최근 복구 결정을 모아서 봅니다.</p>
+                <div class="admin-drilldown-filters">
+                  <label>
+                    <span>결정</span>
+                    <select id="admin-recovery-filter-decision">
+                      <option value="">전체 결정</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>공급자</span>
+                    <select id="admin-recovery-filter-provider">
+                      <option value="">전체 공급자</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>단계군</span>
+                    <select id="admin-recovery-filter-stage-family">
+                      <option value="">전체 단계군</option>
+                    </select>
+                  </label>
+                </div>
+                <p id="admin-recovery-history-summary" class="hint">불러오는 중...</p>
+                <div id="admin-recovery-history-list" class="admin-list-body">불러오는 중...</div>
+              </article>
+              <article class="admin-list-card">
+                <h3>복구 액션 그룹</h3>
+                <p class="hint">최근 recovery trace를 dead-letter, requeue, handoff, outage 같은 운영 액션 그룹으로 묶어서 봅니다.</p>
+                <div id="admin-recovery-action-group-list" class="admin-list-body">불러오는 중...</div>
+              </article>
+              <article class="admin-list-card">
+                <h3>운영자 조치 이력</h3>
+                <p class="hint">대시보드에서 발생한 재큐잉과 note 기반 조치를 최근 순서대로 확인합니다.</p>
+                <div id="admin-operator-action-trail-list" class="admin-list-body">불러오는 중...</div>
+              </article>
+              <article class="admin-list-card">
+                <h3>공급자 장애 이력</h3>
+                <p class="hint">provider quarantine, circuit-open, cooldown 같은 공급자 계열 장애를 최근 순서대로 봅니다.</p>
+                <div id="admin-provider-outage-history-list" class="admin-list-body">불러오는 중...</div>
+              </article>
+              <article class="admin-list-card">
+                <h3>Worker 재시작 감사</h3>
+                <p class="hint">시작 시 감지한 running job / node_run 불일치를 추적합니다.</p>
+                <div class="admin-kv">
+                  <div><span>최근 감사</span><strong id="admin-startup-sweep-at">-</strong></div>
+                  <div><span>감지된 mismatch</span><strong id="admin-startup-mismatch-detected">0</strong></div>
+                  <div><span>남은 mismatch</span><strong id="admin-startup-mismatch-remaining">0</strong></div>
+                </div>
+                <div id="admin-startup-mismatch-list" class="admin-list-body">불러오는 중...</div>
+              </article>
+              <article class="admin-list-card">
+                <h3>재시작 감사 이력</h3>
+                <p class="hint">worker가 다시 뜰 때 어떤 정리와 mismatch 감사가 일어났는지 최근 이력을 모아 봅니다.</p>
+                <div id="admin-startup-sweep-history-list" class="admin-list-body">불러오는 중...</div>
+              </article>
+              <article class="admin-list-card">
                 <h3>재개 모드</h3>
                 <div id="admin-resume-list" class="admin-list-body">불러오는 중...</div>
               </article>
@@ -939,6 +1033,31 @@
         </section>
 
         <section class="admin-section-group" data-admin-section="ops">
+          <section class="quick-panel admin-panel">
+            <div class="quick-panel-head">
+              <div>
+                <h2>앱 실행 상태</h2>
+                <p class="hint">`workspace_app.sh`가 남긴 최근 실행 메타를 읽어 웹/모바일 앱 실행 상태를 확인합니다.</p>
+              </div>
+            </div>
+            <div class="admin-grid admin-grid-lists">
+              <article class="admin-list-card">
+                <h3>앱 실행 요약</h3>
+                <div class="admin-kv">
+                  <div><span>실행 메타</span><strong id="admin-app-runner-active-count">0</strong></div>
+                  <div><span>모바일 모드</span><strong id="admin-app-runner-mobile-count">0</strong></div>
+                  <div><span>웹 모드</span><strong id="admin-app-runner-web-count">0</strong></div>
+                </div>
+                <div id="admin-app-runner-mode-list" class="admin-list-body">불러오는 중...</div>
+                <div id="admin-app-runner-state-list" class="admin-list-body">불러오는 중...</div>
+              </article>
+              <article class="admin-list-card">
+                <h3>최근 앱 실행 상태</h3>
+                <div id="admin-app-runner-list" class="admin-list-body">불러오는 중...</div>
+              </article>
+            </div>
+          </section>
+
           <section class="quick-panel admin-panel">
             <div class="quick-panel-head">
               <div>
@@ -1211,6 +1330,57 @@
         `;
       }
 
+      function formatAppRunnerMode(mode) {
+        const value = String(mode || "").trim();
+        switch (value) {
+          case "expo-android":
+            return "Expo Android";
+          case "expo-ios":
+            return "Expo iOS";
+          case "rn-android":
+            return "RN Android";
+          case "rn-ios":
+            return "RN iOS";
+          case "web":
+            return "웹";
+          default:
+            return value || "-";
+        }
+      }
+
+      function renderAdminAppRunnerList(targetId, payload, emptyText = "앱 실행 상태 없음") {
+        const node = document.getElementById(targetId);
+        if (!node) return;
+        const items = Array.isArray(payload?.recent_runs) ? payload.recent_runs : [];
+        if (items.length === 0) {
+          node.innerHTML = `<p class="hint">${esc(emptyText)}</p>`;
+          return;
+        }
+        node.innerHTML = `
+          <ul class="admin-status-list">
+            ${items.map((item) => {
+              const state = String(item?.state || "").trim() || "unknown";
+              const badgeClass = state === "running" ? "done" : "queued";
+              const stateLabel = state === "running" ? "실행 중" : "중지됨";
+              const port = String(item?.port || "").trim();
+              const pid = String(item?.pid || "").trim();
+              const command = String(item?.command || "").trim();
+              return `
+                <li>
+                  <div class="admin-status-head">
+                    <strong>${esc(String(item?.app_code || "-"))}</strong>
+                    <span class="badge status-${badgeClass}">${esc(stateLabel)}</span>
+                  </div>
+                  <p class="hint">${esc(String(item?.repository || "-"))} · ${esc(formatAppRunnerMode(item?.mode))} · ${esc(formatKstDateTime(String(item?.updated_at || "")))}</p>
+                  <p class="hint">PID ${esc(pid || "-")}${port ? ` · 포트 ${esc(port)}` : ""}${item?.is_mobile ? " · 모바일 실행" : " · 웹 실행"}</p>
+                  <p class="hint">명령: ${esc(command || "-")}</p>
+                </li>
+              `;
+            }).join("")}
+          </ul>
+        `;
+      }
+
       function renderAdminDiagnosisTraceList(targetId, payload, emptyText = "진단 기록 없음") {
         const node = document.getElementById(targetId);
         if (!node) return;
@@ -1378,6 +1548,304 @@
         `;
       }
 
+      function renderAdminDeadLetterList(targetId, items, emptyText = "Dead Letter 작업 없음") {
+        const node = document.getElementById(targetId);
+        if (!node) return;
+        const entries = Array.isArray(items) ? items : [];
+        if (entries.length === 0) {
+          node.innerHTML = `<p class="hint">${esc(emptyText)}</p>`;
+          return;
+        }
+        node.innerHTML = `
+          <ul class="admin-status-list">
+            ${entries.map((item) => `
+              <li>
+                <div class="admin-status-head">
+                  <strong><a href="${esc(String(item?.detail_url || "#"))}">${esc(String(item?.job_id || "").slice(0, 8) || "-")}</a></strong>
+                  <span class="badge status-failed">${esc(String(item?.recovery_status || "dead_letter"))}</span>
+                </div>
+                <p class="hint">${esc(String(item?.app_code || "-"))} / ${esc(String(item?.stage || "-"))} / ${esc(String(item?.failure_class || "unknown_runtime"))}</p>
+                <p class="hint">${esc(String(item?.issue_title || "-"))}</p>
+                <p class="hint">${esc(String(item?.recovery_reason || "-"))}</p>
+                <p class="hint">${esc(formatKstDateTime(String(item?.updated_at || "")))}</p>
+              </li>
+            `).join("")}
+          </ul>
+        `;
+      }
+
+      function syncAdminFilterSelect(selectId, items, defaultLabel = "전체") {
+        const node = document.getElementById(selectId);
+        if (!(node instanceof HTMLSelectElement)) return;
+        const previous = node.value;
+        const normalizedItems = Array.isArray(items)
+          ? items
+            .map((item) => String(item?.name || item || "").trim())
+            .filter(Boolean)
+          : [];
+        const uniqueItems = normalizedItems.filter((item, index, array) => array.indexOf(item) === index);
+        node.innerHTML = `<option value="">${esc(defaultLabel)}</option>${uniqueItems.map((item) => `<option value="${esc(item)}">${esc(item)}</option>`).join("")}`;
+        if (previous && uniqueItems.includes(previous)) {
+          node.value = previous;
+        }
+      }
+
+      function renderAdminRecoveryHistoryList(targetId, payload, emptyText = "최근 복구 이력 없음") {
+        const node = document.getElementById(targetId);
+        if (!node) return;
+        const recentEvents = Array.isArray(payload?.recent_events) ? payload.recent_events : [];
+        const eventCounts = Array.isArray(payload?.event_counts) ? payload.event_counts : [];
+        if (recentEvents.length === 0) {
+          node.innerHTML = `<p class="hint">${esc(emptyText)}</p>`;
+          return;
+        }
+        const countSummary = eventCounts.length
+          ? `<p class="hint">요약: ${eventCounts.map((item) => `${esc(String(item?.name || "-"))} ${esc(String(item?.count || 0))}`).join(" · ")}</p>`
+          : "";
+        node.innerHTML = `
+          ${countSummary}
+          <ul class="admin-status-list">
+            ${recentEvents.map((item) => {
+              const detailUrl = String(item?.detail_url || "").trim();
+              const header = detailUrl
+                ? `<a href="${esc(detailUrl)}">${esc(String(item?.job_id || "").slice(0, 8) || "-")}</a>`
+                : esc(String(item?.job_id || "").slice(0, 8) || "-");
+              const badgeValue = String(item?.decision || item?.recovery_status || "recorded");
+              const badgeTone = badgeValue.includes("dead") || badgeValue.includes("needs_human") || badgeValue.includes("quarantined") || badgeValue.includes("circuit")
+                ? "failed"
+                : badgeValue.includes("requeue") || badgeValue.includes("resume")
+                  ? "running"
+                  : "done";
+              return `
+                <li>
+                  <div class="admin-status-head">
+                    <strong>${header}</strong>
+                    <span class="badge status-${badgeTone}">${esc(badgeValue)}</span>
+                  </div>
+                  <p class="hint">${esc(String(item?.failure_class || "unknown_runtime"))} / ${esc(String(item?.provider_hint || "-"))} / ${esc(String(item?.stage_family || "-"))}</p>
+                  <p class="hint">${esc(String(item?.reason || "-"))}</p>
+                  <p class="hint">${esc(String(item?.source || "-"))} · ${esc(formatKstDateTime(String(item?.generated_at || "")))}</p>
+                </li>
+              `;
+            }).join("")}
+          </ul>
+        `;
+      }
+
+      function renderAdminDeadLetterDrilldown(runtime) {
+        const items = Array.isArray(runtime?.dead_letter_jobs) ? runtime.dead_letter_jobs : [];
+        const summary = runtime?.dead_letter_summary || {};
+        syncAdminFilterSelect("admin-dead-letter-filter-app", summary?.app_counts, "전체 앱");
+        syncAdminFilterSelect("admin-dead-letter-filter-failure-class", summary?.failure_class_counts, "전체 실패 분류");
+        syncAdminFilterSelect("admin-dead-letter-filter-provider", summary?.provider_counts, "전체 공급자");
+
+        const appFilter = String(document.getElementById("admin-dead-letter-filter-app")?.value || "").trim();
+        const failureClassFilter = String(document.getElementById("admin-dead-letter-filter-failure-class")?.value || "").trim();
+        const providerFilter = String(document.getElementById("admin-dead-letter-filter-provider")?.value || "").trim();
+
+        const filteredItems = items.filter((item) => {
+          const itemApp = String(item?.app_code || "").trim();
+          const itemFailureClass = String(item?.failure_class || "").trim();
+          const itemProvider = String(item?.failure_provider_hint || "").trim();
+          if (appFilter && itemApp !== appFilter) return false;
+          if (failureClassFilter && itemFailureClass !== failureClassFilter) return false;
+          if (providerFilter && itemProvider !== providerFilter) return false;
+          return true;
+        });
+        const summaryNode = document.getElementById("admin-dead-letter-summary");
+        if (summaryNode) {
+          summaryNode.textContent = `전체 ${items.length}건 중 ${filteredItems.length}건 표시`;
+        }
+        renderAdminDeadLetterList("admin-dead-letter-list", filteredItems, "조건에 맞는 Dead Letter 작업 없음");
+      }
+
+      function renderAdminRecoveryHistoryDrilldown(runtime) {
+        const payload = runtime?.recovery_history || {};
+        syncAdminFilterSelect("admin-recovery-filter-decision", payload?.event_counts, "전체 결정");
+        syncAdminFilterSelect("admin-recovery-filter-provider", payload?.provider_counts, "전체 공급자");
+        syncAdminFilterSelect("admin-recovery-filter-stage-family", payload?.stage_family_counts, "전체 단계군");
+
+        const decisionFilter = String(document.getElementById("admin-recovery-filter-decision")?.value || "").trim();
+        const providerFilter = String(document.getElementById("admin-recovery-filter-provider")?.value || "").trim();
+        const stageFamilyFilter = String(document.getElementById("admin-recovery-filter-stage-family")?.value || "").trim();
+        const events = Array.isArray(payload?.recent_events) ? payload.recent_events : [];
+        const filteredEvents = events.filter((item) => {
+          const itemDecision = String(item?.decision || item?.recovery_status || "recorded").trim();
+          const itemProvider = String(item?.provider_hint || "").trim();
+          const itemStageFamily = String(item?.stage_family || "").trim();
+          if (decisionFilter && itemDecision !== decisionFilter) return false;
+          if (providerFilter && itemProvider !== providerFilter) return false;
+          if (stageFamilyFilter && itemStageFamily !== stageFamilyFilter) return false;
+          return true;
+        });
+        const summaryNode = document.getElementById("admin-recovery-history-summary");
+        if (summaryNode) {
+          summaryNode.textContent = `전체 ${events.length}건 중 ${filteredEvents.length}건 표시`;
+        }
+        renderAdminRecoveryHistoryList(
+          "admin-recovery-history-list",
+          {
+            event_counts: payload?.event_counts,
+            provider_counts: payload?.provider_counts,
+            stage_family_counts: payload?.stage_family_counts,
+            recent_events: filteredEvents,
+          },
+          "조건에 맞는 최근 복구 이력 없음",
+        );
+      }
+
+      function renderAdminProviderOutageHistoryList(targetId, payload, emptyText = "공급자 장애 이력 없음") {
+        const node = document.getElementById(targetId);
+        if (!node) return;
+        const recentEvents = Array.isArray(payload?.recent_events) ? payload.recent_events : [];
+        const eventCounts = Array.isArray(payload?.event_counts) ? payload.event_counts : [];
+        const providerCounts = Array.isArray(payload?.provider_counts) ? payload.provider_counts : [];
+        if (recentEvents.length === 0) {
+          node.innerHTML = `<p class="hint">${esc(emptyText)}</p>`;
+          return;
+        }
+        const countSummary = eventCounts.length
+          ? `<p class="hint">결정: ${eventCounts.map((item) => `${esc(String(item?.name || "-"))} ${esc(String(item?.count || 0))}`).join(" · ")}</p>`
+          : "";
+        const providerSummary = providerCounts.length
+          ? `<p class="hint">공급자: ${providerCounts.map((item) => `${esc(String(item?.name || "-"))} ${esc(String(item?.count || 0))}`).join(" · ")}</p>`
+          : "";
+        node.innerHTML = `
+          ${countSummary}
+          ${providerSummary}
+          <ul class="admin-status-list">
+            ${recentEvents.map((item) => {
+              const detailUrl = String(item?.detail_url || "").trim();
+              const header = detailUrl
+                ? `<a href="${esc(detailUrl)}">${esc(String(item?.job_id || "").slice(0, 8) || "-")}</a>`
+                : esc(String(item?.job_id || "").slice(0, 8) || "-");
+              const badgeValue = String(item?.decision || item?.recovery_status || "recorded");
+              const badgeTone = badgeValue.includes("circuit") || badgeValue.includes("quarantined") || badgeValue.includes("needs_human")
+                ? "failed"
+                : badgeValue.includes("cooldown")
+                  ? "running"
+                  : "done";
+              return `
+                <li>
+                  <div class="admin-status-head">
+                    <strong>${header}</strong>
+                    <span class="badge status-${badgeTone}">${esc(badgeValue)}</span>
+                  </div>
+                  <p class="hint">${esc(String(item?.provider_hint || "-"))} / ${esc(String(item?.failure_class || "unknown_runtime"))} / ${esc(String(item?.stage_family || "-"))}</p>
+                  <p class="hint">${esc(String(item?.reason || "-"))}</p>
+                  <p class="hint">${esc(String(item?.source || "-"))} · ${esc(formatKstDateTime(String(item?.generated_at || "")))}</p>
+                </li>
+              `;
+            }).join("")}
+          </ul>
+        `;
+      }
+
+      function renderAdminRecoveryActionGroups(targetId, payload, emptyText = "복구 액션 그룹 데이터 없음") {
+        const node = document.getElementById(targetId);
+        if (!node) return;
+        const actionCounts = Array.isArray(payload?.action_counts) ? payload.action_counts : [];
+        const sourceCounts = Array.isArray(payload?.source_counts) ? payload.source_counts : [];
+        if (actionCounts.length === 0 && sourceCounts.length === 0) {
+          node.innerHTML = `<p class="hint">${esc(emptyText)}</p>`;
+          return;
+        }
+        const actionSummary = actionCounts.length
+          ? `<p class="hint">액션: ${actionCounts.map((item) => `${esc(String(item?.name || "-"))} ${esc(String(item?.count || 0))}`).join(" · ")}</p>`
+          : "";
+        const sourceSummary = sourceCounts.length
+          ? `<p class="hint">출처: ${sourceCounts.map((item) => `${esc(String(item?.name || "-"))} ${esc(String(item?.count || 0))}`).join(" · ")}</p>`
+          : "";
+        const recentActions = Array.isArray(payload?.recent_actions) ? payload.recent_actions.slice(0, 4) : [];
+        const recentHtml = recentActions.length
+          ? `<ul class="admin-status-list">${recentActions.map((item) => `
+              <li>
+                <div class="admin-status-head">
+                  <strong>${esc(String(item?.job_id || "").slice(0, 8) || "-")}</strong>
+                  <span class="badge status-running">${esc(String(item?.action_group || "other"))}</span>
+                </div>
+                <p class="hint">${esc(String(item?.decision || item?.recovery_status || "recorded"))} / ${esc(String(item?.provider_hint || "-"))} / ${esc(String(item?.stage_family || "-"))}</p>
+              </li>
+            `).join("")}</ul>`
+          : "";
+        node.innerHTML = `${actionSummary}${sourceSummary}${recentHtml}`;
+      }
+
+      function renderAdminOperatorActionTrail(targetId, payload, emptyText = "운영자 조치 이력 없음") {
+        const node = document.getElementById(targetId);
+        if (!node) return;
+        const recentEvents = Array.isArray(payload?.recent_events) ? payload.recent_events : [];
+        const sourceCounts = Array.isArray(payload?.source_counts) ? payload.source_counts : [];
+        const decisionCounts = Array.isArray(payload?.decision_counts) ? payload.decision_counts : [];
+        if (recentEvents.length === 0) {
+          node.innerHTML = `<p class="hint">${esc(emptyText)}</p>`;
+          return;
+        }
+        const sourceSummary = sourceCounts.length
+          ? `<p class="hint">출처: ${sourceCounts.map((item) => `${esc(String(item?.name || "-"))} ${esc(String(item?.count || 0))}`).join(" · ")}</p>`
+          : "";
+        const decisionSummary = decisionCounts.length
+          ? `<p class="hint">결정: ${decisionCounts.map((item) => `${esc(String(item?.name || "-"))} ${esc(String(item?.count || 0))}`).join(" · ")}</p>`
+          : "";
+        node.innerHTML = `
+          ${sourceSummary}
+          ${decisionSummary}
+          <ul class="admin-status-list">
+            ${recentEvents.map((item) => {
+              const detailUrl = String(item?.detail_url || "").trim();
+              const header = detailUrl
+                ? `<a href="${esc(detailUrl)}">${esc(String(item?.job_id || "").slice(0, 8) || "-")}</a>`
+                : esc(String(item?.job_id || "").slice(0, 8) || "-");
+              return `
+                <li>
+                  <div class="admin-status-head">
+                    <strong>${header}</strong>
+                    <span class="badge status-done">${esc(String(item?.decision || item?.recovery_status || "recorded"))}</span>
+                  </div>
+                  <p class="hint">${esc(String(item?.source || "-"))} / ${esc(String(item?.provider_hint || "-"))} / ${esc(String(item?.stage_family || "-"))}</p>
+                  <p class="hint">${esc(String(item?.operator_note || item?.reason || "-"))}</p>
+                  <p class="hint">${esc(formatKstDateTime(String(item?.generated_at || "")))}</p>
+                </li>
+              `;
+            }).join("")}
+          </ul>
+        `;
+      }
+
+      function renderAdminStartupSweepHistoryList(targetId, items, emptyText = "재시작 감사 이력 없음") {
+        const node = document.getElementById(targetId);
+        if (!node) return;
+        const entries = Array.isArray(items) ? items : [];
+        if (entries.length === 0) {
+          node.innerHTML = `<p class="hint">${esc(emptyText)}</p>`;
+          return;
+        }
+        node.innerHTML = `
+          <ul class="admin-status-list">
+            ${entries.map((item) => {
+              const beforeSummary = Array.isArray(item?.mismatch_counts_before) && item.mismatch_counts_before.length
+                ? item.mismatch_counts_before.map((entry) => `${esc(String(entry?.name || "-"))} ${esc(String(entry?.count || 0))}`).join(" · ")
+                : "없음";
+              const afterSummary = Array.isArray(item?.mismatch_counts_after) && item.mismatch_counts_after.length
+                ? item.mismatch_counts_after.map((entry) => `${esc(String(entry?.name || "-"))} ${esc(String(entry?.count || 0))}`).join(" · ")
+                : "없음";
+              return `
+                <li>
+                  <div class="admin-status-head">
+                    <strong>${esc(formatKstDateTime(String(item?.generated_at || "")))}</strong>
+                    <span class="badge status-running">mismatch ${esc(String(item?.running_node_job_mismatches_detected || 0))} → ${esc(String(item?.running_node_job_mismatches_remaining || 0))}</span>
+                  </div>
+                  <p class="hint">stale 복구 ${esc(String(item?.stale_running_jobs_recovered || 0))} / orphan node ${esc(String(item?.orphan_running_node_runs_interrupted || 0))} / orphan queue ${esc(String(item?.orphan_queued_jobs_recovered || 0))}</p>
+                  <p class="hint">queue ${esc(String(item?.queue_size_before || 0))} → ${esc(String(item?.queue_size_after || 0))}</p>
+                  <p class="hint">감지 전: ${beforeSummary}</p>
+                  <p class="hint">감지 후: ${afterSummary}</p>
+                </li>
+              `;
+            }).join("")}
+          </ul>
+        `;
+      }
+
       function renderAdminWorkflowTimeline(targetId, items, emptyText = "실행 흐름 추이 데이터 없음") {
         const node = document.getElementById(targetId);
         if (!node) return;
@@ -1458,6 +1926,9 @@
         assign("admin-workflow-adaptive-apps", payload?.workflow_adoption?.apps_using_adaptive_workflow ?? 0);
         assign("admin-workflow-default-jobs", runtime.default_job_count ?? 0);
         assign("admin-workflow-adaptive-jobs", runtime.adaptive_job_count ?? 0);
+        assign("admin-app-runner-active-count", runtime?.app_runner_status?.active_count ?? 0);
+        assign("admin-app-runner-mobile-count", runtime?.app_runner_status?.mobile_count ?? 0);
+        assign("admin-app-runner-web-count", runtime?.app_runner_status?.web_count ?? 0);
 
         renderAdminCountList("admin-strategy-list", runtime.strategy_counts, "전략 데이터 없음", "strategy");
         renderAdminCountList("admin-app-list", runtime.app_counts, "앱 데이터 없음", "app_code");
@@ -1469,6 +1940,25 @@
         renderAdminCountList("admin-maturity-list", quality.maturity_level_counts, "성숙도 데이터 없음", "q");
         renderAdminCountList("admin-low-category-list", quality.low_category_counts, "저점 카테고리 없음", "q");
         renderAdminCountList("admin-recovery-list", runtime.recovery_counts, "복구 이력 없음", "recovery_status");
+        renderAdminCountList("admin-provider-failure-list", runtime.provider_failure_counts, "공급자 실패 카운터 없음", "q");
+        renderAdminDeadLetterDrilldown(runtime);
+        renderAdminRecoveryHistoryDrilldown(runtime);
+        renderAdminRecoveryActionGroups("admin-recovery-action-group-list", runtime.recovery_action_groups, "복구 액션 그룹 데이터 없음");
+        renderAdminOperatorActionTrail("admin-operator-action-trail-list", runtime.operator_action_trail, "운영자 조치 이력 없음");
+        renderAdminProviderOutageHistoryList("admin-provider-outage-history-list", runtime.provider_outage_history, "공급자 장애 이력 없음");
+        renderAdminCountList("admin-app-runner-mode-list", runtime?.app_runner_status?.mode_counts, "앱 실행 모드 없음");
+        renderAdminCountList("admin-app-runner-state-list", runtime?.app_runner_status?.state_counts, "앱 실행 상태 없음");
+        renderAdminAppRunnerList("admin-app-runner-list", runtime?.app_runner_status, "최근 앱 실행 상태 없음");
+        assign("admin-startup-sweep-at", formatKstDateTime(runtime?.startup_sweep?.latest_generated_at || ""));
+        assign("admin-startup-mismatch-detected", runtime?.startup_sweep?.running_node_job_mismatches_detected ?? 0);
+        assign("admin-startup-mismatch-remaining", runtime?.startup_sweep?.running_node_job_mismatches_remaining ?? 0);
+        renderAdminCountList(
+          "admin-startup-mismatch-list",
+          runtime?.startup_sweep?.mismatch_counts_before,
+          "최근 startup mismatch 없음",
+          "q",
+        );
+        renderAdminStartupSweepHistoryList("admin-startup-sweep-history-list", runtime?.startup_sweep_history, "재시작 감사 이력 없음");
         renderAdminCountList("admin-resume-list", runtime.resume_mode_counts, "resume 이력 없음", "q");
         renderAdminCountList("admin-memory-state-list", memory.ranking_state_counts, "메모리 랭킹 없음");
         renderAdminCountList("admin-diagnosis-scope-list", payload?.assistant_diagnosis?.scope_counts, "diagnosis scope 없음");
@@ -2644,6 +3134,9 @@
               : {};
             const hints = [
               `<div class="table-cell-hint"><span class="badge status-${jobKindBadgeClass(jobKind)}">${esc(jobKindLabel(jobKind))}</span></div>`,
+              job.failure_class
+                ? `<div class="table-cell-hint jobs-signal-row"><span class="jobs-signal-label">실패 분류</span><span class="jobs-signal-value"><code>${esc(job.failure_class)}</code>${job.failure_stage_family ? ` · ${esc(job.failure_stage_family)}` : ""}${job.failure_provider_hint ? ` · ${esc(job.failure_provider_hint)}` : ""}</span></div>`
+                : "",
               job.recovery_status ? `<div class="table-cell-hint">복구 ${esc(job.recovery_status)}</div>` : "",
               job.parent_job_id ? `<div class="table-cell-hint">부모 ${esc(String(job.parent_job_id).slice(0, 8))}</div>` : "",
               runtime.resume_mode && runtime.resume_mode !== "none"
@@ -2715,6 +3208,13 @@
         const node = document.getElementById("agent-config-result");
         node.textContent = message;
         node.classList.toggle("text-error", isError);
+      }
+
+      function stripDangerousCodexFlag(value) {
+        return String(value || "")
+          .replace(/\s*--dangerously-bypass-approvals-and-sandbox\b/g, "")
+          .replace(/\s{2,}/g, " ")
+          .trim();
       }
 
       function setAppConfigResult(message, isError = false) {
@@ -3894,14 +4394,63 @@
             const model = item.model || "(미설정)";
             const source = item.source || "not_found";
             const key = item.template_key ? ` / template:${item.template_key}` : "";
+            const danger = Boolean(item.danger_mode);
+            const dangerKeys = Array.isArray(item.danger_template_keys) && item.danger_template_keys.length
+              ? ` / 위험 템플릿:${item.danger_template_keys.join(",")}`
+              : "";
+            const statusClass = model === "(미설정)" ? "fail" : danger ? "warn" : "ok";
+            const statusText = model === "(미설정)" ? "N/A" : danger ? "DANGER" : "SAFE";
             return `<div class="cli-row">
               <span class="cli-name">${name.toUpperCase()}</span>
-              <span class="cli-status ${model === "(미설정)" ? "fail" : "ok"}">${model === "(미설정)" ? "N/A" : "SET"}</span>
+              <span class="cli-status ${statusClass}">${statusText}</span>
               <code>${esc(model)}</code>
-              <span class="cli-output">${esc(source + key)}</span>
+              <span class="cli-output">${esc(source + key + dangerKeys)}</span>
             </div>`;
           })
           .join("");
+      }
+
+      function collectDangerousAgentTemplateTargets() {
+        const targets = [];
+        const easyDanger = document.getElementById("easy-codex-danger-mode")?.checked;
+        const easyExtra = document.getElementById("easy-codex-extra")?.value || "";
+        if (easyDanger || String(easyExtra).includes("--dangerously-bypass-approvals-and-sandbox")) {
+          targets.push("간단 설정 / Codex");
+        }
+
+        [
+          ["tpl-planner", "계획 실행기"],
+          ["tpl-coder", "구현 실행기"],
+          ["tpl-reviewer", "리뷰 실행기"],
+          ["tpl-copilot", "보조 실행기"],
+          ["tpl-escalation", "에스컬레이션 실행기"],
+        ].forEach(([id, label]) => {
+          const value = document.getElementById(id)?.value || "";
+          if (String(value).includes("--dangerously-bypass-approvals-and-sandbox")) {
+            targets.push(label);
+          }
+        });
+
+        return targets;
+      }
+
+      function renderAgentTemplateSafetyHint() {
+        const node = document.getElementById("agent-template-safety-result");
+        if (!node) return;
+        const targets = collectDangerousAgentTemplateTargets();
+        if (!targets.length) {
+          node.innerHTML = `<div class="cli-row">
+            <span class="cli-name">안전 점검</span>
+            <span class="cli-status ok">SAFE</span>
+            <span class="cli-output">현재 입력 기준 위험 플래그가 없습니다.</span>
+          </div>`;
+          return;
+        }
+        node.innerHTML = `<div class="cli-row">
+          <span class="cli-name">안전 점검</span>
+          <span class="cli-status warn">DANGER</span>
+          <span class="cli-output">위험 플래그 감지: ${esc(targets.join(", "))}</span>
+        </div>`;
       }
 
       function safeTemplateDefaults() {
@@ -3915,7 +4464,8 @@
           codexPath: "/root/.nvm/versions/node/v24.14.0/bin/codex",
           approvalMode: "yolo",
           geminiExtra: "--model gemini-3.1-pro-preview --output-format text",
-          codexExtra: "--dangerously-bypass-approvals-and-sandbox --color never",
+          codexExtra: "--color never",
+          codexDangerMode: false,
         };
       }
 
@@ -3931,6 +4481,7 @@
           approvalMode: document.getElementById("easy-approval-mode").value,
           geminiExtra: document.getElementById("easy-gemini-extra").value.trim(),
           codexExtra: document.getElementById("easy-codex-extra").value.trim(),
+          codexDangerMode: document.getElementById("easy-codex-danger-mode").checked,
         };
       }
 
@@ -3944,10 +4495,15 @@
         return "";
       }
 
+      function buildCodexFlags(fields) {
+        const dangerFlag = fields.codexDangerMode ? " --dangerously-bypass-approvals-and-sandbox" : "";
+        return `exec -${dangerFlag} -C {work_dir}${normalizeOptions(fields.codexExtra)}`;
+      }
+
       function buildRoleCommand(agent, role, fields) {
         const targetPath = roleTargetPath(role);
         const geminiFlags = `-p '' --approval-mode ${fields.approvalMode}${normalizeOptions(fields.geminiExtra)}`;
-        const codexFlags = `exec - -C {work_dir}${normalizeOptions(fields.codexExtra)}`;
+        const codexFlags = buildCodexFlags(fields);
 
         if (agent === "gemini") {
           const base = `cat {prompt_file} | ${fields.nodePath} ${fields.geminiPath} ${geminiFlags}`;
@@ -3975,6 +4531,7 @@
         document.getElementById("preview-reviewer").textContent = commands.reviewer;
         document.getElementById("preview-copilot").textContent = commands.copilot;
         document.getElementById("preview-escalation").textContent = commands.escalation;
+        renderAgentTemplateSafetyHint();
         return commands;
       }
 
@@ -3990,7 +4547,25 @@
         document.getElementById("easy-approval-mode").value = defaults.approvalMode;
         document.getElementById("easy-gemini-extra").value = defaults.geminiExtra;
         document.getElementById("easy-codex-extra").value = defaults.codexExtra;
+        document.getElementById("easy-codex-danger-mode").checked = defaults.codexDangerMode;
         renderEasyPreview();
+      }
+
+      function sanitizeAgentDangerousFlags() {
+        const easyExtra = document.getElementById("easy-codex-extra");
+        const easyDangerMode = document.getElementById("easy-codex-danger-mode");
+        if (easyExtra) easyExtra.value = stripDangerousCodexFlag(easyExtra.value);
+        if (easyDangerMode) easyDangerMode.checked = false;
+
+        ["tpl-planner", "tpl-coder", "tpl-reviewer", "tpl-copilot", "tpl-escalation"].forEach((id) => {
+          const element = document.getElementById(id);
+          if (!element) return;
+          element.value = stripDangerousCodexFlag(element.value);
+        });
+
+        renderEasyPreview();
+        renderAgentTemplateSafetyHint();
+        setAgentConfigResult("위험 플래그를 제거했습니다. 저장하면 다음 작업부터 안전 모드로 적용됩니다.");
       }
 
       function currentAgentMode() {
@@ -4481,6 +5056,7 @@
           document.getElementById("tpl-escalation").value = payload.escalation || "";
           document.getElementById("enable-escalation").checked = Boolean(payload.enable_escalation);
           renderEasyPreview();
+          renderAgentTemplateSafetyHint();
         } catch {
           setAgentConfigResult("템플릿을 불러오지 못했습니다.", true);
         }
@@ -4491,12 +5067,14 @@
         const submit = document.getElementById("agent-config-submit");
         const checkButton = document.getElementById("agent-cli-check");
         const modelCheckButton = document.getElementById("agent-model-check");
+        const sanitizeButton = document.getElementById("sanitize-agent-danger");
         if (!form || !submit) return;
 
         document.getElementById("apply-safe-template").addEventListener("click", () => {
           applySafeTemplateToEasyFields();
           setAgentConfigResult("안전한 템플릿을 적용했습니다.");
         });
+        sanitizeButton?.addEventListener("click", sanitizeAgentDangerousFlags);
 
         checkButton?.addEventListener("click", async () => {
           checkButton.disabled = true;
@@ -4549,11 +5127,19 @@
           "easy-approval-mode",
           "easy-gemini-extra",
           "easy-codex-extra",
+          "easy-codex-danger-mode",
         ]
           .forEach((id) => {
             const element = document.getElementById(id);
             element?.addEventListener("input", renderEasyPreview);
             element?.addEventListener("change", renderEasyPreview);
+          });
+
+        ["tpl-planner", "tpl-coder", "tpl-reviewer", "tpl-copilot", "tpl-escalation"]
+          .forEach((id) => {
+            const element = document.getElementById(id);
+            element?.addEventListener("input", renderAgentTemplateSafetyHint);
+            element?.addEventListener("change", renderAgentTemplateSafetyHint);
           });
 
         form.addEventListener("submit", async (event) => {
@@ -4765,6 +5351,17 @@
           jobsFilterState.page = 1;
           applyJobsFilterStateToForm();
           await refreshJobs();
+        });
+        panel?.addEventListener("change", (event) => {
+          const target = event.target instanceof Element ? event.target : null;
+          if (!target) return;
+          if (target.matches("#admin-dead-letter-filter-app, #admin-dead-letter-filter-failure-class, #admin-dead-letter-filter-provider")) {
+            renderAdminDeadLetterDrilldown(window.__agenthubLastAdminMetrics?.runtime || {});
+            return;
+          }
+          if (target.matches("#admin-recovery-filter-decision, #admin-recovery-filter-provider, #admin-recovery-filter-stage-family")) {
+            renderAdminRecoveryHistoryDrilldown(window.__agenthubLastAdminMetrics?.runtime || {});
+          }
         });
         panel?.addEventListener("click", (event) => {
           const target = event.target instanceof Element ? event.target.closest(".admin-diagnosis-select") : null;

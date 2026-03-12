@@ -647,6 +647,40 @@ code {
   min-height: 120px;
 }
 
+.admin-drilldown-filters {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 12px 0 10px;
+}
+
+.admin-drilldown-filters label {
+  display: grid;
+  gap: 6px;
+}
+
+.admin-drilldown-filters span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.admin-drilldown-filters select {
+  width: 100%;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 9px 11px;
+  font: inherit;
+}
+
+.admin-drilldown-filters select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
 .admin-timeline {
   display: grid;
   gap: 12px;
@@ -1264,6 +1298,11 @@ code {
 .cli-status.fail {
   background: #3c1d1d;
   color: #ffaaaa;
+}
+
+.cli-status.warn {
+  background: #47331a;
+  color: #ffd580;
 }
 
 .cli-row code {
@@ -2795,6 +2834,25 @@ tbody tr:hover {
   font-size: 12px;
 }
 
+.jobs-signal-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.jobs-signal-label {
+  font-weight: 700;
+  color: var(--text);
+}
+
+.jobs-signal-value {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
 .runtime-health-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -3046,6 +3104,10 @@ tbody tr:hover {
   }
 
   .admin-runtime-input-form {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-drilldown-filters {
     grid-template-columns: 1fr;
   }
 

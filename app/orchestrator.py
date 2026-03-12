@@ -8,7 +8,7 @@ Important design principle:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 import hashlib
 import inspect
 import json
@@ -17,12 +17,8 @@ from pathlib import Path
 import re
 import shutil
 import shlex
-import socket
 import time
 from typing import Any, Callable, Dict, List, Optional, Set
-from urllib import error as urlerror
-from urllib import request as urlrequest
-from uuid import uuid4
 
 from app.command_runner import (
     CommandExecutionError,
@@ -30,29 +26,27 @@ from app.command_runner import (
     run_shell_command,
 )
 from app.ai_role_routing import AIRoleRouter
+from app.app_type_runtime import AppTypeRuntime
 from app.config import AppSettings
 from app.feature_flags import is_feature_enabled
-from app.models import JobRecord, JobStage, JobStatus, NodeRunRecord, utc_now_iso
+from app.implement_runtime import ImplementRuntime
+from app.improvement_runtime import ImprovementRuntime
+from app.job_failure_runtime import JobFailureRuntime
+from app.models import JobRecord, JobStage, JobStatus, utc_now_iso
 from app.prompt_builder import (
-    build_architecture_plan_prompt,
-    build_commit_message_prompt,
-    build_copywriter_prompt,
-    build_coder_prompt,
-    build_documentation_prompt,
-    build_designer_prompt,
-    build_mvp_scope_prompt,
-    build_planner_prompt,
-    build_product_brief_prompt,
-    build_project_scaffolding_prompt,
-    build_publisher_prompt,
-    build_pr_summary_prompt,
-    build_reviewer_prompt,
     build_spec_json,
     build_spec_markdown,
-    build_status_markdown,
-    build_user_flows_prompt,
 )
-from app.planner_graph import build_refinement_instruction, evaluate_plan_markdown
+from app.content_stage_runtime import ContentStageRuntime
+from app.docs_snapshot_runtime import DocsSnapshotRuntime
+from app.planner_runtime import PlannerRuntime
+from app.preview_runtime import PreviewRuntime
+from app.product_definition_runtime import ProductDefinitionRuntime
+from app.provider_failure_counter_runtime import (
+    evaluate_workspace_provider_circuit_breaker,
+    evaluate_workspace_provider_quarantine,
+)
+from app.provider_runtime import ProviderRuntime
 from app.spec_tools import (
     issue_reader,
     repo_context_reader,
@@ -61,32 +55,32 @@ from app.spec_tools import (
     spec_schema_validator,
 )
 from app.store import JobStore
-from app.workflow_design import validate_workflow
 from app.workflow_registry import (
     WORKFLOW_NODE_HANDLER_NAMES,
-    WORKFLOW_NODE_SKIP_AUTO_COMMIT,
 )
 from app.workflow_resume import (
     build_workflow_artifact_paths,
-    compute_workflow_resume_state,
-    linearize_workflow_nodes,
     read_improvement_runtime_context,
 )
-from app.workflow_resolution import load_workflow_catalog, resolve_workflow_selection
+from app.workflow_resolution_runtime import WorkflowResolutionRuntime
 from app.memory.fix_store import FixStore, NoOpFixStore
+from app.mobile_quality_runtime import MobileQualityRuntime
 from app.memory.runtime_ingest import ingest_memory_runtime_artifacts
 from app.memory.qdrant_shadow import QdrantShadowTransport
 from app.memory.runtime_store import MemoryRuntimeStore
 from app.memory.vector_shadow import build_vector_shadow_manifest
-from app.langgraph_planner_shadow import (
-    LangGraphPlannerShadowRunner,
-    build_disabled_planner_shadow_payload,
-)
+from app.langgraph_planner_shadow import LangGraphPlannerShadowRunner
 from app.langgraph_recovery_shadow import LangGraphRecoveryShadowRunner
 from app.recovery_runtime import RecoveryRuntime
+from app.review_fix_runtime import ReviewFixRuntime
 from app.runtime_inputs import normalize_env_var_name, resolve_runtime_inputs
 from app.shell_test_runtime import ShellTestRuntime
-from app.tool_runtime import ToolRequest, ToolResult, ToolRuntime
+from app.summary_runtime import SummaryRuntime
+from app.tool_runtime import ToolRequest, ToolRuntime
+from app.ux_review_runtime import UxReviewRuntime
+from app.workflow_node_runtime import WorkflowNodeRuntime
+from app.workflow_pipeline_runtime import WorkflowPipelineRuntime
+from app.workspace_repository_runtime import WorkspaceRepositoryRuntime
 
 
 ShellExecutor = Callable[..., object]
@@ -163,6 +157,36 @@ class Orchestrator:
         self._fix_store: FixStore | NoOpFixStore = (
             FixStore(settings.resolved_memory_dir) if settings.memory_enabled else NoOpFixStore()
         )
+        self._mobile_quality_runtime = MobileQualityRuntime(settings=self.settings)
+        self._product_definition_runtime = ProductDefinitionRuntime(
+            command_templates=self.command_templates,
+            set_stage=self._set_stage,
+            docs_file=self._docs_file,
+            build_template_variables=self._build_template_variables,
+            actor_log_writer=self._actor_log_writer,
+            template_for_route=self._template_for_route,
+            append_actor_log=self._append_actor_log,
+        )
+        self._improvement_runtime = ImprovementRuntime(
+            set_stage=self._set_stage,
+            docs_file=self._docs_file,
+            read_json_file=self._read_json_file,
+            execute_shell_command=self._execute_shell_command,
+            actor_log_writer=self._actor_log_writer,
+            append_actor_log=self._append_actor_log,
+            write_structured_memory_artifacts=lambda **kwargs: self._write_structured_memory_artifacts(**kwargs),
+            write_memory_retrieval_artifacts=lambda **kwargs: self._write_memory_retrieval_artifacts(**kwargs),
+            write_strategy_shadow_report=lambda **kwargs: self._write_strategy_shadow_report(**kwargs),
+            ingest_memory_runtime_artifacts=lambda **kwargs: self._ingest_memory_runtime_artifacts(**kwargs),
+            build_improvement_strategy_inputs=lambda **kwargs: self._build_improvement_strategy_inputs(**kwargs),
+            select_improvement_strategy=lambda **kwargs: self._select_improvement_strategy(**kwargs),
+            select_next_improvement_items=lambda **kwargs: self._select_next_improvement_items(**kwargs),
+        )
+        self._app_type_runtime = AppTypeRuntime(
+            docs_file=self._docs_file,
+            set_stage=self._set_stage,
+            append_actor_log=self._append_actor_log,
+        )
         self._shell_test_runtime = ShellTestRuntime(
             settings=self.settings,
             shell_executor=self.shell_executor,
@@ -174,6 +198,7 @@ class Orchestrator:
             set_stage=self._set_stage,
             append_actor_log=self._append_actor_log,
             is_long_track=self._is_long_track,
+            write_mobile_quality_artifact=self._mobile_quality_runtime.write_mobile_app_checklist,
         )
         self._recovery_runtime = RecoveryRuntime(
             command_templates=self.command_templates,
@@ -191,6 +216,152 @@ class Orchestrator:
             run_optional_escalation=self._run_optional_escalation,
             feature_enabled=self._feature_enabled,
             recovery_shadow_runner=self._langgraph_recovery_shadow,
+        )
+        self._summary_runtime = SummaryRuntime(
+            command_templates=self.command_templates,
+            run_shell=self._run_shell,
+            append_log=self._append_log,
+            append_actor_log=self._append_actor_log,
+            docs_file=self._docs_file,
+            build_template_variables=self._build_template_variables,
+            actor_log_writer=self._actor_log_writer,
+            template_for_route=self._template_for_route,
+            find_configured_template_for_route=self._find_configured_template_for_route,
+            set_stage=self._set_stage,
+            parse_porcelain_path=self._parse_porcelain_path,
+            is_long_track=self._is_long_track,
+        )
+        self._docs_snapshot_runtime = DocsSnapshotRuntime(
+            settings=self.settings,
+            run_shell=self._run_shell,
+            docs_file=self._docs_file,
+            append_actor_log=self._append_actor_log,
+            prepare_commit_summary_with_ai=self._prepare_commit_summary_with_ai,
+        )
+        self._content_stage_runtime = ContentStageRuntime(
+            command_templates=self.command_templates,
+            set_stage=self._set_stage,
+            ensure_product_definition_ready=self._ensure_product_definition_ready,
+            docs_file=self._docs_file,
+            build_template_variables=self._build_template_variables,
+            actor_log_writer=self._actor_log_writer,
+            template_for_route=self._template_for_route,
+            template_candidates_for_route=self._template_candidates_for_route,
+            append_actor_log=self._append_actor_log,
+            ensure_design_artifacts=self._ensure_design_artifacts,
+            ensure_publisher_artifacts=self._ensure_publisher_artifacts,
+            ensure_copywriter_artifacts=self._ensure_copywriter_artifacts,
+            ensure_documentation_artifacts=self._ensure_documentation_artifacts,
+        )
+        self._review_fix_runtime = ReviewFixRuntime(
+            command_templates=self.command_templates,
+            set_stage=self._set_stage,
+            write_memory_retrieval_artifacts=self._write_memory_retrieval_artifacts,
+            docs_file=self._docs_file,
+            build_route_runtime_context=lambda route_name: self._build_route_runtime_context(route_name),
+            build_template_variables=self._build_template_variables,
+            actor_log_writer=self._actor_log_writer,
+            template_for_route=self._template_for_route,
+            template_for_route_in_repository=self._template_for_route_in_repository,
+            read_improvement_runtime_context=lambda paths: self._read_improvement_runtime_context(paths),
+            stage_plan_with_gemini=lambda *args, **kwargs: self._stage_plan_with_gemini(*args, **kwargs),
+            append_actor_log=self._append_actor_log,
+        )
+        self._planner_runtime = PlannerRuntime(
+            command_templates=self.command_templates,
+            set_stage=self._set_stage,
+            append_actor_log=self._append_actor_log,
+            docs_file=self._docs_file,
+            write_memory_retrieval_artifacts=self._write_memory_retrieval_artifacts,
+            build_route_runtime_context=lambda route_name: self._build_route_runtime_context(route_name),
+            is_long_track_job=lambda job: self._is_long_track(self._require_job(job.job_id)),
+            build_template_variables=self._build_template_variables,
+            actor_log_writer=self._actor_log_writer,
+            template_for_route=self._template_for_route,
+            template_for_route_in_repository=self._template_for_route_in_repository,
+            route_allows_tool=self._route_allows_tool,
+            execute_planner_tool_request=self._execute_planner_tool_request,
+            feature_enabled=self._feature_enabled,
+            planner_shadow_runner=self._langgraph_planner_shadow,
+        )
+        self._implement_runtime = ImplementRuntime(
+            command_templates=self.command_templates,
+            set_stage=self._set_stage,
+            ensure_product_definition_ready=self._ensure_product_definition_ready,
+            write_memory_retrieval_artifacts=self._write_memory_retrieval_artifacts,
+            docs_file=self._docs_file,
+            build_route_runtime_context=lambda route_name: self._build_route_runtime_context(route_name),
+            build_template_variables=self._build_template_variables,
+            actor_log_writer=self._actor_log_writer,
+            template_for_route=self._template_for_route,
+        )
+        self._ux_review_runtime = UxReviewRuntime(
+            stage_run_tests=self._stage_run_tests,
+            deploy_preview_and_smoke_test=self._deploy_preview_and_smoke_test,
+            run_shell=self._run_shell,
+            append_actor_log=self._append_actor_log,
+            docs_file=self._docs_file,
+        )
+        self._workflow_node_runtime = WorkflowNodeRuntime(owner=self)
+        self._workflow_pipeline_runtime = WorkflowPipelineRuntime(owner=self)
+        self._workflow_resolution_runtime = WorkflowResolutionRuntime(
+            store=self.store,
+            append_actor_log=self._append_actor_log,
+            read_improvement_runtime_context=self._read_improvement_runtime_context,
+        )
+        self._workspace_repository_runtime = WorkspaceRepositoryRuntime(
+            settings=self.settings,
+            set_stage=self._set_stage,
+            append_log=self._append_log,
+            run_shell=self._run_shell,
+            ref_exists=self._ref_exists,
+        )
+        self._preview_runtime = PreviewRuntime(
+            settings=self.settings,
+            run_shell=self._run_shell,
+            execute_shell_command=self._execute_shell_command,
+            actor_log_writer=self._actor_log_writer,
+            append_actor_log=self._append_actor_log,
+            docs_file=self._docs_file,
+        )
+        self._provider_runtime = ProviderRuntime(
+            settings=self.settings,
+            store=self.store,
+            run_shell=self._run_shell,
+            set_stage=self._set_stage,
+            require_job=self._require_job,
+            job_execution_repository=self._job_execution_repository,
+            deploy_preview_and_smoke_test=self._deploy_preview_and_smoke_test,
+            docs_file=self._docs_file,
+            stage_prepare_pr_summary=self._stage_prepare_pr_summary_with_claude,
+            issue_reference_line=self._issue_reference_line,
+            append_preview_section_to_pr_body=self._append_preview_section_to_pr_body,
+            append_actor_log=self._append_actor_log,
+        )
+        self._job_failure_runtime = JobFailureRuntime(
+            settings=self.settings,
+            store=self.store,
+            command_templates=self.command_templates,
+            require_job=self._require_job,
+            run_single_attempt=lambda job_id, log_path: self._run_single_attempt(job_id, log_path),
+            touch_job_heartbeat=self._touch_job_heartbeat,
+            append_actor_log=self._append_actor_log,
+            is_escalation_enabled=self._is_escalation_enabled,
+            find_configured_template_for_route=self._find_configured_template_for_route,
+            docs_file=self._docs_file,
+            job_workspace_path=self._job_workspace_path,
+            build_template_variables=self._build_template_variables,
+            template_for_route=self._template_for_route,
+            actor_log_writer=self._actor_log_writer,
+            set_stage=self._set_stage,
+            issue_reference_line=self._issue_reference_line,
+            run_shell=self._run_shell,
+            push_branch_with_recovery=self._push_branch_with_recovery,
+            job_execution_repository=self._job_execution_repository,
+            get_pr_url=self._get_pr_url,
+            is_stop_requested=self._is_stop_requested,
+            clear_stop_requested=self._clear_stop_requested,
+            set_agent_profile=self._set_agent_profile,
         )
         self._tool_runtime = ToolRuntime(
             command_templates=self.command_templates,
@@ -381,66 +552,7 @@ class Orchestrator:
                 self._process_long_job(job_id, log_path)
                 return
 
-            last_error: Optional[str] = None
-            initial_attempt = max(1, int(job.attempt or 0) + 1)
-            for attempt in range(initial_attempt, job.max_attempts + 1):
-                self.store.update_job(
-                    job_id,
-                    attempt=attempt,
-                    error_message=None,
-                    heartbeat_at=utc_now_iso(),
-                )
-                self._append_actor_log(
-                    log_path,
-                    "ORCHESTRATOR",
-                    f"Attempt {attempt}/{job.max_attempts} started",
-                )
-                self._touch_job_heartbeat(force=True)
-
-                try:
-                    self._run_single_attempt(job_id, log_path)
-                    self.store.update_job(
-                        job_id,
-                        status=JobStatus.DONE.value,
-                        stage=JobStage.DONE.value,
-                        finished_at=utc_now_iso(),
-                        heartbeat_at=utc_now_iso(),
-                        error_message=None,
-                    )
-                    self._append_actor_log(log_path, "ORCHESTRATOR", "Job finished successfully")
-                    return
-                except Exception as error:  # noqa: BLE001 - we want resilient orchestration.
-                    last_error = str(error)
-                    self.store.update_job(
-                        job_id,
-                        error_message=last_error,
-                        heartbeat_at=utc_now_iso(),
-                    )
-                    self._append_actor_log(
-                        log_path,
-                        "ORCHESTRATOR",
-                        f"Attempt {attempt} failed: {last_error}",
-                    )
-
-                    if self._is_escalation_enabled() and self.command_templates.has_template(
-                        "escalation"
-                    ):
-                        self._run_optional_escalation(job_id, log_path, last_error)
-
-                    if attempt < job.max_attempts:
-                        self._append_actor_log(
-                            log_path,
-                            "ORCHESTRATOR",
-                            "Retrying with a fresh attempt.",
-                        )
-                    else:
-                        self._append_actor_log(
-                            log_path,
-                            "ORCHESTRATOR",
-                            "Maximum retry count reached. Finalizing as failed.",
-                        )
-
-            self._finalize_failed_job(job_id, log_path, last_error or "Unknown error")
+            self._job_failure_runtime.run_standard_attempt_loop(job_id, log_path)
         finally:
             self._active_job_id = None
             self._last_heartbeat_monotonic = 0.0
@@ -449,61 +561,7 @@ class Orchestrator:
 
     def _process_long_job(self, job_id: str, log_path: Path) -> None:
         """Run long-track mode with fixed 3 rounds of full workflow."""
-
-        job = self._require_job(job_id)
-        total_rounds = 3
-        last_error: Optional[str] = None
-        start_round = max(1, int(job.attempt or 0) + 1)
-        for round_index in range(start_round, total_rounds + 1):
-            self.store.update_job(
-                job_id,
-                attempt=round_index,
-                error_message=None,
-                heartbeat_at=utc_now_iso(),
-            )
-            self._append_actor_log(
-                log_path,
-                "ORCHESTRATOR",
-                f"[LONG] Round {round_index}/{total_rounds} started",
-            )
-            self._touch_job_heartbeat(force=True)
-            try:
-                self._run_single_attempt(job_id, log_path)
-                self._append_actor_log(
-                    log_path,
-                    "ORCHESTRATOR",
-                    f"[LONG] Round {round_index}/{total_rounds} completed",
-                )
-            except Exception as error:  # noqa: BLE001
-                last_error = str(error)
-                self.store.update_job(
-                    job_id,
-                    error_message=last_error,
-                    heartbeat_at=utc_now_iso(),
-                )
-                self._append_actor_log(
-                    log_path,
-                    "ORCHESTRATOR",
-                    f"[LONG] Round {round_index}/{total_rounds} failed: {last_error}",
-                )
-                if self._is_escalation_enabled() and self._find_configured_template_for_route("escalation"):
-                    self._run_optional_escalation(job_id, log_path, last_error)
-                self._finalize_failed_job(job_id, log_path, last_error)
-                return
-
-        self.store.update_job(
-            job_id,
-            status=JobStatus.DONE.value,
-            stage=JobStage.DONE.value,
-            finished_at=utc_now_iso(),
-            heartbeat_at=utc_now_iso(),
-            error_message=None,
-        )
-        self._append_actor_log(
-            log_path,
-            "ORCHESTRATOR",
-            f"[LONG] Completed all {total_rounds} rounds successfully",
-        )
+        self._job_failure_runtime.process_long_job(job_id, log_path)
 
     def _process_ultra_job(
         self,
@@ -513,133 +571,12 @@ class Orchestrator:
         mode_tag: str = "ULTRA",
     ) -> None:
         """Run ultra-long mode with round loop and graceful stop."""
-
-        job = self._require_job(job_id)
-        ultra_started = time.monotonic()
-        round_index = int(job.attempt or 0)
-        last_error: Optional[str] = None
-        max_runtime_seconds = max_runtime_hours * 60 * 60
-
-        while True:
-            elapsed = time.monotonic() - ultra_started
-            if elapsed >= max_runtime_seconds:
-                self._append_actor_log(
-                    log_path,
-                    "ORCHESTRATOR",
-                    f"{mode_tag} mode max runtime ({max_runtime_hours}h) reached. "
-                    "Finishing after current rounds.",
-                )
-                self.store.update_job(
-                    job_id,
-                    status=JobStatus.DONE.value,
-                    stage=JobStage.DONE.value,
-                    finished_at=utc_now_iso(),
-                    heartbeat_at=utc_now_iso(),
-                    error_message=None,
-                )
-                return
-
-            if self._is_stop_requested(job_id):
-                self._append_actor_log(
-                    log_path,
-                    "ORCHESTRATOR",
-                    "Stop requested before next round. Finishing ultra job.",
-                )
-                self._clear_stop_requested(job_id)
-                self.store.update_job(
-                    job_id,
-                    status=JobStatus.DONE.value,
-                    stage=JobStage.DONE.value,
-                    finished_at=utc_now_iso(),
-                    heartbeat_at=utc_now_iso(),
-                    error_message=None,
-                )
-                return
-
-            round_index += 1
-            self.store.update_job(
-                job_id,
-                attempt=round_index,
-                error_message=None,
-                heartbeat_at=utc_now_iso(),
-            )
-            self._append_actor_log(
-                log_path,
-                "ORCHESTRATOR",
-                f"[{mode_tag}] Round {round_index} started",
-            )
-            self._touch_job_heartbeat(force=True)
-
-            try:
-                self._agent_profile = "primary"
-                self._run_single_attempt(job_id, log_path)
-                self._append_actor_log(
-                    log_path,
-                    "ORCHESTRATOR",
-                    f"[{mode_tag}] Round {round_index} completed with primary agents.",
-                )
-            except Exception as primary_error:  # noqa: BLE001
-                last_error = str(primary_error)
-                self.store.update_job(
-                    job_id,
-                    error_message=last_error,
-                    heartbeat_at=utc_now_iso(),
-                )
-                self._append_actor_log(
-                    log_path,
-                    "ORCHESTRATOR",
-                    f"[{mode_tag}] Primary agents failed in round {round_index}: {last_error}",
-                )
-
-                if self._is_escalation_enabled() and self._find_configured_template_for_route("escalation"):
-                    self._run_optional_escalation(job_id, log_path, last_error)
-
-                try:
-                    self._agent_profile = "fallback"
-                    self._append_actor_log(
-                        log_path,
-                        "ORCHESTRATOR",
-                        f"[{mode_tag}] Trying fallback agents for round {round_index}.",
-                    )
-                    self._run_single_attempt(job_id, log_path)
-                    self._append_actor_log(
-                        log_path,
-                        "ORCHESTRATOR",
-                        f"[{mode_tag}] Round {round_index} recovered by fallback agents.",
-                    )
-                except Exception as fallback_error:  # noqa: BLE001
-                    last_error = str(fallback_error)
-                    self._append_actor_log(
-                        log_path,
-                        "ORCHESTRATOR",
-                        f"[{mode_tag}] Fallback agents also failed in round {round_index}: {last_error}",
-                    )
-                    self._append_actor_log(
-                        log_path,
-                        "ORCHESTRATOR",
-                        f"[{mode_tag}] Two-agent failure reached. Ending this ultra job.",
-                    )
-                    self._agent_profile = "primary"
-                    self._finalize_failed_job(job_id, log_path, last_error)
-                    return
-                finally:
-                    self._agent_profile = "primary"
-
-            if self._is_stop_requested(job_id):
-                self._append_actor_log(
-                    log_path,
-                    "ORCHESTRATOR",
-                    f"[{mode_tag}] Stop requested. Ending after round {round_index}.",
-                )
-                self._clear_stop_requested(job_id)
-                self.store.update_job(
-                    job_id,
-                    status=JobStatus.DONE.value,
-                    stage=JobStage.DONE.value,
-                    finished_at=utc_now_iso(),
-                    error_message=None,
-                )
-                return
+        self._job_failure_runtime.process_ultra_job(
+            job_id,
+            log_path,
+            max_runtime_hours=max_runtime_hours,
+            mode_tag=mode_tag,
+        )
 
     def _run_single_attempt(self, job_id: str, log_path: Path) -> None:
         """Execute one attempt with workflow-config first, fixed flow fallback."""
@@ -815,177 +752,14 @@ class Orchestrator:
         resume_state: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Run workflow via edge-driven execution with success/failure/always transitions."""
-
-        context: Dict[str, Any] = {
-            "issue": None,
-            "paths": None,
-            "last_node_result": None,
-            "results": {},
-            "loop_counters": {},
-        }
-        current_node_id = str(workflow.get("entry_node_id", "")).strip()
-        if not current_node_id:
-            current_node_id = str(ordered_nodes[0].get("id", "")).strip() if ordered_nodes else ""
-
-        if isinstance(resume_state, dict) and resume_state.get("enabled"):
-            current_node_id = str(resume_state.get("resume_from_node_id", "")).strip() or current_node_id
-            context["paths"] = build_workflow_artifact_paths(repository_path)
-            skipped_nodes = resume_state.get("skipped_nodes", [])
-            if isinstance(skipped_nodes, list) and skipped_nodes:
-                skipped_labels = ", ".join(
-                    str(item.get("id", "")).strip() or str(item.get("type", "")).strip()
-                    for item in skipped_nodes
-                    if isinstance(item, dict)
-                )
-                self._append_actor_log(
-                    log_path,
-                    "ORCHESTRATOR",
-                    f"Workflow resume reuses completed nodes: {skipped_labels}",
-                )
-
-        nodes_by_id, edges_by_source = self._build_workflow_runtime_maps(workflow, ordered_nodes)
-        if not current_node_id:
-            raise CommandExecutionError("Workflow has no entry node to execute.")
-
-        step_limit = max(64, len(nodes_by_id) * 8)
-        step_count = 0
-        while current_node_id:
-            step_count += 1
-            if step_count > step_limit:
-                raise CommandExecutionError(
-                    f"Workflow exceeded step limit ({step_limit}). "
-                    "Next action: inspect loop edges and loop_until_pass settings."
-                )
-
-            node = nodes_by_id.get(current_node_id)
-            if not isinstance(node, dict):
-                raise CommandExecutionError(f"Workflow node not found during execution: {current_node_id}")
-
-            node_id = str(node.get("id", ""))
-            node_type = str(node.get("type", ""))
-            node_notes = str(node.get("notes", "")).strip()
-            previous_agent_profile = self._agent_profile
-            previous_route_role_overrides = dict(self._workflow_route_role_overrides)
-            effective_agent_profile = self._workflow_node_agent_profile(node)
-            node_route_role_overrides = self._workflow_node_route_role_overrides(node)
-            self._append_actor_log(
-                log_path,
-                "ORCHESTRATOR",
-                f"Workflow node start: {node_id} ({node_type})",
-            )
-            if node_notes:
-                self._append_actor_log(
-                    log_path,
-                    "ORCHESTRATOR",
-                    f"Workflow node note: {node_notes}",
-                )
-            if effective_agent_profile != previous_agent_profile:
-                self._append_actor_log(
-                    log_path,
-                    "ORCHESTRATOR",
-                    f"Workflow node agent profile override: {previous_agent_profile} -> {effective_agent_profile}",
-                )
-            self._agent_profile = effective_agent_profile
-            self._workflow_route_role_overrides = node_route_role_overrides
-            if node_route_role_overrides:
-                binding_items = ", ".join(
-                    f"{route_name}->{role_code}"
-                    for route_name, role_code in sorted(node_route_role_overrides.items())
-                )
-                self._append_actor_log(
-                    log_path,
-                    "ORCHESTRATOR",
-                    f"Workflow node role binding: {binding_items}",
-                )
-
-            executor = self._resolve_workflow_node_executor(node_type)
-            if executor is None:
-                self._agent_profile = previous_agent_profile
-                self._workflow_route_role_overrides = previous_route_role_overrides
-                raise CommandExecutionError(f"Unsupported workflow node type: {node_type}")
-            node_run: NodeRunRecord | None = None
-            node_event = "success"
-            node_status = "success"
-            node_error_message: str | None = None
-            node_message = ""
-            node_exception: Exception | None = None
-            try:
-                node_run = self._start_node_run(job, workflow, node)
-                result = executor(
-                    job=job,
-                    repository_path=repository_path,
-                    node=node,
-                    context=context,
-                    log_path=log_path,
-                )
-                normalized_result = self._normalize_workflow_node_result(result)
-                node_event = normalized_result["event"]
-                node_status = normalized_result["status"]
-                node_error_message = normalized_result.get("error_message")
-                node_message = normalized_result.get("message", "")
-            except Exception as error:
-                node_event = "failure"
-                node_status = "failed"
-                node_error_message = str(error)
-                node_exception = error
-            finally:
-                self._agent_profile = previous_agent_profile
-                self._workflow_route_role_overrides = previous_route_role_overrides
-            if node_run is not None:
-                self._finish_node_run(
-                    node_run,
-                    status=node_status,
-                    error_message=node_error_message,
-                )
-
-            if node_message:
-                self._append_actor_log(log_path, "ORCHESTRATOR", node_message)
-
-            context["last_node_result"] = {
-                "node_id": node_id,
-                "node_type": node_type,
-                "node_title": str(node.get("title", "")).strip(),
-                "event": node_event,
-                "status": node_status,
-                "error_message": node_error_message or "",
-            }
-            self._record_workflow_node_result(
-                context=context,
-                node=node,
-                node_run=node_run,
-                event=node_event,
-                status=node_status,
-                error_message=node_error_message,
-                route_role_overrides=node_route_role_overrides,
-            )
-
-            if node_status == "success" and node_type not in WORKFLOW_NODE_SKIP_AUTO_COMMIT:
-                self._commit_markdown_changes_after_stage(job, repository_path, node_type, log_path)
-
-            next_node_id = self._resolve_next_workflow_node_id(
-                edges_by_source=edges_by_source,
-                node_id=node_id,
-                event=node_event,
-            )
-            if next_node_id:
-                self._append_actor_log(
-                    log_path,
-                    "ORCHESTRATOR",
-                    f"Workflow edge selected: {node_id} --{node_event}--> {next_node_id}",
-                )
-                current_node_id = next_node_id
-                continue
-
-            if node_event == "failure":
-                if node_exception is not None:
-                    raise node_exception
-                raise CommandExecutionError(
-                    f"Workflow node {node_id} produced failure event without failure edge."
-                )
-
-            current_node_id = ""
-
-        self._set_stage(job.job_id, JobStage.FINALIZE, log_path)
+        self._workflow_pipeline_runtime.run_workflow_pipeline(
+            job=job,
+            repository_path=repository_path,
+            workflow=workflow,
+            ordered_nodes=ordered_nodes,
+            log_path=log_path,
+            resume_state=resume_state,
+        )
 
     def _resolve_workflow_resume_state(
         self,
@@ -996,30 +770,12 @@ class Orchestrator:
         ordered_nodes: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
         """Resolve whether the current attempt should resume from a failed node."""
-
-        improvement_runtime = self._read_improvement_runtime_context(
-            build_workflow_artifact_paths(repository_path)
-        )
-        resume_state = compute_workflow_resume_state(
-            workflow_id=str(workflow.get("workflow_id", "")).strip(),
+        return self._workflow_resolution_runtime.resolve_workflow_resume_state(
+            job=job,
+            repository_path=repository_path,
+            workflow=workflow,
             ordered_nodes=ordered_nodes,
-            node_runs=self.store.list_node_runs(job.job_id),
-            current_attempt=max(1, int(job.attempt or 1)),
-            strategy=str(improvement_runtime.get("strategy", "")).strip(),
-            scope_restriction=str(improvement_runtime.get("scope_restriction", "")).strip(),
-            manual_mode=str(job.manual_resume_mode or "").strip(),
-            manual_node_id=str(job.manual_resume_node_id or "").strip(),
-            manual_note=str(job.manual_resume_note or "").strip(),
         )
-        if str(job.manual_resume_mode or "").strip():
-            self.store.update_job(
-                job.job_id,
-                manual_resume_mode="",
-                manual_resume_node_id="",
-                manual_resume_requested_at=None,
-                manual_resume_note="",
-            )
-        return resume_state
 
     def _resolve_workflow_node_executor(
         self,
@@ -1031,7 +787,7 @@ class Orchestrator:
         handler = getattr(self, handler_name, None)
         if callable(handler):
             return handler
-        return None
+        return self._workflow_node_runtime.resolve(node_type)
 
     def _workflow_node_agent_profile(self, node: Dict[str, Any]) -> str:
         """Return the effective agent profile for one workflow node."""
@@ -1080,119 +836,6 @@ class Orchestrator:
                 overrides[route_name] = resolved.role_code
         return overrides
 
-    def _start_node_run(
-        self,
-        job: JobRecord,
-        workflow: Dict[str, Any],
-        node: Dict[str, Any],
-    ) -> NodeRunRecord:
-        """Persist one workflow node start event."""
-
-        node_run = NodeRunRecord(
-            node_run_id=uuid4().hex,
-            job_id=job.job_id,
-            workflow_id=str(workflow.get("workflow_id", "")).strip(),
-            node_id=str(node.get("id", "")).strip(),
-            node_type=str(node.get("type", "")).strip(),
-            node_title=str(node.get("title", "")).strip(),
-            status="running",
-            attempt=max(1, int(job.attempt or 0)),
-            started_at=utc_now_iso(),
-            agent_profile=self._agent_profile,
-        )
-        self.store.upsert_node_run(node_run)
-        return node_run
-
-    def _finish_node_run(
-        self,
-        node_run: NodeRunRecord,
-        *,
-        status: str,
-        error_message: str | None = None,
-    ) -> None:
-        """Persist one workflow node completion event."""
-
-        updated = replace(
-            node_run,
-            status=status,
-            finished_at=utc_now_iso(),
-            error_message=error_message,
-        )
-        self.store.upsert_node_run(updated)
-
-    @staticmethod
-    def _build_workflow_runtime_maps(
-        workflow: Dict[str, Any],
-        ordered_nodes: List[Dict[str, Any]],
-    ) -> tuple[Dict[str, Dict[str, Any]], Dict[str, List[Dict[str, str]]]]:
-        """Build runtime node/edge maps while preserving declared edge order."""
-
-        raw_nodes = workflow.get("nodes", [])
-        nodes_by_id: Dict[str, Dict[str, Any]] = {}
-        source_nodes = raw_nodes if isinstance(raw_nodes, list) and raw_nodes else ordered_nodes
-        for node in source_nodes:
-            if not isinstance(node, dict):
-                continue
-            node_id = str(node.get("id", "")).strip()
-            if node_id:
-                nodes_by_id[node_id] = node
-
-        edges_by_source: Dict[str, List[Dict[str, str]]] = {}
-        raw_edges = workflow.get("edges", [])
-        if isinstance(raw_edges, list):
-            for edge in raw_edges:
-                if not isinstance(edge, dict):
-                    continue
-                src = str(edge.get("from", "")).strip()
-                dst = str(edge.get("to", "")).strip()
-                event = str(edge.get("on", "success")).strip().lower() or "success"
-                if not src or not dst:
-                    continue
-                edges_by_source.setdefault(src, []).append({"to": dst, "on": event})
-
-        return nodes_by_id, edges_by_source
-
-    @staticmethod
-    def _normalize_workflow_node_result(result: Any) -> Dict[str, str]:
-        """Normalize handler return into one workflow event/status payload."""
-
-        if result is None:
-            return {"event": "success", "status": "success", "message": "", "error_message": ""}
-        if isinstance(result, str):
-            event = result.strip().lower() or "success"
-            return {"event": event, "status": "success", "message": "", "error_message": ""}
-        if isinstance(result, dict):
-            event = str(result.get("event", "success")).strip().lower() or "success"
-            status = str(result.get("status", "success")).strip().lower() or "success"
-            message = str(result.get("message", "")).strip()
-            error_message = str(result.get("error_message", "")).strip()
-            return {
-                "event": event,
-                "status": status,
-                "message": message,
-                "error_message": error_message,
-            }
-        return {"event": "success", "status": "success", "message": "", "error_message": ""}
-
-    @staticmethod
-    def _resolve_next_workflow_node_id(
-        *,
-        edges_by_source: Dict[str, List[Dict[str, str]]],
-        node_id: str,
-        event: str,
-    ) -> str:
-        """Return the next node id for one outcome event with always-edge fallback."""
-
-        outgoing = edges_by_source.get(node_id, [])
-        normalized_event = str(event or "success").strip().lower() or "success"
-        for edge in outgoing:
-            if str(edge.get("on", "")).strip().lower() == normalized_event:
-                return str(edge.get("to", "")).strip()
-        for edge in outgoing:
-            if str(edge.get("on", "")).strip().lower() == "always":
-                return str(edge.get("to", "")).strip()
-        return ""
-
     def _workflow_context_issue(self, context: Dict[str, Any]) -> IssueDetails:
         issue = context.get("issue")
         if not isinstance(issue, IssueDetails):
@@ -1205,453 +848,26 @@ class Orchestrator:
             raise CommandExecutionError("Workflow requires paths context before AI/test/git stages.")
         return paths
 
-    def _record_workflow_node_result(
-        self,
-        *,
-        context: Dict[str, Any],
-        node: Dict[str, Any],
-        node_run: NodeRunRecord | None,
-        event: str,
-        status: str,
-        error_message: str | None,
-        route_role_overrides: Optional[Dict[str, str]] = None,
-    ) -> None:
-        """Persist one normalized node result into workflow context."""
-
-        results = context.setdefault("results", {})
-        if not isinstance(results, dict):
-            results = {}
-            context["results"] = results
-
-        artifact_info = self._workflow_result_artifact_info(context)
-        result_payload = {
-            "node_id": str(node.get("id", "")).strip(),
-            "node_type": str(node.get("type", "")).strip(),
-            "node_title": str(node.get("title", "")).strip(),
-            "event": str(event or "success").strip().lower() or "success",
-            "status": str(status or "success").strip().lower() or "success",
-            "error_message": str(error_message or "").strip(),
-            "attempt": int(getattr(node_run, "attempt", 0) or 0),
-            "started_at": str(getattr(node_run, "started_at", "") or ""),
-            "finished_at": str(getattr(node_run, "finished_at", "") or ""),
-            "agent_profile": str(getattr(node_run, "agent_profile", self._agent_profile) or self._agent_profile),
-            "role_code": str(node.get("role_code", "")).strip(),
-            "role_preset_id": str(node.get("role_preset_id", "")).strip(),
-            "route_role_overrides": dict(route_role_overrides or {}),
-            "artifact_keys": artifact_info["keys"],
-            "artifacts": artifact_info["paths"],
-        }
-        results[result_payload["node_id"]] = result_payload
-
-    @staticmethod
-    def _workflow_result_artifact_info(context: Dict[str, Any]) -> Dict[str, List[str]]:
-        """Return currently available artifact keys and paths for workflow results."""
-
-        paths = context.get("paths")
-        if not isinstance(paths, dict):
-            return {"keys": [], "paths": []}
-
-        artifact_keys: List[str] = []
-        artifact_paths: List[str] = []
-        for key, raw_path in paths.items():
-            if not isinstance(raw_path, Path) or not raw_path.exists():
-                continue
-            artifact_keys.append(str(key))
-            artifact_paths.append(str(raw_path))
-        artifact_keys.sort()
-        artifact_paths.sort()
-        return {"keys": artifact_keys, "paths": artifact_paths}
-
-    def _workflow_node_read_issue(
-        self,
-        *,
-        job: JobRecord,
-        repository_path: Path,
-        node: Dict[str, Any],
-        context: Dict[str, Any],
-        log_path: Path,
-    ) -> None:
-        context["issue"] = self._stage_read_issue(job, repository_path, log_path)
-
-    def _workflow_node_if_label_match(
-        self,
-        *,
-        job: JobRecord,
-        repository_path: Path,
-        node: Dict[str, Any],
-        context: Dict[str, Any],
-        log_path: Path,
-    ) -> Dict[str, str]:
-        issue = self._workflow_context_issue(context)
-        raw_match_labels = str(node.get("match_labels", "")).strip()
-        requested_labels = [item.strip().lower() for item in raw_match_labels.split(",") if item.strip()]
-        if not requested_labels:
-            raise CommandExecutionError("if_label_match requires match_labels metadata.")
-
-        match_mode = str(node.get("match_mode", "any")).strip().lower() or "any"
-        issue_labels = {label.strip().lower() for label in issue.labels if str(label).strip()}
-        matched = False
-        if match_mode == "all":
-            matched = all(label in issue_labels for label in requested_labels)
-        elif match_mode == "none":
-            matched = all(label not in issue_labels for label in requested_labels)
-        else:
-            matched = any(label in issue_labels for label in requested_labels)
-
-        result_event = "success" if matched else "failure"
-        return {
-            "event": result_event,
-            "status": "success",
-            "message": (
-                f"if_label_match evaluated labels={sorted(issue_labels)} "
-                f"against required={requested_labels} mode={match_mode} -> {result_event}"
-            ),
-        }
-
-    def _workflow_node_loop_until_pass(
-        self,
-        *,
-        job: JobRecord,
-        repository_path: Path,
-        node: Dict[str, Any],
-        context: Dict[str, Any],
-        log_path: Path,
-    ) -> Dict[str, str]:
-        last_result = context.get("last_node_result")
-        if not isinstance(last_result, dict):
-            raise CommandExecutionError("loop_until_pass requires previous node result context.")
-
-        last_event = str(last_result.get("event", "success")).strip().lower() or "success"
-        loop_key = str(node.get("id", "")).strip() or str(node.get("title", "")).strip() or "loop"
-        raw_limit = node.get("loop_max_iterations", 3)
-        try:
-            max_iterations = int(raw_limit or 3)
-        except (TypeError, ValueError) as error:
-            raise CommandExecutionError("loop_until_pass requires integer loop_max_iterations.") from error
-        max_iterations = max(1, min(10, max_iterations))
-
-        loop_counters = context.setdefault("loop_counters", {})
-        if not isinstance(loop_counters, dict):
-            loop_counters = {}
-            context["loop_counters"] = loop_counters
-
-        if last_event == "success":
-            loop_counters[loop_key] = 0
-            return {
-                "event": "success",
-                "status": "success",
-                "message": f"loop_until_pass exit: previous node succeeded, loop={loop_key}",
-            }
-
-        current_count = int(loop_counters.get(loop_key, 0) or 0) + 1
-        loop_counters[loop_key] = current_count
-        if current_count <= max_iterations:
-            return {
-                "event": "failure",
-                "status": "success",
-                "message": f"loop_until_pass retry {current_count}/{max_iterations} for loop={loop_key}",
-            }
-
-        raise CommandExecutionError(
-            f"loop_until_pass exceeded max iterations ({max_iterations}) for loop={loop_key}"
-        )
-
-    def _workflow_node_write_spec(
-        self,
-        *,
-        job: JobRecord,
-        repository_path: Path,
-        node: Dict[str, Any],
-        context: Dict[str, Any],
-        log_path: Path,
-    ) -> None:
-        issue = self._workflow_context_issue(context)
-        context["paths"] = self._stage_write_spec(job, repository_path, issue, log_path)
-
-    def _workflow_node_gemini_plan(
-        self,
-        *,
-        job: JobRecord,
-        repository_path: Path,
-        node: Dict[str, Any],
-        context: Dict[str, Any],
-        log_path: Path,
-    ) -> None:
-        paths = self._workflow_context_paths(context)
-        node_title = str(node.get("title", "")).strip().lower()
-        requested_mode = str(node.get("planning_mode", "")).strip().lower()
-        planning_mode = "general"
-        if requested_mode in {"general", "dev_planning", "big_picture"}:
-            planning_mode = requested_mode
-        elif "개발 기획" in node_title or "development" in node_title:
-            planning_mode = "dev_planning"
-        elif "큰틀" in node_title or "big picture" in node_title:
-            planning_mode = "big_picture"
-        self._stage_plan_with_gemini(
-            job,
-            repository_path,
-            paths,
-            log_path,
-            planning_mode=planning_mode,
-        )
-        self._snapshot_plan_variant(repository_path, paths, planning_mode, log_path)
-
-    def _workflow_node_idea_to_product_brief(self, *, job: JobRecord, repository_path: Path, node: Dict[str, Any], context: Dict[str, Any], log_path: Path) -> None:
-        self._stage_idea_to_product_brief(job, repository_path, self._workflow_context_paths(context), log_path)
-
-    def _workflow_node_generate_user_flows(self, *, job: JobRecord, repository_path: Path, node: Dict[str, Any], context: Dict[str, Any], log_path: Path) -> None:
-        self._stage_generate_user_flows(job, repository_path, self._workflow_context_paths(context), log_path)
-
-    def _workflow_node_define_mvp_scope(self, *, job: JobRecord, repository_path: Path, node: Dict[str, Any], context: Dict[str, Any], log_path: Path) -> None:
-        self._stage_define_mvp_scope(job, repository_path, self._workflow_context_paths(context), log_path)
-
-    def _workflow_node_architecture_planning(self, *, job: JobRecord, repository_path: Path, node: Dict[str, Any], context: Dict[str, Any], log_path: Path) -> None:
-        self._stage_architecture_planning(job, repository_path, self._workflow_context_paths(context), log_path)
-
-    def _workflow_node_project_scaffolding(self, *, job: JobRecord, repository_path: Path, node: Dict[str, Any], context: Dict[str, Any], log_path: Path) -> None:
-        self._stage_project_scaffolding(job, repository_path, self._workflow_context_paths(context), log_path)
-
-    def _workflow_node_designer_task(self, *, job: JobRecord, repository_path: Path, node: Dict[str, Any], context: Dict[str, Any], log_path: Path) -> None:
-        paths = self._workflow_context_paths(context)
-        if self._is_design_system_locked(repository_path, paths):
-            self._set_stage(job.job_id, JobStage.DESIGN_WITH_CODEX, log_path)
-            self._append_actor_log(
-                log_path,
-                "ORCHESTRATOR",
-                "designer_task skipped by decision lock (_docs/DECISIONS.json).",
-            )
-            return
-        self._stage_design_with_codex(job, repository_path, paths, log_path)
-        self._lock_design_system_decision(repository_path, paths, log_path)
-
-    def _workflow_node_publisher_task(self, *, job: JobRecord, repository_path: Path, node: Dict[str, Any], context: Dict[str, Any], log_path: Path) -> None:
-        self._stage_publish_with_codex(job, repository_path, self._workflow_context_paths(context), log_path)
-
-    def _workflow_node_copywriter_task(self, *, job: JobRecord, repository_path: Path, node: Dict[str, Any], context: Dict[str, Any], log_path: Path) -> None:
-        self._stage_copywriter_with_codex(job, repository_path, self._workflow_context_paths(context), log_path)
-
-    def _workflow_node_documentation_task(self, *, job: JobRecord, repository_path: Path, node: Dict[str, Any], context: Dict[str, Any], log_path: Path) -> None:
-        self._stage_documentation_with_claude(job, repository_path, self._workflow_context_paths(context), log_path)
-
-    def _workflow_node_codex_implement(self, *, job: JobRecord, repository_path: Path, node: Dict[str, Any], context: Dict[str, Any], log_path: Path) -> None:
-        self._stage_implement_with_codex(job, repository_path, self._workflow_context_paths(context), log_path)
-
-    def _workflow_node_code_change_summary(self, *, job: JobRecord, repository_path: Path, node: Dict[str, Any], context: Dict[str, Any], log_path: Path) -> None:
-        self._workflow_context_paths(context)
-        self._stage_summarize_code_changes(job, repository_path, log_path)
-
-    def _workflow_node_test_after_implement(self, *, job: JobRecord, repository_path: Path, node: Dict[str, Any], context: Dict[str, Any], log_path: Path) -> None:
-        paths = self._workflow_context_paths(context)
-        app_type = self._resolve_app_type(repository_path, paths)
-        self._run_test_gate_by_policy(
-            job=job,
-            repository_path=repository_path,
-            paths=paths,
-            log_path=log_path,
-            stage=JobStage.TEST_AFTER_IMPLEMENT,
-            gate_label=f"after_implement_{app_type}",
-            app_type=app_type,
-        )
-
-    def _workflow_node_tester_task(self, *, job: JobRecord, repository_path: Path, node: Dict[str, Any], context: Dict[str, Any], log_path: Path) -> None:
-        paths = self._workflow_context_paths(context)
-        app_type = self._resolve_app_type(repository_path, paths)
-        self._run_test_gate_by_policy(
-            job=job,
-            repository_path=repository_path,
-            paths=paths,
-            log_path=log_path,
-            stage=JobStage.TEST_AFTER_IMPLEMENT,
-            gate_label=f"tester_task_{app_type}",
-            app_type=app_type,
-        )
-
-    def _workflow_node_commit_implement(self, *, job: JobRecord, repository_path: Path, node: Dict[str, Any], context: Dict[str, Any], log_path: Path) -> None:
-        self._workflow_context_paths(context)
-        self._stage_commit(job, repository_path, JobStage.COMMIT_IMPLEMENT, log_path, "feat")
-
-    def _workflow_node_gemini_review(self, *, job: JobRecord, repository_path: Path, node: Dict[str, Any], context: Dict[str, Any], log_path: Path) -> None:
-        self._stage_review_with_gemini(job, repository_path, self._workflow_context_paths(context), log_path)
-
-    def _workflow_node_product_review(self, *, job: JobRecord, repository_path: Path, node: Dict[str, Any], context: Dict[str, Any], log_path: Path) -> None:
-        self._stage_product_review(job, repository_path, self._workflow_context_paths(context), log_path)
-
-    def _workflow_node_improvement_stage(self, *, job: JobRecord, repository_path: Path, node: Dict[str, Any], context: Dict[str, Any], log_path: Path) -> None:
-        self._stage_improvement_stage(job, repository_path, self._workflow_context_paths(context), log_path)
-
-    def _workflow_node_codex_fix(self, *, job: JobRecord, repository_path: Path, node: Dict[str, Any], context: Dict[str, Any], log_path: Path) -> None:
-        self._stage_fix_with_codex(job, repository_path, self._workflow_context_paths(context), log_path)
-
-    def _workflow_node_coder_fix_from_test_report(self, *, job: JobRecord, repository_path: Path, node: Dict[str, Any], context: Dict[str, Any], log_path: Path) -> None:
-        self._stage_fix_with_codex(job, repository_path, self._workflow_context_paths(context), log_path)
-
-    def _workflow_node_test_after_fix(self, *, job: JobRecord, repository_path: Path, node: Dict[str, Any], context: Dict[str, Any], log_path: Path) -> None:
-        paths = self._workflow_context_paths(context)
-        app_type = self._resolve_app_type(repository_path, paths)
-        self._run_test_gate_by_policy(
-            job=job,
-            repository_path=repository_path,
-            paths=paths,
-            log_path=log_path,
-            stage=JobStage.TEST_AFTER_FIX,
-            gate_label=f"after_fix_{app_type}",
-            app_type=app_type,
-        )
-
-    def _workflow_node_tester_run_e2e(self, *, job: JobRecord, repository_path: Path, node: Dict[str, Any], context: Dict[str, Any], log_path: Path) -> None:
-        paths = self._workflow_context_paths(context)
-        app_type = self._resolve_app_type(repository_path, paths)
-        if app_type == "web":
-            self._run_test_hard_gate(
-                job=job,
-                repository_path=repository_path,
-                paths=paths,
-                log_path=log_path,
-                stage=JobStage.TEST_AFTER_FIX,
-                gate_label="tester_run_e2e_web",
-            )
-            return
-        self._append_actor_log(
-            log_path,
-            "ORCHESTRATOR",
-            f"tester_run_e2e routed for app_type={app_type}. Running non-web test gate by policy.",
-        )
-        self._run_test_gate_by_policy(
-            job=job,
-            repository_path=repository_path,
-            paths=paths,
-            log_path=log_path,
-            stage=JobStage.TEST_AFTER_FIX,
-            gate_label=f"tester_nonweb_{app_type}",
-            app_type=app_type,
-        )
-
-    def _workflow_node_ux_e2e_review(self, *, job: JobRecord, repository_path: Path, node: Dict[str, Any], context: Dict[str, Any], log_path: Path) -> None:
-        paths = self._workflow_context_paths(context)
-        app_type = self._resolve_app_type(repository_path, paths)
-        if app_type == "web":
-            self._stage_ux_e2e_review(job, repository_path, paths, log_path)
-            return
-        self._stage_skip_ux_review_for_non_web(job, repository_path, paths, log_path, app_type=app_type)
-
-    def _workflow_node_test_after_fix_final(self, *, job: JobRecord, repository_path: Path, node: Dict[str, Any], context: Dict[str, Any], log_path: Path) -> None:
-        paths = self._workflow_context_paths(context)
-        app_type = self._resolve_app_type(repository_path, paths)
-        self._run_test_gate_by_policy(
-            job=job,
-            repository_path=repository_path,
-            paths=paths,
-            log_path=log_path,
-            stage=JobStage.TEST_AFTER_FIX,
-            gate_label=f"after_fix_final_{app_type}",
-            app_type=app_type,
-        )
-
-    def _workflow_node_tester_retest_e2e(self, *, job: JobRecord, repository_path: Path, node: Dict[str, Any], context: Dict[str, Any], log_path: Path) -> None:
-        paths = self._workflow_context_paths(context)
-        app_type = self._resolve_app_type(repository_path, paths)
-        if app_type == "web":
-            self._run_test_hard_gate(
-                job=job,
-                repository_path=repository_path,
-                paths=paths,
-                log_path=log_path,
-                stage=JobStage.TEST_AFTER_FIX,
-                gate_label="tester_retest_e2e_web",
-            )
-            return
-        self._run_test_gate_by_policy(
-            job=job,
-            repository_path=repository_path,
-            paths=paths,
-            log_path=log_path,
-            stage=JobStage.TEST_AFTER_FIX,
-            gate_label=f"tester_retest_nonweb_{app_type}",
-            app_type=app_type,
-        )
-
-    def _workflow_node_commit_fix(self, *, job: JobRecord, repository_path: Path, node: Dict[str, Any], context: Dict[str, Any], log_path: Path) -> None:
-        self._workflow_context_paths(context)
-        self._stage_commit(job, repository_path, JobStage.COMMIT_FIX, log_path, "fix")
-
-    def _workflow_node_push_branch(self, *, job: JobRecord, repository_path: Path, node: Dict[str, Any], context: Dict[str, Any], log_path: Path) -> None:
-        self._workflow_context_paths(context)
-        self._stage_push_branch(job, repository_path, log_path)
-
-    def _workflow_node_create_pr(self, *, job: JobRecord, repository_path: Path, node: Dict[str, Any], context: Dict[str, Any], log_path: Path) -> None:
-        self._stage_create_pr(job, repository_path, self._workflow_context_paths(context), log_path)
-
     def _load_active_workflow(self, job: JobRecord, log_path: Path) -> Optional[Dict[str, Any]]:
         """Resolve and load one workflow config; fallback to fixed pipeline on any error."""
-
-        workflow_path = Path.cwd() / "config" / "workflows.json"
-        apps_path = Path.cwd() / "config" / "apps.json"
-        try:
-            default_id, workflows_by_id = load_workflow_catalog(workflow_path)
-            if not default_id or not workflows_by_id:
-                return None
-            selection = resolve_workflow_selection(
-                requested_workflow_id=job.workflow_id,
-                app_code=job.app_code,
-                repository=job.repository,
-                apps_path=apps_path,
-                workflows_path=workflow_path,
-            )
-            selected = workflows_by_id.get(selection.workflow_id)
-            if selection.warning:
-                self._append_actor_log(
-                    log_path,
-                    "ORCHESTRATOR",
-                    f"Workflow resolution warning: {selection.warning}",
-                )
-            if selected is None and selection.workflow_id != default_id:
-                self._append_actor_log(
-                    log_path,
-                    "ORCHESTRATOR",
-                    f"Resolved workflow '{selection.workflow_id}' missing. Falling back to default '{default_id}'.",
-                )
-                selected = workflows_by_id.get(default_id)
-            if not isinstance(selected, dict):
-                return None
-            ok, errors = validate_workflow(selected)
-            if not ok:
-                self._append_actor_log(
-                    log_path,
-                    "ORCHESTRATOR",
-                    "Workflow validation failed; fallback to fixed pipeline: "
-                    + "; ".join(errors),
-                )
-                return None
-            self._append_actor_log(
-                log_path,
-                "ORCHESTRATOR",
-                f"Workflow resolved: source={selection.source}, workflow_id={selected.get('workflow_id', default_id)}",
-            )
-            return selected
-        except Exception as error:  # noqa: BLE001 - fallback is intentional
-            self._append_actor_log(
-                log_path,
-                "ORCHESTRATOR",
-                f"Workflow load failed; fallback to fixed pipeline: {error}",
-            )
-            return None
+        return self._workflow_resolution_runtime.load_active_workflow(
+            job=job,
+            log_path=log_path,
+        )
 
     @staticmethod
     def _linearize_workflow_nodes(workflow: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Return linear execution order from entry node over success/always edges."""
-        return linearize_workflow_nodes(workflow)
+        return WorkflowResolutionRuntime.linearize_workflow_nodes(workflow)
 
     @staticmethod
     def _job_execution_repository(job: JobRecord) -> str:
         """Return repository used for clone/build/push for one job."""
-
-        source_repository = str(job.source_repository or "").strip()
-        return source_repository or str(job.repository or "").strip()
+        return WorkspaceRepositoryRuntime.job_execution_repository(job)
 
     def _job_workspace_path(self, job: JobRecord) -> Path:
         """Resolve workspace path using execution repository."""
-
-        return self.settings.repository_workspace_path(self._job_execution_repository(job), job.app_code)
+        return self._workspace_repository_runtime.job_workspace_path(job)
 
     def _issue_reference_line(self, job: JobRecord) -> str:
         """Return PR-safe issue reference text.
@@ -1660,207 +876,10 @@ class Orchestrator:
         `Closes #<n>` would target the wrong repository issue. In that case we
         keep a full tracking URL instead.
         """
-
-        if self._job_execution_repository(job) != str(job.repository or "").strip():
-            return f"Tracking issue: {job.issue_url}"
-        return f"Closes #{job.issue_number}"
+        return self._workspace_repository_runtime.issue_reference_line(job)
 
     def _stage_prepare_repo(self, job: JobRecord, log_path: Path) -> Path:
-        self._set_stage(job.job_id, JobStage.PREPARE_REPO, log_path)
-        repository_path = self._job_workspace_path(job)
-        execution_repository = self._job_execution_repository(job)
-
-        if not execution_repository:
-            raise CommandExecutionError(
-                "No execution repository is configured for this job. "
-                "Set app.source_repository or job.source_repository before running."
-            )
-
-        if not repository_path.exists():
-            self._clone_repository_to_workspace(execution_repository, repository_path, log_path)
-        elif not self._workspace_has_git_metadata(repository_path):
-            backup_path = self._backup_invalid_workspace(repository_path, log_path)
-            self._append_log(
-                log_path,
-                f"Workspace existed without git metadata. Backed up to {backup_path} and recloning.",
-            )
-            self._clone_repository_to_workspace(execution_repository, repository_path, log_path)
-        else:
-            current_origin = self._read_workspace_origin_repository(repository_path, log_path)
-            if current_origin and current_origin != execution_repository:
-                backup_path = self._backup_invalid_workspace(repository_path, log_path)
-                self._append_log(
-                    log_path,
-                    f"Workspace origin mismatch ({current_origin} != {execution_repository}). "
-                    f"Backed up to {backup_path} and recloning.",
-                )
-                self._clone_repository_to_workspace(execution_repository, repository_path, log_path)
-            else:
-                self._append_log(log_path, f"Repository already exists at {repository_path}")
-
-        self._run_shell(
-            command=f"git -C {shlex.quote(str(repository_path))} fetch origin",
-            cwd=repository_path,
-            log_path=log_path,
-            purpose="git fetch",
-        )
-
-        default_remote_ref = f"origin/{self.settings.default_branch}"
-        job_remote_ref = f"origin/{job.branch_name}"
-        remote_ref = default_remote_ref
-
-        # Why this matters:
-        # On retries (or re-processing the same job), the remote job branch may
-        # already contain earlier commits. If we always reset from default branch,
-        # push can fail with non-fast-forward. Using the remote job branch when it
-        # exists keeps history linear for this job branch.
-        if self._ref_exists(repository_path, job_remote_ref, log_path):
-            remote_ref = job_remote_ref
-
-        self._append_log(log_path, f"Branch base selected: {remote_ref}")
-        checkout_command = (
-            f"git -C {shlex.quote(str(repository_path))} checkout -B "
-            f"{shlex.quote(job.branch_name)} {shlex.quote(remote_ref)}"
-        )
-
-        try:
-            self._run_shell(
-                command=checkout_command,
-                cwd=repository_path,
-                log_path=log_path,
-                purpose="branch checkout",
-            )
-        except CommandExecutionError:
-            # Why we retry with fallback:
-            # Some repos might not expose the configured default branch remotely,
-            # especially in fresh forks. We still create a working local branch.
-            self._append_log(
-                log_path,
-                "Default branch checkout failed. Falling back to local branch creation.",
-            )
-            self._run_shell(
-                command=(
-                    f"git -C {shlex.quote(str(repository_path))} checkout -B "
-                    f"{shlex.quote(job.branch_name)}"
-                ),
-                cwd=repository_path,
-                log_path=log_path,
-                purpose="fallback branch checkout",
-            )
-
-        self._ensure_workspace_git_excludes(repository_path, log_path)
-        return repository_path
-
-    def _clone_repository_to_workspace(self, execution_repository: str, repository_path: Path, log_path: Path) -> None:
-        """Clone the configured execution repository into the job workspace."""
-
-        self._run_shell(
-            command=f"gh repo clone {shlex.quote(execution_repository)} {shlex.quote(str(repository_path))}",
-            cwd=self.settings.workspace_dir,
-            log_path=log_path,
-            purpose="repository clone",
-        )
-
-    @staticmethod
-    def _workspace_has_git_metadata(repository_path: Path) -> bool:
-        """Return True when the workspace already contains git metadata."""
-
-        git_path = repository_path / ".git"
-        return git_path.exists()
-
-    def _read_workspace_origin_repository(self, repository_path: Path, log_path: Path) -> str:
-        """Return normalized `owner/repo` from workspace origin remote if available."""
-
-        try:
-            result = self._run_shell(
-                command=f"git -C {shlex.quote(str(repository_path))} remote get-url origin",
-                cwd=repository_path,
-                log_path=log_path,
-                purpose="git remote origin",
-            )
-        except CommandExecutionError:
-            return ""
-        return self._normalize_repository_ref(str(result.stdout or "").strip())
-
-    @staticmethod
-    def _normalize_repository_ref(value: str) -> str:
-        """Normalize GitHub repository references to `owner/repo`."""
-
-        normalized = (value or "").strip()
-        if not normalized:
-            return ""
-        normalized = normalized.removesuffix(".git")
-        https_match = re.match(r"^https://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)$", normalized)
-        if https_match:
-            return f"{https_match.group('owner')}/{https_match.group('repo')}"
-        ssh_match = re.match(r"^git@github\.com:(?P<owner>[^/]+)/(?P<repo>[^/]+)$", normalized)
-        if ssh_match:
-            return f"{ssh_match.group('owner')}/{ssh_match.group('repo')}"
-        simple_match = re.match(r"^(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)$", normalized)
-        if simple_match:
-            return f"{simple_match.group('owner')}/{simple_match.group('repo')}"
-        return normalized
-
-    def _backup_invalid_workspace(self, repository_path: Path, log_path: Path) -> Path:
-        """Move aside a non-git workspace so clone can recreate it safely."""
-
-        parent = repository_path.parent
-        base_name = repository_path.name
-        timestamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
-        candidate = parent / f"{base_name}__invalid_{timestamp}"
-        suffix = 1
-        while candidate.exists():
-            suffix += 1
-            candidate = parent / f"{base_name}__invalid_{timestamp}_{suffix}"
-        shutil.move(str(repository_path), str(candidate))
-        self._append_log(log_path, f"Moved invalid workspace to backup path: {candidate}")
-        return candidate
-
-    def _ensure_workspace_git_excludes(self, repository_path: Path, log_path: Path) -> None:
-        """Apply one shared workspace ignore file to each cloned repository."""
-
-        shared_ignore = self.settings.workspace_dir / ".agenthub-global.gitignore"
-        patterns = [
-            "node_modules/",
-            "**/node_modules/",
-            ".venv/",
-            "**/.venv/",
-            "__pycache__/",
-            "**/__pycache__/",
-            "*.pyc",
-            ".pytest_cache/",
-            "**/.pytest_cache/",
-            ".mypy_cache/",
-            "**/.mypy_cache/",
-            ".next/",
-            "**/.next/",
-            ".turbo/",
-            "**/.turbo/",
-            "dist/",
-            "**/dist/",
-            "build/",
-            "**/build/",
-            ".DS_Store",
-            "*.log",
-        ]
-        desired = "\n".join(patterns).rstrip() + "\n"
-        current = ""
-        if shared_ignore.exists():
-            current = shared_ignore.read_text(encoding="utf-8", errors="replace")
-        if current != desired:
-            shared_ignore.parent.mkdir(parents=True, exist_ok=True)
-            shared_ignore.write_text(desired, encoding="utf-8")
-            self._append_log(log_path, f"Workspace shared ignore updated: {shared_ignore}")
-
-        self._run_shell(
-            command=(
-                f"git -C {shlex.quote(str(repository_path))} "
-                f"config --local core.excludesfile {shlex.quote(str(shared_ignore))}"
-            ),
-            cwd=repository_path,
-            log_path=log_path,
-            purpose="set workspace shared git excludes",
-        )
+        return self._workspace_repository_runtime.stage_prepare_repo(job, log_path)
 
     def _stage_read_issue(
         self,
@@ -2045,75 +1064,20 @@ class Orchestrator:
         required_evidence: List[str],
         fallback_writer: Callable[[], None],
     ) -> None:
-        """Run one markdown-generation stage with one refinement retry before fallback."""
-
-        retry_feedback = ""
-        max_rounds = 2
-        last_error: str | None = None
-        for round_index in range(1, max_rounds + 1):
-            prompt_path.write_text(prompt_builder(retry_feedback), encoding="utf-8")
-            if round_index > 1 and output_path.exists():
-                try:
-                    output_path.unlink()
-                except OSError:
-                    pass
-            try:
-                result = self.command_templates.run_template(
-                    template_name=self._template_for_route("planner"),
-                    variables={
-                        **self._build_template_variables(job, paths, prompt_path),
-                        "plan_path": str(output_path),
-                    },
-                    cwd=repository_path,
-                    log_writer=self._actor_log_writer(log_path, actor),
-                )
-                if result.stdout.strip() and not output_path.exists():
-                    output_path.write_text(result.stdout, encoding="utf-8")
-            except Exception as error:  # noqa: BLE001
-                last_error = str(error)
-                self._append_actor_log(
-                    log_path,
-                    "ORCHESTRATOR",
-                    f"{stage_name} AI call failed on round {round_index}, using fallback: {error}",
-                )
-                break
-
-            missing = self._missing_markdown_sections(
-                output_path,
-                required_sections,
-                required_evidence=required_evidence,
-            )
-            if not missing:
-                return
-            last_error = f"missing sections: {', '.join(missing)}"
-            if round_index >= max_rounds:
-                break
-            retry_feedback = (
-                "이전 출력이 계약을 충족하지 못했습니다.\n"
-                f"- 보완 필요 항목: {', '.join(missing)}\n"
-                f"- 문서에 반드시 다음 값을 정확히 포함: {', '.join(required_evidence)}"
-            )
-            self._append_actor_log(
-                log_path,
-                "ORCHESTRATOR",
-                f"{stage_name} refinement retry requested: {', '.join(missing)}",
-            )
-
-        fallback_writer()
-        self._ensure_markdown_stage_contract(
+        self._product_definition_runtime.run_markdown_generation_with_refinement(
+            job=job,
+            repository_path=repository_path,
+            paths=paths,
+            log_path=log_path,
             stage_name=stage_name,
-            path=output_path,
+            actor=actor,
+            output_path=output_path,
+            prompt_path=prompt_path,
+            prompt_builder=prompt_builder,
             required_sections=required_sections,
             required_evidence=required_evidence,
-            fallback_writer=None,
-            log_path=log_path,
+            fallback_writer=fallback_writer,
         )
-        if last_error:
-            self._append_actor_log(
-                log_path,
-                "ORCHESTRATOR",
-                f"{stage_name} fallback applied after AI refinement failure: {last_error}",
-            )
 
     def _stage_idea_to_product_brief(
         self,
@@ -2122,43 +1086,7 @@ class Orchestrator:
         paths: Dict[str, Path],
         log_path: Path,
     ) -> None:
-        """Create PRODUCT_BRIEF.md — AI-generated from spec context."""
-
-        self._set_stage(job.job_id, JobStage.IDEA_TO_PRODUCT_BRIEF, log_path)
-        product_brief_path = paths.get("product_brief", self._docs_file(repository_path, "PRODUCT_BRIEF.md"))
-        prompt_path = self._docs_file(repository_path, "PRODUCT_BRIEF_PROMPT.md")
-        required_sections = {
-            "context_anchor": ["context anchor", "job id", "issue title"],
-            "product_goal": ["product goal", "제품 목표", "goal"],
-            "problem_statement": ["problem statement", "문제 정의", "pain"],
-            "target_users": ["target users", "타겟 사용자", "사용자"],
-            "core_value": ["core value", "핵심 가치", "차별 가치"],
-            "scope_inputs": ["scope inputs", "in scope", "범위"],
-            "success_metrics": ["success metrics", "성공 지표", "지표"],
-            "non_goals": ["non-goals", "non goals", "비범위", "제외"],
-        }
-        required_evidence = [job.job_id, job.issue_title]
-        self._run_markdown_generation_with_refinement(
-            job=job,
-            repository_path=repository_path,
-            paths=paths,
-            log_path=log_path,
-            stage_name=JobStage.IDEA_TO_PRODUCT_BRIEF.value,
-            actor="PRODUCT_BRIEF",
-            output_path=product_brief_path,
-            prompt_path=prompt_path,
-            prompt_builder=lambda retry_feedback: build_product_brief_prompt(
-                spec_path=str(paths.get("spec", "")),
-                product_brief_path=str(product_brief_path),
-                job_id=job.job_id,
-                issue_title=job.issue_title,
-                retry_feedback=retry_feedback,
-            ),
-            required_sections=required_sections,
-            required_evidence=required_evidence,
-            fallback_writer=lambda: self._write_product_brief_fallback(job, paths, product_brief_path),
-        )
-        self._append_actor_log(log_path, "ORCHESTRATOR", f"PRODUCT_BRIEF.md ready: {product_brief_path}")
+        self._product_definition_runtime.stage_idea_to_product_brief(job, repository_path, paths, log_path)
 
     def _stage_generate_user_flows(
         self,
@@ -2167,41 +1095,7 @@ class Orchestrator:
         paths: Dict[str, Path],
         log_path: Path,
     ) -> None:
-        """Create USER_FLOWS.md — AI-generated from product brief."""
-
-        self._set_stage(job.job_id, JobStage.GENERATE_USER_FLOWS, log_path)
-        user_flows_path = paths.get("user_flows", self._docs_file(repository_path, "USER_FLOWS.md"))
-        product_brief_path = paths.get("product_brief", self._docs_file(repository_path, "PRODUCT_BRIEF.md"))
-        prompt_path = self._docs_file(repository_path, "USER_FLOWS_PROMPT.md")
-        required_sections = {
-            "context_anchor": ["context anchor", "job id", "issue title"],
-            "primary_flow": ["primary flow", "핵심 흐름", "user journey"],
-            "secondary_flows": ["secondary flows", "보조 흐름", "엣지"],
-            "ux_state_checklist": ["ux state checklist", "loading", "empty", "error", "상태"],
-            "entry_exit_points": ["entry/exit points", "entry", "exit", "진입", "종료"],
-        }
-        required_evidence = [job.job_id, job.issue_title]
-        self._run_markdown_generation_with_refinement(
-            job=job,
-            repository_path=repository_path,
-            paths=paths,
-            log_path=log_path,
-            stage_name=JobStage.GENERATE_USER_FLOWS.value,
-            actor="USER_FLOWS",
-            output_path=user_flows_path,
-            prompt_path=prompt_path,
-            prompt_builder=lambda retry_feedback: build_user_flows_prompt(
-                product_brief_path=str(product_brief_path),
-                user_flows_path=str(user_flows_path),
-                job_id=job.job_id,
-                issue_title=job.issue_title,
-                retry_feedback=retry_feedback,
-            ),
-            required_sections=required_sections,
-            required_evidence=required_evidence,
-            fallback_writer=lambda: self._write_user_flows_fallback(job, paths, user_flows_path),
-        )
-        self._append_actor_log(log_path, "ORCHESTRATOR", f"USER_FLOWS.md ready: {user_flows_path}")
+        self._product_definition_runtime.stage_generate_user_flows(job, repository_path, paths, log_path)
 
     def _stage_define_mvp_scope(
         self,
@@ -2210,43 +1104,7 @@ class Orchestrator:
         paths: Dict[str, Path],
         log_path: Path,
     ) -> None:
-        """Create MVP_SCOPE.md — AI-generated with in/out scope and acceptance gates."""
-
-        self._set_stage(job.job_id, JobStage.DEFINE_MVP_SCOPE, log_path)
-        mvp_scope_path = paths.get("mvp_scope", self._docs_file(repository_path, "MVP_SCOPE.md"))
-        product_brief_path = paths.get("product_brief", self._docs_file(repository_path, "PRODUCT_BRIEF.md"))
-        user_flows_path = paths.get("user_flows", self._docs_file(repository_path, "USER_FLOWS.md"))
-        prompt_path = self._docs_file(repository_path, "MVP_SCOPE_PROMPT.md")
-        required_sections = {
-            "context_anchor": ["context anchor", "job id", "issue title"],
-            "in_scope": ["in scope", "포함", "범위"],
-            "out_of_scope": ["out of scope", "비범위", "제외"],
-            "acceptance_gates": ["acceptance gate", "완료 조건", "게이트"],
-        }
-        required_evidence = [job.job_id, job.issue_title]
-        self._run_markdown_generation_with_refinement(
-            job=job,
-            repository_path=repository_path,
-            paths=paths,
-            log_path=log_path,
-            stage_name=JobStage.DEFINE_MVP_SCOPE.value,
-            actor="MVP_SCOPE",
-            output_path=mvp_scope_path,
-            prompt_path=prompt_path,
-            prompt_builder=lambda retry_feedback: build_mvp_scope_prompt(
-                product_brief_path=str(product_brief_path),
-                user_flows_path=str(user_flows_path),
-                spec_json_path=str(paths.get("spec_json", "")),
-                mvp_scope_path=str(mvp_scope_path),
-                job_id=job.job_id,
-                issue_title=job.issue_title,
-                retry_feedback=retry_feedback,
-            ),
-            required_sections=required_sections,
-            required_evidence=required_evidence,
-            fallback_writer=lambda: self._write_mvp_scope_fallback(job, paths, mvp_scope_path),
-        )
-        self._append_actor_log(log_path, "ORCHESTRATOR", f"MVP_SCOPE.md ready: {mvp_scope_path}")
+        self._product_definition_runtime.stage_define_mvp_scope(job, repository_path, paths, log_path)
 
     def _stage_architecture_planning(
         self,
@@ -2255,44 +1113,7 @@ class Orchestrator:
         paths: Dict[str, Path],
         log_path: Path,
     ) -> None:
-        """Create ARCHITECTURE_PLAN.md — AI-generated for implementation constraints."""
-
-        self._set_stage(job.job_id, JobStage.ARCHITECTURE_PLANNING, log_path)
-        architecture_plan_path = paths.get("architecture_plan", self._docs_file(repository_path, "ARCHITECTURE_PLAN.md"))
-        mvp_scope_path = paths.get("mvp_scope", self._docs_file(repository_path, "MVP_SCOPE.md"))
-        user_flows_path = paths.get("user_flows", self._docs_file(repository_path, "USER_FLOWS.md"))
-        prompt_path = self._docs_file(repository_path, "ARCHITECTURE_PLAN_PROMPT.md")
-        required_sections = {
-            "context_anchor": ["context anchor", "job id", "issue title"],
-            "layer_structure": ["layer structure", "레이어", "layer"],
-            "component_boundaries": ["component boundaries", "컴포넌트 경계", "boundary"],
-            "data_contracts": ["data contracts", "데이터 계약", "contract"],
-            "quality_gates": ["quality gates", "품질 게이트", "quality gate"],
-            "loop_safety_rules": ["loop safety", "루프 안전", "regression", "stagnation"],
-        }
-        required_evidence = [job.job_id, job.issue_title]
-        self._run_markdown_generation_with_refinement(
-            job=job,
-            repository_path=repository_path,
-            paths=paths,
-            log_path=log_path,
-            stage_name=JobStage.ARCHITECTURE_PLANNING.value,
-            actor="ARCHITECTURE",
-            output_path=architecture_plan_path,
-            prompt_path=prompt_path,
-            prompt_builder=lambda retry_feedback: build_architecture_plan_prompt(
-                mvp_scope_path=str(mvp_scope_path),
-                user_flows_path=str(user_flows_path),
-                architecture_plan_path=str(architecture_plan_path),
-                job_id=job.job_id,
-                issue_title=job.issue_title,
-                retry_feedback=retry_feedback,
-            ),
-            required_sections=required_sections,
-            required_evidence=required_evidence,
-            fallback_writer=lambda: self._write_architecture_plan_fallback(job, paths, architecture_plan_path),
-        )
-        self._append_actor_log(log_path, "ORCHESTRATOR", f"ARCHITECTURE_PLAN.md ready: {architecture_plan_path}")
+        self._product_definition_runtime.stage_architecture_planning(job, repository_path, paths, log_path)
 
     def _stage_project_scaffolding(
         self,
@@ -2301,73 +1122,7 @@ class Orchestrator:
         paths: Dict[str, Path],
         log_path: Path,
     ) -> None:
-        """Create explicit scaffold-plan artifacts before implementation."""
-
-        self._set_stage(job.job_id, JobStage.PROJECT_SCAFFOLDING, log_path)
-        scaffold_plan_path = paths.get("scaffold_plan", self._docs_file(repository_path, "SCAFFOLD_PLAN.md"))
-        bootstrap_report_path = paths.get("bootstrap_report", self._docs_file(repository_path, "BOOTSTRAP_REPORT.json"))
-        architecture_plan_path = paths.get("architecture_plan", self._docs_file(repository_path, "ARCHITECTURE_PLAN.md"))
-        mvp_scope_path = paths.get("mvp_scope", self._docs_file(repository_path, "MVP_SCOPE.md"))
-        spec_json_path = paths.get("spec_json", self._docs_file(repository_path, "SPEC.json"))
-
-        repo_context = repo_context_reader(repository_path)
-        bootstrap_report = self._build_bootstrap_report(
-            repository_path=repository_path,
-            spec_json_path=spec_json_path,
-            repo_context=repo_context,
-        )
-        bootstrap_report_path.write_text(
-            json.dumps(bootstrap_report, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-
-        prompt_path = self._docs_file(repository_path, "SCAFFOLD_PLAN_PROMPT.md")
-        prompt_path.write_text(
-            build_project_scaffolding_prompt(
-                architecture_plan_path=str(architecture_plan_path),
-                mvp_scope_path=str(mvp_scope_path),
-                spec_json_path=str(spec_json_path),
-                bootstrap_report_path=str(bootstrap_report_path),
-                scaffold_plan_path=str(scaffold_plan_path),
-            ),
-            encoding="utf-8",
-        )
-        template_vars = {
-            **self._build_template_variables(job, paths, prompt_path),
-            "plan_path": str(scaffold_plan_path),
-        }
-        try:
-            result = self.command_templates.run_template(
-                template_name=self._template_for_route("planner"),
-                variables=template_vars,
-                cwd=repository_path,
-                log_writer=self._actor_log_writer(log_path, "SCAFFOLD"),
-            )
-            if not scaffold_plan_path.exists() and result.stdout.strip():
-                scaffold_plan_path.write_text(result.stdout, encoding="utf-8")
-        except Exception as error:  # noqa: BLE001
-            self._append_actor_log(
-                log_path,
-                "ORCHESTRATOR",
-                f"SCAFFOLD_PLAN AI call failed, using template fallback: {error}",
-            )
-            self._write_project_scaffolding_fallback(bootstrap_report, scaffold_plan_path)
-        self._ensure_markdown_stage_contract(
-            stage_name=JobStage.PROJECT_SCAFFOLDING.value,
-            path=scaffold_plan_path,
-            required_sections={
-                "repository_state": ["repository state", "레포 상태", "repo state"],
-                "bootstrap_mode": ["bootstrap mode", "부트스트랩 모드", "mode"],
-                "target_structure": ["target structure", "목표 구조", "directory"],
-                "required_setup_commands": ["required setup commands", "초기 명령", "setup commands"],
-                "verification_checklist": ["verification checklist", "검증 체크리스트", "checklist"],
-            },
-            required_evidence=None,
-            fallback_writer=lambda: self._write_project_scaffolding_fallback(bootstrap_report, scaffold_plan_path),
-            log_path=log_path,
-        )
-        self._append_actor_log(log_path, "ORCHESTRATOR", f"SCAFFOLD_PLAN.md ready: {scaffold_plan_path}")
-        self._append_actor_log(log_path, "ORCHESTRATOR", f"BOOTSTRAP_REPORT.json ready: {bootstrap_report_path}")
+        self._product_definition_runtime.stage_project_scaffolding(job, repository_path, paths, log_path)
 
     @staticmethod
     def _build_bootstrap_report(
@@ -2376,88 +1131,11 @@ class Orchestrator:
         spec_json_path: Optional[Path],
         repo_context: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Summarize current repo bootstrap state for scaffold planning."""
-
-        top_level_entries = sorted(
-            path.name
-            for path in repository_path.iterdir()
-            if path.name != ".git"
-        ) if repository_path.exists() else []
-        non_docs_entries = [
-            item for item in top_level_entries
-            if item not in {"README.md", "_docs", ".github", ".gitignore"}
-        ]
-        has_runtime_files = any(
-            item in top_level_entries
-            for item in {
-                "package.json",
-                "pyproject.toml",
-                "requirements.txt",
-                "src",
-                "app",
-                "pages",
-                "components",
-                "android",
-                "ios",
-            }
+        return ProductDefinitionRuntime.build_bootstrap_report(
+            repository_path=repository_path,
+            spec_json_path=spec_json_path,
+            repo_context=repo_context,
         )
-        stack = list(repo_context.get("stack", [])) if isinstance(repo_context.get("stack"), list) else []
-        if not non_docs_entries and not stack and not has_runtime_files:
-            repository_state = "greenfield"
-            bootstrap_mode = "create"
-        elif stack or has_runtime_files:
-            repository_state = "existing"
-            bootstrap_mode = "extend"
-        else:
-            repository_state = "partial"
-            bootstrap_mode = "stabilize"
-
-        spec_payload: Dict[str, Any] = {}
-        if isinstance(spec_json_path, Path) and spec_json_path.exists():
-            try:
-                spec_payload = json.loads(spec_json_path.read_text(encoding="utf-8", errors="replace"))
-            except json.JSONDecodeError:
-                spec_payload = {}
-        app_type = str(spec_payload.get("app_type", "")).strip() or "unknown"
-
-        recommended_actions: List[str] = []
-        if bootstrap_mode == "create":
-            recommended_actions.extend(
-                [
-                    "앱 유형에 맞는 최소 실행 엔트리포인트를 생성한다.",
-                    "테스트/실행/문서 기본 파일을 함께 만든다.",
-                    "MVP 범위 밖 구조 재작성은 금지한다.",
-                ]
-            )
-        elif bootstrap_mode == "extend":
-            recommended_actions.extend(
-                [
-                    "기존 엔트리포인트와 빌드 체인을 유지한다.",
-                    "현재 구조를 최대한 재사용하면서 MVP 기능만 추가한다.",
-                    "누락된 테스트/문서만 최소 보강한다.",
-                ]
-            )
-        else:
-            recommended_actions.extend(
-                [
-                    "불완전한 기본 구조를 정리하고 단일 실행 경로를 만든다.",
-                    "중복/미사용 scaffold 조각을 정리한다.",
-                    "새로운 대규모 프레임워크 교체는 금지한다.",
-                ]
-            )
-
-        return {
-            "schema_version": "1.0",
-            "generated_at": utc_now_iso(),
-            "repository_state": repository_state,
-            "bootstrap_mode": bootstrap_mode,
-            "app_type": app_type,
-            "detected_stack": stack,
-            "repo_exists": bool(repo_context.get("exists")),
-            "top_level_entries": top_level_entries[:30],
-            "has_readme_excerpt": bool(repo_context.get("readme_excerpt", "")),
-            "recommended_actions": recommended_actions,
-        }
 
     def _ensure_markdown_stage_contract(
         self,
@@ -2469,36 +1147,13 @@ class Orchestrator:
         fallback_writer: Optional[Callable[[], None]],
         log_path: Path,
     ) -> None:
-        """Validate markdown contract for one stage and optionally recover via fallback."""
-
-        missing = self._missing_markdown_sections(
-            path,
-            required_sections,
+        self._product_definition_runtime.ensure_markdown_stage_contract(
+            stage_name=stage_name,
+            path=path,
+            required_sections=required_sections,
             required_evidence=required_evidence,
-        )
-        if not missing:
-            return
-        self._append_actor_log(
-            log_path,
-            "ORCHESTRATOR",
-            f"{stage_name} contract missing sections: {', '.join(missing)}",
-        )
-        if fallback_writer is not None:
-            fallback_writer()
-            missing = self._missing_markdown_sections(
-                path,
-                required_sections,
-                required_evidence=required_evidence,
-            )
-            if not missing:
-                self._append_actor_log(
-                    log_path,
-                    "ORCHESTRATOR",
-                    f"{stage_name} contract recovered by fallback writer.",
-                )
-                return
-        raise CommandExecutionError(
-            f"{stage_name} contract validation failed. Missing sections: {', '.join(missing)}"
+            fallback_writer=fallback_writer,
+            log_path=log_path,
         )
 
     @staticmethod
@@ -2508,98 +1163,18 @@ class Orchestrator:
         *,
         required_evidence: Optional[List[str]] = None,
     ) -> List[str]:
-        """Return missing section keys based on keyword presence checks."""
-
-        text = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
-        lowered = text.lower()
-        if not lowered.strip():
-            missing_items = list(required_sections.keys())
-            if required_evidence:
-                missing_items.append("source_evidence")
-            return missing_items
-        missing: List[str] = []
-        for section_key, keywords in required_sections.items():
-            matched = any(keyword.lower() in lowered for keyword in keywords if keyword.strip())
-            if not matched:
-                missing.append(section_key)
-        normalized_evidence = [term.strip().lower() for term in (required_evidence or []) if term and term.strip()]
-        if normalized_evidence and not all(term in lowered for term in normalized_evidence):
-            missing.append("source_evidence")
-        return missing
+        return ProductDefinitionRuntime.missing_markdown_sections(
+            path,
+            required_sections,
+            required_evidence=required_evidence,
+        )
 
     def _ensure_product_definition_ready(
         self,
         paths: Dict[str, Path],
         log_path: Path,
     ) -> None:
-        """Hard gate: block implementation when product-definition artifacts are weak."""
-
-        validations = [
-            (
-                "PRODUCT_BRIEF.md",
-                paths.get("product_brief"),
-                {
-                    "product_goal": ["product goal", "goal"],
-                    "target_users": ["target users", "사용자"],
-                    "success_metrics": ["success metrics", "지표"],
-                },
-            ),
-            (
-                "USER_FLOWS.md",
-                paths.get("user_flows"),
-                {
-                    "primary_flow": ["primary flow", "핵심 흐름"],
-                    "ux_state_checklist": ["loading", "empty", "error", "상태"],
-                },
-            ),
-            (
-                "MVP_SCOPE.md",
-                paths.get("mvp_scope"),
-                {
-                    "in_scope": ["in scope", "범위"],
-                    "out_of_scope": ["out of scope", "비범위"],
-                    "acceptance_gates": ["acceptance gate", "완료 조건", "게이트"],
-                },
-            ),
-            (
-                "ARCHITECTURE_PLAN.md",
-                paths.get("architecture_plan"),
-                {
-                    "component_boundaries": ["component boundaries", "경계", "boundary"],
-                    "quality_gates": ["quality gate", "품질 게이트"],
-                    "loop_safety_rules": ["loop safety", "루프 안전", "stagnation", "regression"],
-                },
-            ),
-            (
-                "SCAFFOLD_PLAN.md",
-                paths.get("scaffold_plan"),
-                {
-                    "repository_state": ["repository state", "레포 상태", "repo state"],
-                    "bootstrap_mode": ["bootstrap mode", "부트스트랩 모드"],
-                    "verification_checklist": ["verification checklist", "검증 체크리스트"],
-                },
-            ),
-        ]
-        failures: List[str] = []
-        for label, path, required in validations:
-            if not isinstance(path, Path):
-                failures.append(f"{label}: file path missing")
-                continue
-            missing = self._missing_markdown_sections(path, required)
-            if missing:
-                failures.append(f"{label}: missing {', '.join(missing)}")
-        if failures:
-            self._append_actor_log(
-                log_path,
-                "ORCHESTRATOR",
-                "Product-definition hard gate blocked implementation "
-                "(principle_1_mvp_first / principle_2_design_first): "
-                + " | ".join(failures),
-            )
-            raise CommandExecutionError(
-                "Product-definition artifacts are insufficient under MVP-first/design-first policy. "
-                + " ; ".join(failures)
-            )
+        self._product_definition_runtime.ensure_product_definition_ready(paths, log_path)
 
     # ------------------------------------------------------------------
     # Fallback writers — used when AI call fails for product-def stages
@@ -2611,49 +1186,7 @@ class Orchestrator:
         paths: Dict[str, Path],
         product_brief_path: Path,
     ) -> None:
-        spec_json = self._read_json_file(paths.get("spec_json"))
-        goal = str(spec_json.get("goal", "")).strip() if isinstance(spec_json, dict) else ""
-        goal = goal or job.issue_title
-        scope_in = spec_json.get("scope_in", []) if isinstance(spec_json, dict) else []
-        lines: List[str] = [
-            "# PRODUCT BRIEF",
-            "",
-            "## Context Anchor",
-            f"- Job ID: {job.job_id}",
-            f"- Issue Title: {job.issue_title}",
-            "",
-            "## Product Goal",
-            f"- {goal}",
-            "",
-            "## Problem Statement",
-            "- 이슈 아이디어를 단발성 코드 생성이 아닌 제품 단위 개발 루프로 전환한다.",
-            "",
-            "## Target Users",
-            "- 문제를 직접 겪는 1차 사용자",
-            "- 기능 품질을 유지보수하는 운영/개발 사용자",
-            "",
-            "## Core Value",
-            "- 아이디어 입력부터 MVP 구현, 품질 리뷰, 반복 개선까지 한 파이프라인으로 수행한다.",
-            "- 코드 생성보다 품질 평가와 개선 우선순위 결정을 시스템적으로 강제한다.",
-            "",
-            "## Scope Inputs",
-        ]
-        for item in (scope_in[:7] if isinstance(scope_in, list) else []):
-            if str(item).strip():
-                lines.append(f"- {str(item).strip()}")
-        lines.extend([
-            "",
-            "## Success Metrics",
-            "- MVP 핵심 시나리오 1개 이상이 재현 가능해야 함",
-            "- 테스트 리포트와 제품 리뷰 점수가 누적 저장되어야 함",
-            "- 다음 개선 작업이 자동 우선순위로 생성되어야 함",
-            "",
-            "## Non-Goals",
-            "- 이번 MVP 범위 외 신규 대기능 추가",
-            "- 자동 배포, 자동 머지",
-            "",
-        ])
-        product_brief_path.write_text("\n".join(lines), encoding="utf-8")
+        self._product_definition_runtime.write_product_brief_fallback(job, paths, product_brief_path)
 
     def _write_user_flows_fallback(
         self,
@@ -2661,47 +1194,7 @@ class Orchestrator:
         paths: Dict[str, Path],
         user_flows_path: Path,
     ) -> None:
-        spec_json = self._read_json_file(paths.get("spec_json"))
-        scope_in = spec_json.get("scope_in", []) if isinstance(spec_json, dict) else []
-        first_scope = ""
-        if isinstance(scope_in, list):
-            for item in scope_in:
-                if str(item).strip():
-                    first_scope = str(item).strip()
-                    break
-        first_scope = first_scope or "핵심 MVP 기능"
-        lines = [
-            "# USER FLOWS",
-            "",
-            "## Context Anchor",
-            f"- Job ID: {job.job_id}",
-            f"- Issue Title: {job.issue_title}",
-            "",
-            "## Primary Flow",
-            f"1. 사용자가 `{job.issue_title}` 해결을 위한 작업을 시작한다.",
-            f"2. 시스템이 `{first_scope}` 를 이번 MVP 핵심 기능으로 정의한다.",
-            "3. 시스템이 제품 정의 문서와 구현 계획을 생성하고 핵심 흐름을 정리한다.",
-            "4. 사용자는 핵심 기능을 실행하고 시스템은 즉시 결과나 다음 행동을 보여준다.",
-            "5. 실패나 데이터 없음이 발생하면 복구 액션과 대안 경로를 안내한다.",
-            "6. 테스트와 리뷰 결과를 바탕으로 품질 이슈를 정리한다.",
-            "7. 다음 개선 루프에서 우선순위가 높은 문제부터 다시 수정한다.",
-            "",
-            "## Secondary Flows",
-            f"- 오류 복구 흐름: `{job.issue_title}` 관련 실패 시 재시도, 상태 기록, 복구 액션을 제공한다.",
-            "- 품질 정체 흐름: 같은 문제 반복 시 범위를 줄이고 전략을 다시 정의한다.",
-            "- 품질 하락 흐름: 이전 안정 상태를 비교해 롤백 후보와 안정화 작업을 기록한다.",
-            "",
-            "## UX State Checklist",
-            "- Loading 상태: 스피너/스켈레톤/진행 메시지 존재 여부",
-            "- Empty 상태: 데이터 없음 시 안내/유도 문구 존재 여부",
-            "- Error 상태: 실패 사유/복구 액션/재시도 경로 존재 여부",
-            "",
-            "## Entry/Exit Points",
-            "- 진입: GitHub 이슈 생성 또는 웹훅 트리거",
-            "- 종료: PR 생성 완료 또는 최대 재시도 횟수 초과",
-            "",
-        ]
-        user_flows_path.write_text("\n".join(lines), encoding="utf-8")
+        self._product_definition_runtime.write_user_flows_fallback(job, paths, user_flows_path)
 
     def _write_mvp_scope_fallback(
         self,
@@ -2709,48 +1202,7 @@ class Orchestrator:
         paths: Dict[str, Path],
         mvp_scope_path: Path,
     ) -> None:
-        spec_json = self._read_json_file(paths.get("spec_json"))
-        scope_in = spec_json.get("scope_in", []) if isinstance(spec_json, dict) else []
-        scope_out = spec_json.get("scope_out", []) if isinstance(spec_json, dict) else []
-        lines = [
-            "# MVP SCOPE",
-            "",
-            "## Context Anchor",
-            f"- Job ID: {job.job_id}",
-            f"- Issue Title: {job.issue_title}",
-            "",
-            "## In Scope",
-        ]
-        for item in (scope_in[:8] if isinstance(scope_in, list) else []):
-            if str(item).strip():
-                lines.append(f"- [P1] {str(item).strip()} — 완료 조건: 기능 재현 가능")
-        if lines[-1] == "## In Scope":
-            lines.append(
-                f"- [P1] `{job.issue_title}` 해결에 직접 필요한 핵심 기능 — 완료 조건: 사용자가 목적을 달성 가능"
-            )
-        lines.extend(["", "## Out of Scope"])
-        for item in (scope_out[:8] if isinstance(scope_out, list) else []):
-            if str(item).strip():
-                lines.append(f"- {str(item).strip()}")
-        if lines[-1] == "## Out of Scope":
-            lines.append(f"- `{job.issue_title}` 와 직접 관련 없는 확장 기능")
-        lines.extend([
-            "",
-            "## MVP Acceptance Gates",
-            "- [G1] 핵심 사용자 플로우 1개 이상이 end-to-end로 동작한다.",
-            "- [G2] PRODUCT_REVIEW.json이 생성되고 필수 카테고리 점수가 기록된다.",
-            "- [G3] 최소 1개 테스트 리포트가 생성된다.",
-            "- [G4] 에러/빈 상태/로딩 상태 처리가 각각 1개 이상 구현된다.",
-            "",
-            "## Post-MVP Candidates",
-            "- 성능 최적화, 리팩토링, 고급 UX polish",
-            "- 추가 사용자 플로우, 확장 기능",
-            "",
-            "## Scope Decision Rationale",
-            "- 최소 기능으로 빠른 검증 후 반복 개선하는 MVP 전략을 따른다.",
-            "",
-        ])
-        mvp_scope_path.write_text("\n".join(lines), encoding="utf-8")
+        self._product_definition_runtime.write_mvp_scope_fallback(job, paths, mvp_scope_path)
 
     @staticmethod
     def _write_architecture_plan_fallback(
@@ -2758,107 +1210,14 @@ class Orchestrator:
         paths: Dict[str, Path],
         architecture_plan_path: Path,
     ) -> None:
-        del paths
-        lines = [
-            "# ARCHITECTURE PLAN",
-            "",
-            "## Context Anchor",
-            f"- Job ID: {job.job_id}",
-            f"- Issue Title: {job.issue_title}",
-            "",
-            "## Layer Structure",
-            "- Product Definition Layer: PRODUCT_BRIEF.md / USER_FLOWS.md / MVP_SCOPE.md",
-            "- Delivery Layer: PLAN.md / 구현 코드 / TEST_REPORT_*",
-            "- Review Layer: REVIEW.md / PRODUCT_REVIEW.json",
-            "- Improvement Loop Layer: REVIEW_HISTORY.json / IMPROVEMENT_BACKLOG.json / IMPROVEMENT_PLAN.md",
-            "",
-            "## Component Boundaries",
-            "- Orchestrator: 단계 순서, 재시도 정책, 종료 조건 결정 (AI 사용 금지)",
-            "- AI Workers: 프롬프트 입력 -> 산출물 파일 출력 (제어 로직 금지)",
-            "- Store: 잡 상태, 단계, 에러 메시지 영속화",
-            "",
-            "## Data Contracts",
-            "- 각 단계는 `_docs` 아래 파일(또는 JSON) 산출물을 남긴다.",
-            "- 다음 단계는 직전 산출물을 입력으로 사용한다.",
-            "- 실패 시 STATUS.md에 중단 원인과 재개 액션을 기록한다.",
-            "",
-            "## Quality Gates",
-            "- 설계 산출물(brief/flows/mvp/architecture) 누락 시 구현 단계 진행 금지",
-            "- PRODUCT_REVIEW overall < 3.0 이면 improvement_stage에서 전략 변경 검토",
-            "",
-            "## Loop Safety Rules",
-            "- 동일 top issue 2회 이상 연속 → repeated_issue_limit_hit = True",
-            "- 최근 3회 overall 변화폭 ≤ 0.15 → score_stagnation_detected = True",
-            "- 직전 대비 overall 0.2 이상 하락 → quality_regression_detected = True",
-            "- 위 3가지 중 1개라도 True → strategy_change_required = True (범위 축소 전략)",
-            "- 복구 후보: git HEAD sha 기록, 품질 하락 시 롤백 검토",
-            "",
-            "## Technology Decisions",
-            "- 웹: React/Nuxt 기반 프레임워크",
-            "- API: FastAPI 기반",
-            "- 모바일: React Native",
-            "- AI 에이전트: Gemini(계획/리뷰) / Codex(구현/수정)",
-            "",
-            "## Extension Points",
-            "- 새 단계: workflow_design.py SUPPORTED_NODE_TYPES에 타입 추가",
-            "- 새 에이전트: config/ai_commands.json에 템플릿 추가",
-            "- 새 평가 기준: _stage_product_review scores 딕셔너리에 카테고리 추가",
-            "",
-        ]
-        architecture_plan_path.write_text("\n".join(lines), encoding="utf-8")
+        ProductDefinitionRuntime.write_architecture_plan_fallback(job, paths, architecture_plan_path)
 
     @staticmethod
     def _write_project_scaffolding_fallback(
         bootstrap_report: Dict[str, Any],
         scaffold_plan_path: Path,
     ) -> None:
-        """Fallback writer for SCAFFOLD_PLAN.md."""
-
-        repository_state = str(bootstrap_report.get("repository_state", "partial"))
-        bootstrap_mode = str(bootstrap_report.get("bootstrap_mode", "stabilize"))
-        stack = ", ".join(str(item) for item in bootstrap_report.get("detected_stack", [])) or "unknown"
-        actions = bootstrap_report.get("recommended_actions", [])
-        if not isinstance(actions, list):
-            actions = []
-
-        lines = [
-            "# SCAFFOLD PLAN",
-            "",
-            "## Repository State",
-            f"- Current state: `{repository_state}`",
-            f"- Detected stack: `{stack}`",
-            "",
-            "## Bootstrap Mode",
-            f"- Selected mode: `{bootstrap_mode}`",
-            "- 목적: MVP 구현 전에 최소 실행 구조와 테스트/문서 뼈대를 정리한다.",
-            "",
-            "## Target Structure",
-            "- 현재 스택에 맞는 엔트리포인트 파일을 유지 또는 생성한다.",
-            "- 실행 설정 파일과 기본 테스트 경로를 고정한다.",
-            "- 제품 문서와 구현 문서를 `_docs`와 루트 문서에서 연결한다.",
-            "",
-            "## Required Setup Commands",
-            "- 의존성 설치 명령을 현재 스택 기준으로 정리한다.",
-            "- 기본 실행 명령과 테스트 명령을 문서에 명시한다.",
-            "- 신규 대규모 프레임워크 교체는 금지한다.",
-            "",
-            "## App Skeleton Contracts",
-            "- entrypoint / config / test / docs의 최소 계약을 명시한다.",
-            "- 기존 파일이 있으면 재사용하고 누락분만 보강한다.",
-            "",
-            "## Verification Checklist",
-            "- [ ] 단일 실행 명령으로 프로젝트 기동 가능",
-            "- [ ] 기본 테스트 명령 존재",
-            "- [ ] README/개발 문서가 현재 구조를 설명",
-            "- [ ] MVP 범위 밖 재구성 없이 시작 가능",
-            "",
-            "## Risks And Deferrals",
-        ]
-        if actions:
-            lines.extend(f"- {str(item)}" for item in actions[:5])
-        else:
-            lines.append("- 현재 레포 상태를 기준으로 최소 scaffold만 적용한다.")
-        scaffold_plan_path.write_text("\n".join(lines), encoding="utf-8")
+        ProductDefinitionRuntime.write_project_scaffolding_fallback(bootstrap_report, scaffold_plan_path)
 
     def _stage_product_review(
         self,
@@ -3385,311 +1744,11 @@ class Orchestrator:
         paths: Dict[str, Path],
         log_path: Path,
     ) -> None:
-        """Create next-loop improvement plan and loop guard signals."""
-
-        self._set_stage(job.job_id, JobStage.IMPROVEMENT_STAGE, log_path)
-        product_review_path = paths.get("product_review", self._docs_file(repository_path, "PRODUCT_REVIEW.json"))
-        review_payload = self._read_json_file(product_review_path)
-        review_history_path = paths.get("review_history", self._docs_file(repository_path, "REVIEW_HISTORY.json"))
-        history_payload = self._read_json_file(review_history_path)
-        history_entries = history_payload.get("entries", []) if isinstance(history_payload, dict) else []
-        if not isinstance(history_entries, list):
-            history_entries = []
-        backlog_payload = self._read_json_file(paths.get("improvement_backlog"))
-        backlog_items = backlog_payload.get("items", []) if isinstance(backlog_payload, dict) else []
-        if not isinstance(backlog_items, list):
-            backlog_items = []
-        maturity_payload = self._read_json_file(paths.get("repo_maturity"))
-        trend_payload = self._read_json_file(paths.get("quality_trend"))
-        operating_policy = review_payload.get("operating_policy", {}) if isinstance(review_payload, dict) else {}
-        if not isinstance(operating_policy, dict):
-            operating_policy = {}
-
-        top_issue_id = str(backlog_items[0].get("id", "")) if backlog_items else ""
-        recent_top_ids = [str(item.get("top_issue_ids", [""])[0]) for item in history_entries[-3:] if item.get("top_issue_ids")]
-        repeated_issue_limit_hit = bool(top_issue_id) and recent_top_ids.count(top_issue_id) >= 2
-
-        recent_scores = [float(item.get("overall", 0.0)) for item in history_entries[-3:] if item.get("overall") is not None]
-        score_stagnation_detected = len(recent_scores) >= 3 and (max(recent_scores) - min(recent_scores) <= 0.15)
-        quality_regression_detected = False
-        if len(history_entries) >= 2:
-            prev = float(history_entries[-2].get("overall", 0.0))
-            current = float(history_entries[-1].get("overall", 0.0))
-            quality_regression_detected = current < (prev - 0.2)
-        design_reset_required = bool(operating_policy.get("requires_design_reset"))
-        scope_reset_required = bool(operating_policy.get("requires_scope_reset"))
-        quality_focus_required = bool(operating_policy.get("requires_quality_focus"))
-        strategy_change_required = (
-            repeated_issue_limit_hit
-            or score_stagnation_detected
-            or quality_regression_detected
-            or design_reset_required
-            or scope_reset_required
-        )
-
-        git_head = ""
-        result = self._execute_shell_command(
-            command=f"git -C {shlex.quote(str(repository_path))} rev-parse HEAD",
-            cwd=repository_path,
-            log_writer=self._actor_log_writer(log_path, "GIT"),
-            check=False,
-            command_purpose="read current git head",
-        )
-        if int(getattr(result, "exit_code", 1)) == 0:
-            git_head = str(getattr(result, "stdout", "")).strip()
-
-        loop_state = {
-            "generated_at": utc_now_iso(),
-            "same_issue_repeat_limit": 2,
-            "repeated_issue_limit_hit": repeated_issue_limit_hit,
-            "score_stagnation_detected": score_stagnation_detected,
-            "quality_regression_detected": quality_regression_detected,
-            "strategy_change_required": strategy_change_required,
-            "principle_enforcement": {
-                "blocked_principles": operating_policy.get("blocked_principles", []),
-                "warning_principles": operating_policy.get("warning_principles", []),
-                "requires_design_reset": design_reset_required,
-                "requires_scope_reset": scope_reset_required,
-                "requires_quality_focus": quality_focus_required,
-            },
-            "rollback": {
-                "last_known_head": git_head,
-                "rollback_candidate": bool(git_head),
-            },
-            "strategy": "normal_iterative_improvement",
-        }
-        loop_state_path = paths.get("improvement_loop_state", self._docs_file(repository_path, "IMPROVEMENT_LOOP_STATE.json"))
-        loop_state_path.write_text(
-            json.dumps(loop_state, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-
-        overall_score = float(review_payload.get("scores", {}).get("overall", 0.0)) if isinstance(review_payload, dict) else 0.0
-        scores_payload = review_payload.get("scores", {}) if isinstance(review_payload, dict) else {}
-        if not isinstance(scores_payload, dict):
-            scores_payload = {}
-        artifact_health = review_payload.get("artifact_health", {}) if isinstance(review_payload, dict) else {}
-        if not isinstance(artifact_health, dict):
-            artifact_health = {}
-        categories_below = (
-            review_payload.get("quality_gate", {}).get("categories_below_threshold", [])
-            if isinstance(review_payload, dict)
-            else []
-        )
-        if not isinstance(categories_below, list):
-            categories_below = []
-        quality_gate_payload = review_payload.get("quality_gate", {}) if isinstance(review_payload, dict) else {}
-        if not isinstance(quality_gate_payload, dict):
-            quality_gate_payload = {}
-
-        strategy_inputs = self._build_improvement_strategy_inputs(
-            review_payload=review_payload,
-            maturity_payload=maturity_payload,
-            trend_payload=trend_payload,
-            categories_below=categories_below,
-        )
-        strategy_decision = self._select_improvement_strategy(
-            overall_score=overall_score,
-            strategy_inputs=strategy_inputs,
-            repeated_issue_limit_hit=repeated_issue_limit_hit,
-            score_stagnation_detected=score_stagnation_detected,
-            quality_regression_detected=quality_regression_detected,
-            design_reset_required=design_reset_required,
-            scope_reset_required=scope_reset_required,
-            quality_focus_required=quality_focus_required,
-        )
-
-        strategy = str(strategy_decision.get("strategy", "normal_iterative_improvement")).strip() or "normal_iterative_improvement"
-        next_scope_restriction = str(strategy_decision.get("next_scope_restriction", "normal")).strip() or "normal"
-        strategy_focus = str(strategy_decision.get("focus", "balanced")).strip() or "balanced"
-        strategy_mode_shift = strategy != "normal_iterative_improvement"
-
-        loop_state["strategy"] = strategy
-        loop_state["strategy_focus"] = strategy_focus
-        rollback_recommended = quality_regression_detected and bool(git_head)
-        loop_state["next_scope_restriction"] = next_scope_restriction
-        loop_state["rollback_recommended"] = rollback_recommended
-        loop_state["categories_below_threshold"] = categories_below
-        loop_state["overall_score"] = overall_score
-        loop_state["strategy_inputs"] = strategy_inputs
-        # 전략 변경 이유를 명시적으로 기록
-        change_reasons: List[str] = []
-        if repeated_issue_limit_hit:
-            change_reasons.append(f"동일 이슈 {top_issue_id!r}가 최근 3회 내 2회 이상 반복됨")
-        if score_stagnation_detected:
-            scores_str = ", ".join(f"{s:.2f}" for s in recent_scores)
-            change_reasons.append(f"최근 3회 점수 정체 감지 ({scores_str}) — 변화폭 ≤ 0.15")
-        if quality_regression_detected and len(history_entries) >= 2:
-            prev_s = float(history_entries[-2].get("overall", 0.0))
-            curr_s = float(history_entries[-1].get("overall", 0.0))
-            change_reasons.append(f"품질 하락 감지: {prev_s:.2f} → {curr_s:.2f} (0.2 이상 하락)")
-        if design_reset_required:
-            change_reasons.append("설계 선행 원칙 위반: 제품 정의/설계 문서를 다시 정렬해야 함")
-        if scope_reset_required:
-            change_reasons.append("MVP 우선/작은 단위 개발 원칙 위반: 범위 축소 또는 재정의 필요")
-        if quality_focus_required:
-            change_reasons.append("평가 우선/안정성 보호 원칙 기준에서 품질 근거가 부족함")
-        for reason in strategy_decision.get("reasons", []):
-            if reason not in change_reasons:
-                change_reasons.append(reason)
-        loop_state["strategy_change_reasons"] = change_reasons
-
-        loop_state_path = paths.get("improvement_loop_state", self._docs_file(repository_path, "IMPROVEMENT_LOOP_STATE.json"))
-        loop_state_path.write_text(
-            json.dumps(loop_state, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-
-        # 전략 변경 시 P1만 처리하도록 backlog를 필터링
-        if design_reset_required:
-            next_items = [
-                {
-                    "id": "policy_design_rebaseline",
-                    "priority": "P0",
-                    "title": "제품 정의/설계 문서 재정렬",
-                    "reason": "설계 선행 원칙 위반 또는 문서 계약 약화 감지",
-                    "action": "PRODUCT_BRIEF/USER_FLOWS/MVP_SCOPE/ARCHITECTURE_PLAN을 재정리한 뒤 다시 계획 수립",
-                }
-            ]
-        else:
-            next_items = self._select_next_improvement_items(
-                strategy=strategy,
-                backlog_items=backlog_items,
-                categories_below=categories_below,
-                scores=scores_payload,
-                artifact_health=artifact_health,
-                quality_gate=quality_gate_payload,
-            )
-        next_tasks_payload = {
-            "generated_at": utc_now_iso(),
-            "strategy": loop_state.get("strategy", "normal_iterative_improvement"),
-            "strategy_focus": strategy_focus,
-            "scope_restriction": next_scope_restriction,
-            "strategy_inputs": strategy_inputs,
-            "tasks": [
-                {
-                    "task_id": f"next_{index + 1}",
-                    "source_issue_id": str(item.get("id", "")),
-                    "title": str(item.get("title", "")),
-                    "priority": str(item.get("priority", "P2")),
-                    "reason": str(item.get("reason", "")),
-                    "action": str(item.get("action", "")),
-                    "selected_by_strategy": strategy,
-                    "recommended_node_type": (
-                        "gemini_plan"
-                        if design_reset_required or scope_reset_required
-                        else "coder_fix_from_test_report"
-                        if str(item.get("priority", "P2")) in {"P0", "P1"}
-                        else "gemini_plan"
-                    ),
-                }
-                for index, item in enumerate(next_items)
-            ],
-        }
-        next_tasks_path = paths.get(
-            "next_improvement_tasks",
-            self._docs_file(repository_path, "NEXT_IMPROVEMENT_TASKS.json"),
-        )
-        next_tasks_path.write_text(
-            json.dumps(next_tasks_payload, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-
-        plan_lines = [
-            "# IMPROVEMENT PLAN",
-            "",
-            f"- Generated at: {loop_state['generated_at']}",
-            f"- Strategy: `{loop_state['strategy']}`",
-            f"- Current overall score: `{overall_score}`",
-            f"- Next scope restriction: `{next_scope_restriction}`",
-            "",
-            "## Loop Guard Signals",
-            f"- repeated_issue_limit_hit: `{repeated_issue_limit_hit}`",
-            f"- score_stagnation_detected: `{score_stagnation_detected}`",
-            f"- quality_regression_detected: `{quality_regression_detected}`",
-            f"- strategy_change_required: `{strategy_change_required}`",
-            f"- rollback_recommended: `{rollback_recommended}`",
-            f"- strategy_focus: `{strategy_focus}`",
-        ]
-        plan_lines.extend([
-            "",
-            "## Strategy Inputs",
-            f"- maturity_level: `{strategy_inputs.get('maturity_level', '')}`",
-            f"- maturity_progression: `{strategy_inputs.get('maturity_progression', '')}`",
-            f"- quality_trend_direction: `{strategy_inputs.get('quality_trend_direction', '')}`",
-            f"- review_round_count: `{strategy_inputs.get('review_round_count', 0)}`",
-            f"- quality_gate_passed: `{strategy_inputs.get('quality_gate_passed', False)}`",
-            f"- persistent_low_categories: `{', '.join(strategy_inputs.get('persistent_low_categories', [])) or '-'}`",
-            f"- stagnant_categories: `{', '.join(strategy_inputs.get('stagnant_categories', [])) or '-'}`",
-        ])
-        if change_reasons:
-            plan_lines.extend(["", "## Strategy Change Reasons"])
-            for reason in change_reasons:
-                plan_lines.append(f"- {reason}")
-
-        plan_lines.extend(["", "## Next Improvements"])
-        if strategy_change_required or strategy_mode_shift:
-            plan_lines.append("> **전략 변경 모드**: P1 항목만 처리합니다. 범위를 축소하고 안정화 작업을 우선 수행하세요.")
-        for item in next_items:
-            action = str(item.get("action", "")).strip()
-            plan_lines.append(
-                f"- [{item.get('priority', 'P2')}] {str(item.get('title', '')).strip()}"
-                + (f"\n  - 원인: {item.get('reason', '')}" if item.get("reason") else "")
-                + (f"\n  - 액션: {action}" if action else "")
-            )
-        if not next_items:
-            plan_lines.append("- 개선 백로그 항목 없음 (품질 목표 달성)")
-
-        if categories_below:
-            plan_lines.extend(["", "## Categories Below Threshold (≤2/5)"])
-            for cat in categories_below:
-                plan_lines.append(f"- {cat}")
-
-        plan_lines.extend([
-            "",
-            "## Recovery Option",
-            f"- last_known_head: `{git_head or 'unavailable'}`",
-            f"- next_tasks_file: `{next_tasks_path}`",
-        ])
-        if rollback_recommended:
-            plan_lines.append(
-                f"- **롤백 권장**: 품질 하락이 감지되었습니다. `git reset --hard {git_head}` 검토 후 P1 항목만 수정하세요."
-            )
-        else:
-            plan_lines.append("- 전략 변경이 필요하면 범위를 축소하고 P1 항목부터 안정화 작업을 우선 수행한다.")
-        plan_lines.append("")
-
-        improvement_plan_path = paths.get("improvement_plan", self._docs_file(repository_path, "IMPROVEMENT_PLAN.md"))
-        improvement_plan_path.write_text("\n".join(plan_lines), encoding="utf-8")
-        self._write_structured_memory_artifacts(
-            job=job,
-            repository_path=repository_path,
-            paths=paths,
-            review_payload=review_payload,
-            maturity_payload=maturity_payload,
-            trend_payload=trend_payload,
-            loop_state=loop_state,
-            next_tasks_payload=next_tasks_payload,
-        )
-        self._write_memory_retrieval_artifacts(job=job, repository_path=repository_path, paths=paths)
-        self._write_strategy_shadow_report(
-            job=job,
-            repository_path=repository_path,
-            paths=paths,
-            strategy_inputs=strategy_inputs,
-            selected_strategy=strategy,
-            selected_focus=strategy_focus,
-        )
-        self._ingest_memory_runtime_artifacts(
+        self._improvement_runtime.stage_improvement_stage(
             job=job,
             repository_path=repository_path,
             paths=paths,
             log_path=log_path,
-        )
-        self._append_actor_log(
-            log_path, "ORCHESTRATOR",
-            f"IMPROVEMENT_PLAN.md 생성 완료 — strategy={loop_state['strategy']}, "
-            f"next_scope={next_scope_restriction}, rollback={rollback_recommended}",
         )
 
     def _write_structured_memory_artifacts(
@@ -5445,75 +3504,12 @@ class Orchestrator:
         trend_payload: Dict[str, Any],
         categories_below: List[str],
     ) -> Dict[str, Any]:
-        """Collect strategy-selection inputs in one explicit structure."""
-
-        scores = review_payload.get("scores", {}) if isinstance(review_payload, dict) else {}
-        if not isinstance(scores, dict):
-            scores = {}
-        artifact_health = review_payload.get("artifact_health", {}) if isinstance(review_payload, dict) else {}
-        if not isinstance(artifact_health, dict):
-            artifact_health = {}
-        tests_info = artifact_health.get("tests", {}) if isinstance(artifact_health, dict) else {}
-        if not isinstance(tests_info, dict):
-            tests_info = {}
-        quality_gate = review_payload.get("quality_gate", {}) if isinstance(review_payload, dict) else {}
-        if not isinstance(quality_gate, dict):
-            quality_gate = {}
-        persistent_low_categories = trend_payload.get("persistent_low_categories", []) if isinstance(trend_payload, dict) else []
-        if not isinstance(persistent_low_categories, list):
-            persistent_low_categories = []
-        stagnant_categories = trend_payload.get("stagnant_categories", []) if isinstance(trend_payload, dict) else []
-        if not isinstance(stagnant_categories, list):
-            stagnant_categories = []
-
-        ux_categories = {
-            "usability",
-            "ux_clarity",
-            "error_state_handling",
-            "empty_state_handling",
-            "loading_state_handling",
-        }
-        engineering_categories = {"architecture_structure", "maintainability", "code_quality"}
-
-        return {
-            "maturity_level": str(maturity_payload.get("level", "bootstrap") or "bootstrap"),
-            "maturity_progression": str(
-                trend_payload.get("maturity_progression", maturity_payload.get("progression", "unchanged")) or "unchanged"
-            ),
-            "quality_trend_direction": str(trend_payload.get("trend_direction", "stable") or "stable"),
-            "review_round_count": int(
-                trend_payload.get("review_round_count", 0)
-                or 0
-            ),
-            "quality_gate_passed": bool(quality_gate.get("passed")),
-            "categories_below": list(categories_below),
-            "persistent_low_categories": list(persistent_low_categories),
-            "stagnant_categories": list(stagnant_categories),
-            "has_test_gap": (
-                "test_coverage" in categories_below
-                or "test_coverage" in persistent_low_categories
-                or "test_coverage" in stagnant_categories
-                or int(tests_info.get("test_file_count", 0) or 0) == 0
-                or int(tests_info.get("report_count", 0) or 0) == 0
-            ),
-            "has_ux_gap": any(
-                category in ux_categories
-                for category in [*categories_below, *persistent_low_categories, *stagnant_categories]
-            ),
-            "has_engineering_gap": any(
-                category in engineering_categories
-                for category in [*categories_below, *persistent_low_categories, *stagnant_categories]
-            ),
-            "overall_score": float(scores.get("overall", 0.0) or 0.0),
-            "test_score": int(scores.get("test_coverage", 0) or 0),
-            "ux_score_floor": min(
-                int(scores.get("usability", 0) or 0),
-                int(scores.get("ux_clarity", 0) or 0),
-                int(scores.get("error_state_handling", 0) or 0),
-                int(scores.get("empty_state_handling", 0) or 0),
-                int(scores.get("loading_state_handling", 0) or 0),
-            ),
-        }
+        return ImprovementRuntime.build_improvement_strategy_inputs(
+            review_payload=review_payload,
+            maturity_payload=maturity_payload,
+            trend_payload=trend_payload,
+            categories_below=categories_below,
+        )
 
     @staticmethod
     def _select_improvement_strategy(
@@ -5527,155 +3523,16 @@ class Orchestrator:
         scope_reset_required: bool,
         quality_focus_required: bool,
     ) -> Dict[str, Any]:
-        """Choose next-loop strategy from maturity/trend/policy signals."""
-
-        maturity_level = str(strategy_inputs.get("maturity_level", "bootstrap") or "bootstrap")
-        maturity_progression = str(strategy_inputs.get("maturity_progression", "unchanged") or "unchanged")
-        trend_direction = str(strategy_inputs.get("quality_trend_direction", "stable") or "stable")
-        review_round_count = int(strategy_inputs.get("review_round_count", 0) or 0)
-        quality_gate_passed = bool(strategy_inputs.get("quality_gate_passed"))
-        has_test_gap = bool(strategy_inputs.get("has_test_gap"))
-        has_ux_gap = bool(strategy_inputs.get("has_ux_gap"))
-        has_engineering_gap = bool(strategy_inputs.get("has_engineering_gap"))
-        categories_below = strategy_inputs.get("categories_below", [])
-        if not isinstance(categories_below, list):
-            categories_below = []
-        persistent_low_categories = strategy_inputs.get("persistent_low_categories", [])
-        if not isinstance(persistent_low_categories, list):
-            persistent_low_categories = []
-        stagnant_categories = strategy_inputs.get("stagnant_categories", [])
-        if not isinstance(stagnant_categories, list):
-            stagnant_categories = []
-
-        reasons: List[str] = []
-
-        if design_reset_required:
-            return {
-                "strategy": "design_rebaseline",
-                "next_scope_restriction": "MVP_redefinition",
-                "focus": "design",
-                "reasons": ["제품 정의/설계 문서 재정렬이 우선입니다."],
-            }
-        if quality_regression_detected:
-            return {
-                "strategy": "rollback_or_stabilize",
-                "next_scope_restriction": "P1_only",
-                "focus": "stability",
-                "reasons": ["품질이 하락해 기능 확장보다 안정화와 복구가 우선입니다."],
-            }
-        if scope_reset_required:
-            return {
-                "strategy": "narrow_scope_stabilization",
-                "next_scope_restriction": "P1_only",
-                "focus": "scope",
-                "reasons": ["범위가 커졌기 때문에 MVP 범위 재정렬과 안정화가 필요합니다."],
-            }
-
-        if repeated_issue_limit_hit or score_stagnation_detected:
-            if has_test_gap:
-                reasons.append(
-                    "반복/정체 구간에서 테스트 격차가 보입니다."
-                    + (f" persistent_low={persistent_low_categories}" if "test_coverage" in persistent_low_categories else "")
-                )
-                return {
-                    "strategy": "test_hardening",
-                    "next_scope_restriction": "P1_only",
-                    "focus": "testing",
-                    "reasons": reasons,
-                }
-            if has_ux_gap:
-                reasons.append("반복/정체 구간에서 UX 상태 처리 격차가 보여 화면 명확성 개선이 우선입니다.")
-                return {
-                    "strategy": "ux_clarity_improvement",
-                    "next_scope_restriction": "P1_only",
-                    "focus": "ux",
-                    "reasons": reasons,
-                }
-            reasons.append("반복/정체 구간이므로 기능 확대보다 구조 안정화가 우선입니다.")
-            return {
-                "strategy": "stabilization",
-                "next_scope_restriction": "P1_only",
-                "focus": "stability",
-                "reasons": reasons,
-            }
-
-        if "test_coverage" in persistent_low_categories:
-            return {
-                "strategy": "test_hardening",
-                "next_scope_restriction": "P1_only",
-                "focus": "testing",
-                "reasons": ["test_coverage가 최근 3라운드 연속 저점이라 테스트 강화가 우선입니다."],
-            }
-
-        if any(
-            category in persistent_low_categories
-            for category in {"ux_clarity", "usability", "error_state_handling", "empty_state_handling", "loading_state_handling"}
-        ):
-            return {
-                "strategy": "ux_clarity_improvement",
-                "next_scope_restriction": "P1_only",
-                "focus": "ux",
-                "reasons": [f"UX 관련 카테고리 저점이 지속됨: {', '.join(persistent_low_categories)}"],
-            }
-
-        if has_test_gap and (quality_focus_required or trend_direction in {"stable", "declining"} or review_round_count >= 2):
-            return {
-                "strategy": "test_hardening",
-                "next_scope_restriction": "P1_only",
-                "focus": "testing",
-                "reasons": ["테스트/리포트 증거가 부족해 회귀 방지와 커버리지 보강이 우선입니다."],
-            }
-
-        if has_ux_gap:
-            return {
-                "strategy": "ux_clarity_improvement",
-                "next_scope_restriction": "P1_only",
-                "focus": "ux",
-                "reasons": [f"UX 관련 저점 카테고리({', '.join(categories_below)})가 존재해 사용 흐름 명확화가 우선입니다."],
-            }
-
-        if quality_focus_required or overall_score < 3.0 or (maturity_level in {"bootstrap", "mvp"} and not quality_gate_passed):
-            return {
-                "strategy": "stabilization",
-                "next_scope_restriction": "P1_only",
-                "focus": "stability",
-                "reasons": ["현재 성숙도/품질 상태에서는 기능 확장보다 안정화가 우선입니다."],
-            }
-
-        if any(
-            category in stagnant_categories
-            for category in {"code_quality", "architecture_structure", "maintainability"}
-        ) and trend_direction in {"stable", "declining"}:
-            return {
-                "strategy": "stabilization",
-                "next_scope_restriction": "P1_only",
-                "focus": "stability",
-                "reasons": [f"엔지니어링 카테고리 정체가 지속됨: {', '.join(stagnant_categories)}"],
-            }
-
-        if (
-            quality_gate_passed
-            and overall_score >= 3.6
-            and trend_direction == "improving"
-            and maturity_level in {"usable", "stable", "product_grade"}
-            and not categories_below
-            and not has_engineering_gap
-        ):
-            return {
-                "strategy": "feature_expansion",
-                "next_scope_restriction": "normal",
-                "focus": "feature",
-                "reasons": ["품질 게이트를 통과했고 추세가 상승 중이므로 다음 핵심 사용자 가치를 확장할 수 있습니다."],
-            }
-
-        return {
-            "strategy": "normal_iterative_improvement",
-            "next_scope_restriction": "normal",
-            "focus": "balanced",
-            "reasons": [
-                f"성숙도={maturity_level}, 추세={trend_direction}, progression={maturity_progression} 기준에서 균형 개선을 유지합니다."
-            ],
-        }
+        return ImprovementRuntime.select_improvement_strategy(
+            overall_score=overall_score,
+            strategy_inputs=strategy_inputs,
+            repeated_issue_limit_hit=repeated_issue_limit_hit,
+            score_stagnation_detected=score_stagnation_detected,
+            quality_regression_detected=quality_regression_detected,
+            design_reset_required=design_reset_required,
+            scope_reset_required=scope_reset_required,
+            quality_focus_required=quality_focus_required,
+        )
 
     @staticmethod
     def _select_next_improvement_items(
@@ -5687,112 +3544,14 @@ class Orchestrator:
         artifact_health: Dict[str, Any],
         quality_gate: Dict[str, Any],
     ) -> List[Dict[str, Any]]:
-        """Choose strategy-aligned next tasks from backlog, with synthetic fallback."""
-
-        if not isinstance(backlog_items, list):
-            backlog_items = []
-        if not isinstance(categories_below, list):
-            categories_below = []
-
-        def _priority_rank(value: str) -> int:
-            return {"P0": 0, "P1": 1, "P2": 2, "P3": 3}.get(str(value or "P3"), 3)
-
-        def _candidate_text(item: Dict[str, Any]) -> str:
-            return " ".join(
-                [
-                    str(item.get("title", "")),
-                    str(item.get("reason", "")),
-                    str(item.get("action", "")),
-                    str(item.get("source", "")),
-                ]
-            ).lower()
-
-        def _pick_by_keywords(keywords: List[str], *, allowed_priorities: set[str], limit: int = 3) -> List[Dict[str, Any]]:
-            scored: List[tuple[int, int, Dict[str, Any]]] = []
-            for item in backlog_items:
-                text = _candidate_text(item)
-                match_count = sum(1 for keyword in keywords if keyword in text)
-                if match_count <= 0:
-                    continue
-                priority = str(item.get("priority", "P3"))
-                if priority not in allowed_priorities:
-                    continue
-                scored.append((-match_count, _priority_rank(priority), item))
-            scored.sort(key=lambda row: (row[0], row[1], str(row[2].get("title", ""))))
-            return [row[2] for row in scored[:limit]]
-
-        if strategy == "feature_expansion":
-            selected = [item for item in backlog_items if str(item.get("priority", "P3")) in {"P1", "P2"}][:3]
-            if selected:
-                return selected
-            return [
-                {
-                    "id": "strategy_feature_expansion",
-                    "priority": "P1",
-                    "title": "다음 핵심 사용자 가치 1개 확장",
-                    "reason": "품질 게이트 통과 및 추세 상승 상태에서 기능 확장을 진행합니다.",
-                    "action": "MVP_SCOPE 기준에서 사용자 가치가 높은 기능 1개만 추가 구현하고 테스트를 함께 보강",
-                }
-            ]
-
-        if strategy == "test_hardening":
-            selected = _pick_by_keywords(
-                ["test", "coverage", "regression", "spec", "e2e", "integration", "playwright", "pytest"],
-                allowed_priorities={"P0", "P1", "P2"},
-            )
-            if selected:
-                return selected
-            tests_info = artifact_health.get("tests", {}) if isinstance(artifact_health, dict) else {}
-            if not isinstance(tests_info, dict):
-                tests_info = {}
-            return [
-                {
-                    "id": "strategy_test_hardening",
-                    "priority": "P1",
-                    "title": "회귀 테스트 및 테스트 전략 보강",
-                    "reason": (
-                        f"test_file_count={int(tests_info.get('test_file_count', 0) or 0)}, "
-                        f"report_count={int(tests_info.get('report_count', 0) or 0)}"
-                    ),
-                    "action": "핵심 사용자 흐름 기준 회귀 테스트를 추가하고 PLAN/리뷰 문서의 테스트 전략을 구체화",
-                }
-            ]
-
-        if strategy == "ux_clarity_improvement":
-            selected = _pick_by_keywords(
-                ["ux", "usability", "empty", "loading", "error", "ui", "flow", "copy", "message", "spinner", "skeleton"],
-                allowed_priorities={"P0", "P1", "P2"},
-            )
-            if selected:
-                return selected
-            return [
-                {
-                    "id": "strategy_ux_clarity_improvement",
-                    "priority": "P1",
-                    "title": "UX 상태 처리와 화면 안내 문구 정리",
-                    "reason": f"낮은 UX 관련 카테고리: {', '.join(categories_below) or 'ux_clarity'}",
-                    "action": "error/empty/loading 상태 UI와 안내 문구를 정리하고 USER_FLOWS 기준으로 사용자 흐름을 더 명확하게 다듬기",
-                }
-            ]
-
-        if strategy in {"stabilization", "rollback_or_stabilize", "narrow_scope_stabilization"}:
-            selected = [item for item in backlog_items if str(item.get("priority", "P3")) in {"P0", "P1"}][:3]
-            if selected:
-                return selected
-            return [
-                {
-                    "id": "strategy_stabilization",
-                    "priority": "P1",
-                    "title": "구조 안정화 및 회귀 방지 작업",
-                    "reason": "품질 게이트 미통과 또는 구조적 약점이 남아 있습니다.",
-                    "action": "기능 확장 없이 현재 저점 카테고리를 보강하고 회귀 테스트를 추가",
-                }
-            ]
-
-        if strategy == "normal_iterative_improvement":
-            return backlog_items[:5]
-
-        return backlog_items[:3]
+        return ImprovementRuntime.select_next_improvement_items(
+            strategy=strategy,
+            backlog_items=backlog_items,
+            categories_below=categories_below,
+            scores=scores,
+            artifact_health=artifact_health,
+            quality_gate=quality_gate,
+        )
 
     def _stage_plan_with_gemini(
         self,
@@ -5802,26 +3561,13 @@ class Orchestrator:
         log_path: Path,
         planning_mode: str = "general",
     ) -> None:
-        self._set_stage(job.job_id, JobStage.PLAN_WITH_GEMINI, log_path)
-
-        if not self._planner_graph_enabled():
-            self._append_actor_log(
-                log_path,
-                "ORCHESTRATOR",
-                "Planner graph MVP disabled by env. Using legacy one-shot planner.",
-            )
-            self._run_planner_legacy_one_shot(job, repository_path, paths, log_path, planning_mode=planning_mode)
-            return
-
-        try:
-            self._run_planner_graph_mvp(job, repository_path, paths, log_path, planning_mode=planning_mode)
-        except Exception as error:  # noqa: BLE001
-            self._append_actor_log(
-                log_path,
-                "ORCHESTRATOR",
-                f"Planner graph MVP failed. Fallback to legacy one-shot planner: {error}",
-            )
-            self._run_planner_legacy_one_shot(job, repository_path, paths, log_path, planning_mode=planning_mode)
+        self._planner_runtime.stage_plan_with_gemini(
+            job=job,
+            repository_path=repository_path,
+            paths=paths,
+            log_path=log_path,
+            planning_mode=planning_mode,
+        )
 
     def _run_planner_legacy_one_shot(
         self,
@@ -5831,45 +3577,13 @@ class Orchestrator:
         log_path: Path,
         planning_mode: str = "general",
     ) -> None:
-        """Run original single-shot planner flow as safe fallback."""
-
-        planner_prompt_path = self._docs_file(repository_path, "PLANNER_PROMPT.md")
-        self._write_memory_retrieval_artifacts(job=job, repository_path=repository_path, paths=paths)
-        review_ready = paths["review"].exists() and bool(
-            paths["review"].read_text(encoding="utf-8", errors="replace").strip()
+        self._planner_runtime.run_planner_legacy_one_shot(
+            job=job,
+            repository_path=repository_path,
+            paths=paths,
+            log_path=log_path,
+            planning_mode=planning_mode,
         )
-        planner_prompt_path.write_text(
-            build_planner_prompt(
-                str(paths["spec"]),
-                str(paths["plan"]),
-                review_path=str(paths["review"]),
-                improvement_plan_path=str(paths.get("improvement_plan", self._docs_file(repository_path, "IMPROVEMENT_PLAN.md"))),
-                improvement_loop_state_path=str(paths.get("improvement_loop_state", self._docs_file(repository_path, "IMPROVEMENT_LOOP_STATE.json"))),
-                next_improvement_tasks_path=str(paths.get("next_improvement_tasks", self._docs_file(repository_path, "NEXT_IMPROVEMENT_TASKS.json"))),
-                followup_backlog_task_path=str(paths.get("followup_backlog_task", self._docs_file(repository_path, "FOLLOWUP_BACKLOG_TASK.json"))),
-                memory_selection_path=str(paths.get("memory_selection", self._docs_file(repository_path, "MEMORY_SELECTION.json"))),
-                memory_context_path=str(paths.get("memory_context", self._docs_file(repository_path, "MEMORY_CONTEXT.json"))),
-                operator_inputs_path=str(paths.get("operator_inputs", self._docs_file(repository_path, "OPERATOR_INPUTS.json"))),
-                role_context=self._build_route_runtime_context("planner"),
-                is_long_term=self._is_long_track(self._require_job(job.job_id)),
-                is_refinement_round=review_ready,
-                planning_mode=planning_mode,
-            ),
-            encoding="utf-8",
-        )
-        result = self.command_templates.run_template(
-            template_name=self._template_for_route("planner"),
-            variables=self._build_template_variables(job, paths, planner_prompt_path),
-            cwd=repository_path,
-            log_writer=self._actor_log_writer(log_path, "PLANNER"),
-        )
-        if not paths["plan"].exists() and result.stdout.strip():
-            paths["plan"].write_text(result.stdout, encoding="utf-8")
-        if not paths["plan"].exists():
-            raise CommandExecutionError(
-                "Planner did not produce PLAN.md. Next action: ensure planner command "
-                "writes to PLAN.md or emits plan content on stdout."
-            )
 
     def _snapshot_plan_variant(
         self,
@@ -5878,28 +3592,11 @@ class Orchestrator:
         planning_mode: str,
         log_path: Path,
     ) -> None:
-        """Preserve plan snapshots so big-picture/dev planning are both traceable."""
-
-        plan_path = paths.get("plan")
-        if not isinstance(plan_path, Path) or not plan_path.exists():
-            return
-        mode = (planning_mode or "general").strip().lower()
-        target_name = ""
-        if mode == "big_picture":
-            target_name = "PLAN_BIG.md"
-        elif mode == "dev_planning":
-            target_name = "PLAN_DEV.md"
-        else:
-            return
-        target_path = self._docs_file(repository_path, target_name)
-        target_path.write_text(
-            plan_path.read_text(encoding="utf-8", errors="replace"),
-            encoding="utf-8",
-        )
-        self._append_actor_log(
-            log_path,
-            "ORCHESTRATOR",
-            f"Plan snapshot saved: {target_path.name}",
+        self._docs_snapshot_runtime.snapshot_plan_variant(
+            repository_path=repository_path,
+            paths=paths,
+            planning_mode=planning_mode,
+            log_path=log_path,
         )
 
     def _run_planner_graph_mvp(
@@ -5910,157 +3607,13 @@ class Orchestrator:
         log_path: Path,
         planning_mode: str = "general",
     ) -> None:
-        """Run planner through draft->quality-check->refine loop (graph-style MVP)."""
-
-        self._write_memory_retrieval_artifacts(job=job, repository_path=repository_path, paths=paths)
-        review_ready = paths["review"].exists() and bool(
-            paths["review"].read_text(encoding="utf-8", errors="replace").strip()
-        )
-        base_prompt = build_planner_prompt(
-            str(paths["spec"]),
-            str(paths["plan"]),
-            review_path=str(paths["review"]),
-            improvement_plan_path=str(paths.get("improvement_plan", self._docs_file(repository_path, "IMPROVEMENT_PLAN.md"))),
-            improvement_loop_state_path=str(paths.get("improvement_loop_state", self._docs_file(repository_path, "IMPROVEMENT_LOOP_STATE.json"))),
-            next_improvement_tasks_path=str(paths.get("next_improvement_tasks", self._docs_file(repository_path, "NEXT_IMPROVEMENT_TASKS.json"))),
-            followup_backlog_task_path=str(paths.get("followup_backlog_task", self._docs_file(repository_path, "FOLLOWUP_BACKLOG_TASK.json"))),
-            memory_selection_path=str(paths.get("memory_selection", self._docs_file(repository_path, "MEMORY_SELECTION.json"))),
-            memory_context_path=str(paths.get("memory_context", self._docs_file(repository_path, "MEMORY_CONTEXT.json"))),
-            operator_inputs_path=str(paths.get("operator_inputs", self._docs_file(repository_path, "OPERATOR_INPUTS.json"))),
-            role_context=self._build_route_runtime_context("planner"),
-            is_long_term=self._is_long_track(self._require_job(job.job_id)),
-            is_refinement_round=review_ready,
-            planning_mode=planning_mode,
-        )
-
-        max_rounds = self._planner_graph_max_rounds()
-        rounds: List[Dict[str, Any]] = []
-        plan_quality_path = self._docs_file(repository_path, "PLAN_QUALITY.json")
-        for round_index in range(1, max_rounds + 1):
-            is_refine = round_index > 1
-            prompt_path = (
-                self._docs_file(
-                    repository_path,
-                    "PLANNER_PROMPT.md" if round_index == 1 else f"PLANNER_PROMPT_REFINE_{round_index}.md",
-                )
-            )
-            prompt_text = base_prompt
-            if is_refine and rounds:
-                prompt_text += build_refinement_instruction(
-                    round_index=round_index,
-                    quality=rounds[-1].get("quality", {}),
-                )
-            tool_context_addendum = ""
-            tool_request_count = 0
-            max_tool_requests = 2
-            while True:
-                prompt_path.write_text(prompt_text + tool_context_addendum, encoding="utf-8")
-
-                result = self.command_templates.run_template(
-                    template_name=self._template_for_route("planner"),
-                    variables=self._build_template_variables(job, paths, prompt_path),
-                    cwd=repository_path,
-                    log_writer=self._actor_log_writer(log_path, "PLANNER"),
-                )
-                if not paths["plan"].exists() and result.stdout.strip():
-                    paths["plan"].write_text(result.stdout, encoding="utf-8")
-                if not paths["plan"].exists():
-                    raise CommandExecutionError(
-                        "Planner did not produce PLAN.md in graph mode. "
-                        "Next action: verify planner template writes PLAN.md."
-                    )
-
-                plan_text = paths["plan"].read_text(encoding="utf-8", errors="replace")
-                tool_request = self._parse_planner_tool_request(plan_text)
-                if not tool_request:
-                    break
-                if not self._route_allows_tool("planner", tool_request.tool):
-                    self._append_actor_log(
-                        log_path,
-                        "ORCHESTRATOR",
-                        f"Planner requested disallowed tool '{tool_request.tool}'. Ignoring tool request.",
-                    )
-                    break
-                if tool_request_count >= max_tool_requests:
-                    self._append_actor_log(
-                        log_path,
-                        "ORCHESTRATOR",
-                        "Planner tool-request loop cap reached. Continuing without further search calls.",
-                    )
-                    break
-                search_outcome = self._execute_planner_tool_request(
-                    job=job,
-                    repository_path=repository_path,
-                    paths=paths,
-                    log_path=log_path,
-                    tool_request=tool_request,
-                )
-                tool_request_count += 1
-                tool_context_addendum += self._build_planner_tool_context_addendum(
-                    tool_request=tool_request,
-                    outcome=search_outcome,
-                )
-                # Planner emitted tool request content. Clear it before re-run.
-                paths["plan"].write_text("", encoding="utf-8")
-
-            plan_text = paths["plan"].read_text(encoding="utf-8", errors="replace")
-            quality = evaluate_plan_markdown(plan_text)
-            rounds.append(
-                {
-                    "round": round_index,
-                    "mode": "refine" if is_refine else "draft",
-                    "tool_requests": tool_request_count,
-                    "quality": quality,
-                }
-            )
-            self._append_actor_log(
-                log_path,
-                "PLANNER",
-                (
-                    f"PlannerGraph round {round_index}/{max_rounds}: "
-                    f"passed={quality.get('passed')} score={quality.get('score')} "
-                    f"missing={','.join(quality.get('missing_sections', [])) or '-'}"
-                ),
-            )
-            if quality.get("passed"):
-                break
-
-        final_quality = rounds[-1]["quality"] if rounds else {"passed": False, "score": 0}
-        plan_quality_path.write_text(
-            json.dumps(
-                {
-                    "job_id": job.job_id,
-                    "issue_number": job.issue_number,
-                    "max_rounds": max_rounds,
-                    "rounds": rounds,
-                    "final": final_quality,
-                },
-                ensure_ascii=False,
-                indent=2,
-            ) + "\n",
-            encoding="utf-8",
-        )
-        self._write_langgraph_planner_shadow_trace(
+        self._planner_runtime.run_planner_graph_mvp(
+            job=job,
             repository_path=repository_path,
             paths=paths,
-            rounds=rounds,
-            max_rounds=max_rounds,
+            log_path=log_path,
             planning_mode=planning_mode,
         )
-        self._append_actor_log(
-            log_path,
-            "PLANNER",
-            (
-                "PlannerGraph final quality: "
-                f"passed={final_quality.get('passed')} score={final_quality.get('score')}"
-            ),
-        )
-        if not bool(final_quality.get("passed")):
-            self._append_actor_log(
-                log_path,
-                "ORCHESTRATOR",
-                "PLAN quality gate not passed, but continuing by non-blocking assist policy.",
-            )
 
     def _write_langgraph_planner_shadow_trace(
         self,
@@ -6071,56 +3624,25 @@ class Orchestrator:
         max_rounds: int,
         planning_mode: str,
     ) -> None:
-        """Write optional LangGraph shadow trace without changing planner outputs."""
-
-        shadow_path = paths.get(
-            "langgraph_planner_shadow",
-            self._docs_file(repository_path, "LANGGRAPH_PLANNER_SHADOW.json"),
-        )
-        if not self._feature_enabled("langgraph_planner_shadow"):
-            shadow_path.write_text(
-                json.dumps(
-                    build_disabled_planner_shadow_payload(detail="feature_flag_disabled"),
-                    ensure_ascii=False,
-                    indent=2,
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-            return
-
-        payload = self._langgraph_planner_shadow.run(
+        self._planner_runtime.write_langgraph_planner_shadow_trace(
+            repository_path=repository_path,
+            paths=paths,
             rounds=rounds,
             max_rounds=max_rounds,
             planning_mode=planning_mode,
-            plan_path=paths["plan"],
-            plan_quality_path=self._docs_file(repository_path, "PLAN_QUALITY.json"),
         )
-        shadow_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     @staticmethod
     def _planner_graph_max_rounds() -> int:
-        """Read planner graph round cap from env with safe defaults."""
-
-        raw = (os.getenv("AGENTHUB_PLANNER_GRAPH_MAX_ROUNDS", "3") or "").strip()
-        try:
-            value = int(raw)
-        except ValueError:
-            return 3
-        return max(1, min(5, value))
+        return PlannerRuntime.planner_graph_max_rounds()
 
     @staticmethod
     def _planner_graph_enabled() -> bool:
-        """Enable/disable planner graph MVP by env."""
-
-        raw = (os.getenv("AGENTHUB_PLANNER_GRAPH_ENABLED", "true") or "").strip().lower()
-        return raw not in {"0", "false", "no", "off"}
+        return PlannerRuntime.planner_graph_enabled()
 
     @staticmethod
     def _parse_planner_tool_request(plan_text: str) -> Optional[ToolRequest]:
-        """Parse planner TOOL_REQUEST block from PLAN output."""
-
-        return ToolRuntime.parse_planner_tool_request(plan_text)
+        return PlannerRuntime.parse_planner_tool_request(plan_text)
 
     def _execute_planner_tool_request(
         self,
@@ -6178,18 +3700,9 @@ class Orchestrator:
         tool_request: ToolRequest,
         outcome: Dict[str, Any],
     ) -> str:
-        """Build addendum prompt after tool execution."""
-
-        return ToolRuntime.build_planner_tool_context_addendum(
-            request=tool_request,
-            result=ToolResult(
-                ok=bool(outcome.get("ok")),
-                mode=str(outcome.get("mode", "unknown")),
-                context_path=str(outcome.get("context_path", "SEARCH_CONTEXT.md")),
-                result_path=str(outcome.get("result_path", "SEARCH_RESULT.json")),
-                context_text=str(outcome.get("context_text", "")).strip(),
-                error=str(outcome.get("error", "")).strip(),
-            ),
+        return PlannerRuntime.build_planner_tool_context_addendum(
+            tool_request=tool_request,
+            outcome=outcome,
         )
 
     def _stage_implement_with_codex(
@@ -6199,36 +3712,11 @@ class Orchestrator:
         paths: Dict[str, Path],
         log_path: Path,
     ) -> None:
-        self._set_stage(job.job_id, JobStage.IMPLEMENT_WITH_CODEX, log_path)
-        self._ensure_product_definition_ready(paths, log_path)
-        self._write_memory_retrieval_artifacts(job=job, repository_path=repository_path, paths=paths)
-
-        coder_prompt_path = self._docs_file(repository_path, "CODER_PROMPT_IMPLEMENT.md")
-        coder_prompt_path.write_text(
-            build_coder_prompt(
-                plan_path=str(paths["plan"]),
-                review_path=str(paths["review"]),
-                coding_goal="PLAN.md 기반 MVP 구현",
-                design_path=str(paths.get("design", "")),
-                design_tokens_path=str(paths.get("design_tokens", self._docs_file(repository_path, "DESIGN_TOKENS.json"))),
-                token_handoff_path=str(paths.get("token_handoff", self._docs_file(repository_path, "TOKEN_HANDOFF.md"))),
-                publish_handoff_path=str(paths.get("publish_handoff", self._docs_file(repository_path, "PUBLISH_HANDOFF.md"))),
-                improvement_plan_path=str(paths.get("improvement_plan", self._docs_file(repository_path, "IMPROVEMENT_PLAN.md"))),
-                improvement_loop_state_path=str(paths.get("improvement_loop_state", self._docs_file(repository_path, "IMPROVEMENT_LOOP_STATE.json"))),
-                next_improvement_tasks_path=str(paths.get("next_improvement_tasks", self._docs_file(repository_path, "NEXT_IMPROVEMENT_TASKS.json"))),
-                memory_selection_path=str(paths.get("memory_selection", self._docs_file(repository_path, "MEMORY_SELECTION.json"))),
-                memory_context_path=str(paths.get("memory_context", self._docs_file(repository_path, "MEMORY_CONTEXT.json"))),
-                operator_inputs_path=str(paths.get("operator_inputs", self._docs_file(repository_path, "OPERATOR_INPUTS.json"))),
-                role_context=self._build_route_runtime_context("coder"),
-            ),
-            encoding="utf-8",
-        )
-
-        self.command_templates.run_template(
-            template_name=self._template_for_route("coder"),
-            variables=self._build_template_variables(job, paths, coder_prompt_path),
-            cwd=repository_path,
-            log_writer=self._actor_log_writer(log_path, "CODER"),
+        self._implement_runtime.stage_implement_with_codex(
+            job=job,
+            repository_path=repository_path,
+            paths=paths,
+            log_path=log_path,
         )
 
     def _stage_design_with_codex(
@@ -6238,34 +3726,12 @@ class Orchestrator:
         paths: Dict[str, Path],
         log_path: Path,
     ) -> None:
-        self._set_stage(job.job_id, JobStage.DESIGN_WITH_CODEX, log_path)
-
-        designer_prompt_path = self._docs_file(repository_path, "DESIGNER_PROMPT.md")
-        designer_prompt_path.write_text(
-            build_designer_prompt(
-                spec_path=str(paths["spec"]),
-                plan_path=str(paths["plan"]),
-                design_path=str(paths["design"]),
-            ),
-            encoding="utf-8",
+        self._content_stage_runtime.stage_design_with_codex(
+            job=job,
+            repository_path=repository_path,
+            paths=paths,
+            log_path=log_path,
         )
-
-        result = self.command_templates.run_template(
-            template_name=self._template_for_route("designer"),
-            variables=self._build_template_variables(job, paths, designer_prompt_path),
-            cwd=repository_path,
-            log_writer=self._actor_log_writer(log_path, "DESIGNER"),
-        )
-
-        if not paths["design"].exists() and result.stdout.strip():
-            paths["design"].write_text(result.stdout, encoding="utf-8")
-
-        if not paths["design"].exists():
-            raise CommandExecutionError(
-                "Designer did not produce DESIGN_SYSTEM.md. Next action: ensure designer command "
-                "writes to DESIGN_SYSTEM.md or emits markdown on stdout."
-            )
-        self._ensure_design_artifacts(repository_path, paths, log_path)
 
     def _stage_publish_with_codex(
         self,
@@ -6274,28 +3740,12 @@ class Orchestrator:
         paths: Dict[str, Path],
         log_path: Path,
     ) -> None:
-        """Run publisher-specific codex step and enforce handoff artifacts."""
-
-        self._set_stage(job.job_id, JobStage.IMPLEMENT_WITH_CODEX, log_path)
-        self._ensure_product_definition_ready(paths, log_path)
-        prompt_path = self._docs_file(repository_path, "CODER_PROMPT_PUBLISH.md")
-        prompt_path.write_text(
-            build_publisher_prompt(
-                spec_path=str(paths["spec"]),
-                plan_path=str(paths["plan"]),
-                design_path=str(paths["design"]),
-                publish_checklist_path=str(paths.get("publish_checklist", self._docs_file(repository_path, "PUBLISH_CHECKLIST.md"))),
-                publish_handoff_path=str(paths.get("publish_handoff", self._docs_file(repository_path, "PUBLISH_HANDOFF.md"))),
-            ),
-            encoding="utf-8",
+        self._content_stage_runtime.stage_publish_with_codex(
+            job=job,
+            repository_path=repository_path,
+            paths=paths,
+            log_path=log_path,
         )
-        self.command_templates.run_template(
-            template_name=self._template_for_route("publisher"),
-            variables=self._build_template_variables(job, paths, prompt_path),
-            cwd=repository_path,
-            log_writer=self._actor_log_writer(log_path, "PUBLISHER"),
-        )
-        self._ensure_publisher_artifacts(repository_path, paths, log_path)
 
     def _stage_copywriter_with_codex(
         self,
@@ -6304,28 +3754,12 @@ class Orchestrator:
         paths: Dict[str, Path],
         log_path: Path,
     ) -> None:
-        """Run copywriter step and produce customer-facing Korean copy docs."""
-
-        self._set_stage(job.job_id, JobStage.COPYWRITER_TASK, log_path)
-        prompt_path = self._docs_file(repository_path, "CODER_PROMPT_COPYWRITER.md")
-        prompt_path.write_text(
-            build_copywriter_prompt(
-                spec_path=str(paths["spec"]),
-                plan_path=str(paths["plan"]),
-                design_path=str(paths["design"]),
-                publish_handoff_path=str(paths.get("publish_handoff", self._docs_file(repository_path, "PUBLISH_HANDOFF.md"))),
-                copy_plan_path=str(paths.get("copy_plan", self._docs_file(repository_path, "COPYWRITING_PLAN.md"))),
-                copy_deck_path=str(paths.get("copy_deck", self._docs_file(repository_path, "COPY_DECK.md"))),
-            ),
-            encoding="utf-8",
+        self._content_stage_runtime.stage_copywriter_with_codex(
+            job=job,
+            repository_path=repository_path,
+            paths=paths,
+            log_path=log_path,
         )
-        self.command_templates.run_template(
-            template_name=self._template_for_route("copywriter"),
-            variables=self._build_template_variables(job, paths, prompt_path),
-            cwd=repository_path,
-            log_writer=self._actor_log_writer(log_path, "COPYWRITER"),
-        )
-        self._ensure_copywriter_artifacts(repository_path, paths, log_path)
 
     def _stage_documentation_with_claude(
         self,
@@ -6334,95 +3768,12 @@ class Orchestrator:
         paths: Dict[str, Path],
         log_path: Path,
     ) -> None:
-        """Run documentation stage with configured documentation route, then coder fallback."""
-
-        self._set_stage(job.job_id, JobStage.DOCUMENTATION_TASK, log_path)
-        prompt_path = self._docs_file(repository_path, "DOCUMENTATION_PROMPT.md")
-        bundle_path = self._docs_file(repository_path, "DOCUMENTATION_BUNDLE.md")
-        prompt_path.write_text(
-            build_documentation_prompt(
-                spec_path=str(paths["spec"]),
-                plan_path=str(paths["plan"]),
-                review_path=str(paths["review"]),
-                readme_path=str(paths.get("readme", repository_path / "README.md")),
-                copyright_path=str(paths.get("copyright", repository_path / "COPYRIGHT.md")),
-                development_guide_path=str(
-                    paths.get("development_guide", repository_path / "DEVELOPMENT_GUIDE.md")
-                ),
-                documentation_plan_path=str(
-                    paths.get("documentation_plan", self._docs_file(repository_path, "DOCUMENTATION_PLAN.md"))
-                ),
-            ),
-            encoding="utf-8",
+        self._content_stage_runtime.stage_documentation_with_claude(
+            job=job,
+            repository_path=repository_path,
+            paths=paths,
+            log_path=log_path,
         )
-
-        route_error: Optional[str] = None
-        bundle_applied = False
-        for resolved_template in self._template_candidates_for_route("documentation"):
-            if not self.command_templates.has_template(resolved_template):
-                continue
-            route_vars = {
-                **self._build_template_variables(job, paths, prompt_path),
-                "docs_bundle_path": str(bundle_path),
-                "pr_summary_path": str(bundle_path),
-                "commit_message_path": str(bundle_path),
-            }
-            try:
-                result = self.command_templates.run_template(
-                    template_name=resolved_template,
-                    variables=route_vars,
-                    cwd=repository_path,
-                    log_writer=self._actor_log_writer(log_path, "TECH_WRITER"),
-                )
-                if not bundle_path.exists() and str(result.stdout).strip():
-                    bundle_path.write_text(str(result.stdout).strip() + "\n", encoding="utf-8")
-                bundle_applied = self._apply_documentation_bundle(repository_path, bundle_path, paths, log_path)
-                if bundle_applied:
-                    self._append_actor_log(
-                        log_path,
-                        "ORCHESTRATOR",
-                        f"Documentation generated by route template: {resolved_template}",
-                    )
-                    break
-            except CommandExecutionError as error:
-                route_error = str(error)
-
-        if not bundle_applied:
-            if route_error:
-                self._append_actor_log(
-                    log_path,
-                    "ORCHESTRATOR",
-                    f"Documentation route failed. Fallback to coder route: {route_error}",
-                )
-            else:
-                self._append_actor_log(
-                    log_path,
-                    "ORCHESTRATOR",
-                    "Documentation route unavailable or output invalid. Fallback to coder route.",
-                )
-            fallback_prompt = self._docs_file(repository_path, "CODER_PROMPT_DOCUMENTATION_FALLBACK.md")
-            fallback_prompt.write_text(
-                (
-                    "Goal: 루트 기술 문서 3종과 문서 계획 파일을 최신화하세요.\n\n"
-                    f"- {paths.get('readme', repository_path / 'README.md')}\n"
-                    f"- {paths.get('copyright', repository_path / 'COPYRIGHT.md')}\n"
-                    f"- {paths.get('development_guide', repository_path / 'DEVELOPMENT_GUIDE.md')}\n"
-                    f"- {paths.get('documentation_plan', self._docs_file(repository_path, 'DOCUMENTATION_PLAN.md'))}\n\n"
-                    "규칙:\n"
-                    "- 한국어로 작성.\n"
-                    "- 프로젝트 구조/실행/테스트/운영 플로우를 반영.\n"
-                    "- 문서만 수정하고 불필요한 코드 변경 금지.\n"
-                ),
-                encoding="utf-8",
-            )
-            self.command_templates.run_template(
-                template_name=self._template_for_route("coder"),
-                variables=self._build_template_variables(job, paths, fallback_prompt),
-                cwd=repository_path,
-                log_writer=self._actor_log_writer(log_path, "TECH_WRITER_CODEX"),
-            )
-
-        self._ensure_documentation_artifacts(repository_path, paths, log_path)
 
     def _apply_documentation_bundle(
         self,
@@ -6431,45 +3782,12 @@ class Orchestrator:
         paths: Dict[str, Path],
         log_path: Path,
     ) -> bool:
-        """Parse Claude bundle output and write each target documentation file."""
-
-        if not bundle_path.exists():
-            return False
-        raw = bundle_path.read_text(encoding="utf-8", errors="replace")
-        pattern = re.compile(
-            r"(?ms)^<<<FILE:(?P<path>[^\n>]+)>>>\n(?P<body>.*?)(?=^<<<FILE:|\Z)"
+        return self._content_stage_runtime.apply_documentation_bundle(
+            repository_path=repository_path,
+            bundle_path=bundle_path,
+            paths=paths,
+            log_path=log_path,
         )
-        matches = list(pattern.finditer(raw))
-        if not matches:
-            return False
-
-        allowed_targets = {
-            "README.md": paths.get("readme", repository_path / "README.md"),
-            "COPYRIGHT.md": paths.get("copyright", repository_path / "COPYRIGHT.md"),
-            "DEVELOPMENT_GUIDE.md": paths.get("development_guide", repository_path / "DEVELOPMENT_GUIDE.md"),
-            "_docs/DOCUMENTATION_PLAN.md": paths.get(
-                "documentation_plan", self._docs_file(repository_path, "DOCUMENTATION_PLAN.md")
-            ),
-        }
-        written_count = 0
-        for matched in matches:
-            key = str(matched.group("path") or "").strip()
-            target = allowed_targets.get(key)
-            if target is None:
-                continue
-            body = str(matched.group("body") or "").strip()
-            if not body:
-                continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(body + "\n", encoding="utf-8")
-            written_count += 1
-        if written_count > 0:
-            self._append_actor_log(
-                log_path,
-                "ORCHESTRATOR",
-                f"Documentation bundle applied: {written_count} file(s)",
-            )
-        return written_count > 0
 
     def _stage_run_tests(
         self,
@@ -6566,18 +3884,7 @@ class Orchestrator:
         )
 
     def _resolve_app_type(self, repository_path: Path, paths: Dict[str, Path]) -> str:
-        """Resolve app_type from SPEC.json with safe fallback."""
-
-        spec_json_path = paths.get("spec_json", self._docs_file(repository_path, "SPEC.json"))
-        if isinstance(spec_json_path, Path) and spec_json_path.exists():
-            try:
-                payload = json.loads(spec_json_path.read_text(encoding="utf-8"))
-                value = str(payload.get("app_type", "")).strip().lower()
-                if value in {"web", "api", "cli", "app"}:
-                    return value
-            except Exception:  # noqa: BLE001
-                pass
-        return "web"
+        return self._app_type_runtime.resolve_app_type(repository_path, paths)
 
     def _stage_skip_ux_review_for_non_web(
         self,
@@ -6588,27 +3895,12 @@ class Orchestrator:
         *,
         app_type: str,
     ) -> None:
-        """Write skip record when UX E2E stage is not applicable."""
-
-        self._set_stage(job.job_id, JobStage.UX_E2E_REVIEW, log_path)
-        review_path = self._docs_file(repository_path, "UX_REVIEW.md")
-        review_path.write_text(
-            (
-                "# UX REVIEW\n\n"
-                "## Summary\n"
-                f"- Stage: `{JobStage.UX_E2E_REVIEW.value}`\n"
-                "- Verdict: `SKIPPED`\n"
-                f"- Reason: `non-web app_type ({app_type})`\n\n"
-                "## Next Action\n"
-                "- non-web 타입은 UX 스크린샷 E2E를 수행하지 않습니다.\n"
-                "- API/CLI 전용 검증 결과를 우선 확인하세요.\n"
-            ),
-            encoding="utf-8",
-        )
-        self._append_actor_log(
+        self._app_type_runtime.stage_skip_ux_review_for_non_web(
+            job,
+            repository_path,
+            paths,
             log_path,
-            "ORCHESTRATOR",
-            f"ux_e2e_review skipped for app_type={app_type}",
+            app_type=app_type,
         )
 
     @staticmethod
@@ -6629,26 +3921,11 @@ class Orchestrator:
         paths: Dict[str, Path],
         log_path: Path,
     ) -> None:
-        """Run UX-focused E2E checks with PC/mobile screenshots and summary markdown."""
-
-        tests_passed = self._stage_run_tests(
+        self._ux_review_runtime.stage_ux_e2e_review(
             job=job,
             repository_path=repository_path,
-            stage=JobStage.UX_E2E_REVIEW,
+            paths=paths,
             log_path=log_path,
-        )
-        preview_info = self._deploy_preview_and_smoke_test(job, repository_path, log_path)
-        screenshot_info = self._capture_ux_screenshots(
-            repository_path=repository_path,
-            preview_info=preview_info,
-            log_path=log_path,
-        )
-        self._write_ux_review_markdown(
-            repository_path=repository_path,
-            spec_path=paths.get("spec"),
-            preview_info=preview_info,
-            screenshot_info=screenshot_info,
-            tests_passed=tests_passed,
         )
 
     def _capture_ux_screenshots(
@@ -6657,56 +3934,11 @@ class Orchestrator:
         preview_info: Dict[str, str],
         log_path: Path,
     ) -> Dict[str, Dict[str, str]]:
-        """Capture desktop/mobile screenshots against preview URL."""
-
-        artifacts_dir = repository_path / "artifacts" / "ux"
-        artifacts_dir.mkdir(parents=True, exist_ok=True)
-        screenshot_url = str(preview_info.get("local_url", "")).strip() or str(
-            preview_info.get("external_url", "")
-        ).strip()
-
-        results: Dict[str, Dict[str, str]] = {
-            "pc": {"status": "skipped", "path": "artifacts/ux/pc.png", "note": "preview unavailable"},
-            "mobile": {"status": "skipped", "path": "artifacts/ux/mobile.png", "note": "preview unavailable"},
-        }
-        if not screenshot_url:
-            return results
-
-        targets = [
-            ("pc", "Desktop Chrome", artifacts_dir / "pc.png"),
-            ("mobile", "iPhone 13", artifacts_dir / "mobile.png"),
-        ]
-        for key, device, target_path in targets:
-            command = (
-                "npx -y playwright screenshot "
-                f"--device={shlex.quote(device)} "
-                f"{shlex.quote(screenshot_url)} "
-                f"{shlex.quote(str(target_path))}"
-            )
-            try:
-                self._run_shell(
-                    command=command,
-                    cwd=repository_path,
-                    log_path=log_path,
-                    purpose=f"ux screenshot capture ({key})",
-                )
-                results[key] = {
-                    "status": "captured",
-                    "path": str(target_path.relative_to(repository_path)),
-                    "note": f"{device} capture completed",
-                }
-            except CommandExecutionError as error:
-                results[key] = {
-                    "status": "failed",
-                    "path": str(target_path.relative_to(repository_path)),
-                    "note": str(error),
-                }
-                self._append_actor_log(
-                    log_path,
-                    "ORCHESTRATOR",
-                    f"UX screenshot capture failed ({key}): {error}",
-                )
-        return results
+        return self._ux_review_runtime.capture_ux_screenshots(
+            repository_path=repository_path,
+            preview_info=preview_info,
+            log_path=log_path,
+        )
 
     def _write_ux_review_markdown(
         self,
@@ -6716,77 +3948,17 @@ class Orchestrator:
         screenshot_info: Dict[str, Dict[str, str]],
         tests_passed: bool,
     ) -> None:
-        """Write UX_REVIEW.md with screenshot status and next action guidance."""
-
-        checklist = self._extract_spec_checklist(spec_path)
-        verdict = (
-            "PASS"
-            if tests_passed
-            and screenshot_info.get("pc", {}).get("status") == "captured"
-            and screenshot_info.get("mobile", {}).get("status") == "captured"
-            else "NEEDS_FIX"
-        )
-        review_lines = [
-            "# UX REVIEW",
-            "",
-            "## Summary",
-            f"- Stage: `{JobStage.UX_E2E_REVIEW.value}`",
-            f"- Verdict: `{verdict}`",
-            f"- Test status: `{'PASS' if tests_passed else 'FAIL'}`",
-            f"- Preview URL: {preview_info.get('external_url', 'n/a')}",
-            f"- Health URL: {preview_info.get('health_url', 'n/a')}",
-            "",
-            "## Screenshot Artifacts",
-            (
-                f"- PC: `{screenshot_info.get('pc', {}).get('path', 'n/a')}` "
-                f"({screenshot_info.get('pc', {}).get('status', 'unknown')}) "
-                f"- {screenshot_info.get('pc', {}).get('note', '')}"
-            ),
-            (
-                f"- Mobile: `{screenshot_info.get('mobile', {}).get('path', 'n/a')}` "
-                f"({screenshot_info.get('mobile', {}).get('status', 'unknown')}) "
-                f"- {screenshot_info.get('mobile', {}).get('note', '')}"
-            ),
-            "",
-            "## Intent Checklist (from SPEC)",
-        ]
-        if checklist:
-            review_lines.extend(f"- {line}" for line in checklist)
-        else:
-            review_lines.append("- SPEC에서 체크리스트 항목을 찾지 못했습니다. 핵심 요구사항 수동 확인 필요.")
-        review_lines.extend(
-            [
-                "",
-                "## Next Action",
-                "- 다음 코더 단계에서 UX_REVIEW.md의 실패/누락 항목을 우선 수정한다.",
-                "- PC/Mobile 스크린샷이 모두 captured 상태가 될 때까지 반복한다.",
-                "",
-            ]
-        )
-        self._docs_file(repository_path, "UX_REVIEW.md").write_text(
-            "\n".join(review_lines),
-            encoding="utf-8",
+        self._ux_review_runtime.write_ux_review_markdown(
+            repository_path=repository_path,
+            spec_path=spec_path,
+            preview_info=preview_info,
+            screenshot_info=screenshot_info,
+            tests_passed=tests_passed,
         )
 
     @staticmethod
     def _extract_spec_checklist(spec_path: Optional[Path]) -> List[str]:
-        """Extract concise checklist lines from SPEC.md."""
-
-        if spec_path is None or not spec_path.exists():
-            return []
-        try:
-            lines = spec_path.read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError:
-            return []
-
-        checklist: List[str] = []
-        for line in lines:
-            stripped = line.strip()
-            if stripped.startswith("- ") or re.match(r"^\d+\.\s+", stripped):
-                checklist.append(stripped.lstrip("- ").strip())
-            if len(checklist) >= 8:
-                break
-        return checklist
+        return UxReviewRuntime.extract_spec_checklist(spec_path)
 
     def _run_fix_retry_loop_after_test_failure(
         self,
@@ -6808,114 +3980,10 @@ class Orchestrator:
         repository_path: Path,
         log_path: Path,
     ) -> None:
-        """Summarize current working tree changes into CODE_CHANGE_SUMMARY.md."""
-
-        self._set_stage(job.job_id, JobStage.SUMMARIZE_CODE_CHANGES, log_path)
-        status_result = self._run_shell(
-            command=f"git -C {shlex.quote(str(repository_path))} status --porcelain",
-            cwd=repository_path,
-            log_path=log_path,
-            purpose="git status for code change summary",
-        )
-        numstat_result = self._run_shell(
-            command=f"git -C {shlex.quote(str(repository_path))} diff --numstat",
-            cwd=repository_path,
-            log_path=log_path,
-            purpose="git diff --numstat for code change summary",
-        )
-
-        changed_files: List[Dict[str, str]] = []
-        for raw_line in status_result.stdout.splitlines():
-            line = raw_line.rstrip()
-            if not line:
-                continue
-            status_code = line[:2].strip() or line[:2]
-            path_text = line[3:].strip() if len(line) > 3 else "(unknown)"
-            changed_files.append(
-                {
-                    "status": status_code,
-                    "path": path_text,
-                }
-            )
-
-        numstats: Dict[str, Dict[str, str]] = {}
-        for raw_line in numstat_result.stdout.splitlines():
-            line = raw_line.strip()
-            if not line:
-                continue
-            parts = line.split("\t")
-            if len(parts) < 3:
-                continue
-            numstats[parts[2]] = {"added": parts[0], "deleted": parts[1]}
-
-        summary_path = self._docs_file(repository_path, "CODE_CHANGE_SUMMARY.md")
-        fallback_lines = [
-            "# CODE CHANGE SUMMARY",
-            "",
-            f"- Job: `{job.job_id}`",
-            f"- Issue: `#{job.issue_number}`",
-            f"- Stage: `{JobStage.SUMMARIZE_CODE_CHANGES.value}`",
-            f"- Generated at: `{utc_now_iso()}`",
-            "",
-        ]
-
-        if not changed_files:
-            fallback_lines.extend(
-                [
-                    "## Changed Files",
-                    "- 변경 파일이 감지되지 않았습니다.",
-                    "",
-                ]
-            )
-        else:
-            fallback_lines.extend(
-                [
-                    "## Changed Files",
-                    "| Status | Path | Added | Deleted |",
-                    "|---|---|---:|---:|",
-                ]
-            )
-            for item in changed_files:
-                path_key = item["path"]
-                stat = numstats.get(path_key, {"added": "-", "deleted": "-"})
-                fallback_lines.append(
-                    f"| `{item['status']}` | `{path_key}` | `{stat['added']}` | `{stat['deleted']}` |"
-                )
-            fallback_lines.append("")
-
-        fallback_lines.extend(
-            [
-                "## Notes",
-                "- 본 문서는 구현 직후 변경 파일을 빠르게 검토하기 위한 자동 요약입니다.",
-                "- 이후 테스트/리뷰/수정 단계에서 변경 내역이 추가될 수 있습니다.",
-                "",
-            ]
-        )
-        prompt = self._build_code_change_summary_prompt(
+        self._summary_runtime.stage_summarize_code_changes(
             job=job,
-            changed_files=changed_files,
-            numstats=numstats,
-        )
-        copilot_summary = self._summarize_changes_with_copilot(
-            job=job,
-            prompt=prompt,
             repository_path=repository_path,
             log_path=log_path,
-        )
-        if copilot_summary:
-            summary_path.write_text(copilot_summary.rstrip() + "\n", encoding="utf-8")
-            self._append_actor_log(
-                log_path,
-                "CODEX_HELPER",
-                f"Wrote code change summary via helper route: {summary_path.name}",
-            )
-            return
-
-        summary_path.write_text("\n".join(fallback_lines), encoding="utf-8")
-        self._append_actor_log(
-            log_path,
-            "ORCHESTRATOR",
-            f"Wrote code change summary with fallback: {summary_path.name}",
         )
 
     def _build_code_change_summary_prompt(
@@ -6924,36 +3992,11 @@ class Orchestrator:
         changed_files: List[Dict[str, str]],
         numstats: Dict[str, Dict[str, str]],
     ) -> str:
-        """Create Copilot prompt for CODE_CHANGE_SUMMARY.md generation."""
-
-        lines = [
-            "다음 변경 내역을 바탕으로 CODE_CHANGE_SUMMARY.md 본문(markdown)만 생성하세요.",
-            "",
-            "형식 규칙:",
-            "- 제목은 반드시 '# CODE CHANGE SUMMARY'",
-            "- 한국어로 작성",
-            "- 다음 섹션 포함: Changed Files, Notes",
-            "- Changed Files는 표 형식(Status, Path, Added, Deleted)",
-            "- 불필요한 서론/결론/코드블록 금지",
-            "",
-            "메타:",
-            f"- Job: {job.job_id}",
-            f"- Issue: #{job.issue_number}",
-            f"- Stage: {JobStage.SUMMARIZE_CODE_CHANGES.value}",
-            "",
-            "변경 파일 목록:",
-        ]
-        if not changed_files:
-            lines.append("- 변경 파일 없음")
-        else:
-            for item in changed_files:
-                path_key = item["path"]
-                stat = numstats.get(path_key, {"added": "-", "deleted": "-"})
-                lines.append(
-                    f"- {item['status']} | {path_key} | +{stat['added']} / -{stat['deleted']}"
-                )
-        lines.append("")
-        return "\n".join(lines)
+        return self._summary_runtime._build_code_change_summary_prompt(
+            job=job,
+            changed_files=changed_files,
+            numstats=numstats,
+        )
 
     def _summarize_changes_with_copilot(
         self,
@@ -6962,45 +4005,12 @@ class Orchestrator:
         repository_path: Path,
         log_path: Path,
     ) -> Optional[str]:
-        """Try helper-route summary generation and return markdown text."""
-
-        prompt_path = self._docs_file(repository_path, "CODEX_HELPER_SUMMARY_PROMPT.md")
-        prompt_path.write_text(prompt, encoding="utf-8")
-
-        if self._find_configured_template_for_route("codex_helper"):
-            template_variables = {
-                "repository": job.repository,
-                "issue_number": str(job.issue_number),
-                "issue_title": job.issue_title,
-                "issue_url": job.issue_url,
-                "branch_name": job.branch_name,
-                "work_dir": str(repository_path),
-                "prompt_file": str(prompt_path),
-            }
-            try:
-                result = self.command_templates.run_template(
-                    template_name=self._template_for_route("codex_helper"),
-                    variables=template_variables,
-                    cwd=repository_path,
-                    log_writer=self._actor_log_writer(log_path, "CODEX_HELPER"),
-                )
-            except Exception as error:  # noqa: BLE001 - fallback to built-in command
-                self._append_actor_log(
-                    log_path,
-                    "CODEX_HELPER",
-                    f"Helper route failed without external fallback: {error}",
-                )
-                return None
-        else:
-            return None
-        if int(getattr(result, "exit_code", 1)) != 0:
-            return None
-        output = str(getattr(result, "stdout", "")).strip()
-        if not output:
-            return None
-        if "# CODE CHANGE SUMMARY" not in output:
-            output = "# CODE CHANGE SUMMARY\n\n" + output
-        return output
+        return self._summary_runtime._summarize_changes_with_helper(
+            job=job,
+            prompt=prompt,
+            repository_path=repository_path,
+            log_path=log_path,
+        )
 
     def _write_test_failure_reason(
         self,
@@ -7139,9 +4149,7 @@ class Orchestrator:
         changed_paths: List[str],
         log_path: Path,
     ) -> str:
-        """Generate one-line commit summary using configured helper routes."""
-
-        summary = self._prepare_commit_summary_with_copilot(
+        return self._summary_runtime.prepare_commit_summary_with_ai(
             job=job,
             repository_path=repository_path,
             stage_name=stage_name,
@@ -7149,19 +4157,6 @@ class Orchestrator:
             changed_paths=changed_paths,
             log_path=log_path,
         )
-        if self._is_usable_commit_summary(summary):
-            return summary
-
-        summary = self._prepare_commit_summary_with_claude(
-            job=job,
-            repository_path=repository_path,
-            stage_name=stage_name,
-            commit_type=commit_type,
-            log_path=log_path,
-        )
-        if self._is_usable_commit_summary(summary):
-            return summary
-        return ""
 
     def _prepare_commit_summary_with_claude(
         self,
@@ -7171,68 +4166,13 @@ class Orchestrator:
         commit_type: str,
         log_path: Path,
     ) -> str:
-        """Generate one-line Korean commit summary using configured summary route."""
-
-        template_name = self._find_configured_template_for_route("commit_summary")
-        if not template_name:
-            return ""
-
-        prompt_path = self._docs_file(
-            repository_path,
-            f"COMMIT_MESSAGE_PROMPT_{stage_name.upper()}.md",
+        return self._summary_runtime._prepare_commit_summary_with_template(
+            job=job,
+            repository_path=repository_path,
+            stage_name=stage_name,
+            commit_type=commit_type,
+            log_path=log_path,
         )
-        output_path = self._docs_file(
-            repository_path,
-            f"COMMIT_MESSAGE_{stage_name.upper()}.txt",
-        )
-        prompt_path.write_text(
-            build_commit_message_prompt(
-                spec_path=str(self._docs_file(repository_path, "SPEC.md")),
-                plan_path=str(self._docs_file(repository_path, "PLAN.md")),
-                review_path=str(self._docs_file(repository_path, "REVIEW.md")),
-                design_path=str(self._docs_file(repository_path, "DESIGN_SYSTEM.md")),
-                stage_name=stage_name,
-                commit_type=commit_type,
-            ),
-            encoding="utf-8",
-        )
-
-        try:
-            self.command_templates.run_template(
-                template_name=template_name,
-                variables={
-                    **self._build_template_variables(
-                        job,
-                        {
-                            "spec": self._docs_file(repository_path, "SPEC.md"),
-                            "plan": self._docs_file(repository_path, "PLAN.md"),
-                            "review": self._docs_file(repository_path, "REVIEW.md"),
-                            "design": self._docs_file(repository_path, "DESIGN_SYSTEM.md"),
-                            "status": self._docs_file(repository_path, "STATUS.md"),
-                        },
-                        prompt_path,
-                    ),
-                    "commit_message_path": str(output_path),
-                    "last_error": "",
-                    "pr_summary_path": str(self._docs_file(repository_path, "PR_SUMMARY.md")),
-                },
-                cwd=repository_path,
-                log_writer=self._actor_log_writer(log_path, "TECH_WRITER"),
-            )
-        except Exception as error:  # noqa: BLE001
-            self._append_actor_log(
-                log_path,
-                "TECH_WRITER",
-                f"Commit summary generation failed: {error}",
-            )
-            return ""
-
-        candidate = ""
-        if output_path.exists():
-            candidate = output_path.read_text(encoding="utf-8", errors="replace").strip()
-        if not candidate:
-            return ""
-        return self._sanitize_commit_summary(candidate)
 
     def _prepare_commit_summary_with_copilot(
         self,
@@ -7243,105 +4183,22 @@ class Orchestrator:
         changed_paths: List[str],
         log_path: Path,
     ) -> str:
-        """Try to generate one-line commit summary with helper route."""
-
-        prompt_lines = [
-            "다음 변경사항의 커밋 제목 요약 1줄만 작성하세요.",
-            "규칙:",
-            "- 한국어",
-            "- 12~72자",
-            "- 접두어(feat:, fix:, docs:)는 제외",
-            "- 불필요한 따옴표/코드블록/번호 금지",
-            "",
-            f"메타: issue #{job.issue_number}, stage={stage_name}, type={commit_type}",
-            "변경 파일:",
-        ]
-        unique_paths = []
-        seen = set()
-        for path in changed_paths:
-            key = str(path).strip()
-            if not key or key in seen:
-                continue
-            seen.add(key)
-            unique_paths.append(key)
-            if len(unique_paths) >= 24:
-                break
-        if not unique_paths:
-            prompt_lines.append("- 변경 파일 정보를 찾지 못함")
-        else:
-            for path in unique_paths:
-                prompt_lines.append(f"- {path}")
-        prompt = "\n".join(prompt_lines).strip() + "\n"
-        prompt_path = self._docs_file(repository_path, f"CODEX_HELPER_COMMIT_PROMPT_{stage_name.upper()}.md")
-        prompt_path.write_text(prompt, encoding="utf-8")
-
-        if self._find_configured_template_for_route("codex_helper"):
-            template_variables = {
-                "repository": job.repository,
-                "issue_number": str(job.issue_number),
-                "issue_title": job.issue_title,
-                "issue_url": job.issue_url,
-                "branch_name": job.branch_name,
-                "work_dir": str(repository_path),
-                "prompt_file": str(prompt_path),
-            }
-            try:
-                result = self.command_templates.run_template(
-                    template_name=self._template_for_route("codex_helper"),
-                    variables=template_variables,
-                    cwd=repository_path,
-                    log_writer=self._actor_log_writer(log_path, "CODEX_HELPER"),
-                )
-            except Exception as error:  # noqa: BLE001
-                self._append_actor_log(
-                    log_path,
-                    "CODEX_HELPER",
-                    f"Helper commit summary template failed: {error}",
-                )
-                return ""
-        else:
-            return ""
-
-        if int(getattr(result, "exit_code", 1)) != 0:
-            return ""
-        output = str(getattr(result, "stdout", "")).strip()
-        return self._sanitize_commit_summary(output)
+        return self._summary_runtime._prepare_commit_summary_with_helper(
+            job=job,
+            repository_path=repository_path,
+            stage_name=stage_name,
+            commit_type=commit_type,
+            changed_paths=changed_paths,
+            log_path=log_path,
+        )
 
     @staticmethod
     def _sanitize_commit_summary(raw: str) -> str:
-        """Normalize model output into a clean one-line commit summary."""
-
-        text = str(raw or "").strip()
-        if not text:
-            return ""
-        first = text.splitlines()[0].strip()
-        first = first.strip("`").strip()
-        first = re.sub(r"^\s*[-*#>\d\.\)\(]+\s*", "", first)
-        first = re.sub(r"^\s*(feat|fix|docs|chore|refactor|style|test)\s*:\s*", "", first, flags=re.IGNORECASE)
-        first = re.sub(r"\s+", " ", first).strip()
-        return first[:120]
+        return SummaryRuntime.sanitize_commit_summary(raw)
 
     @staticmethod
     def _is_usable_commit_summary(summary: str) -> bool:
-        """Validate summary quality before using it as commit title body."""
-
-        text = str(summary or "").strip()
-        if len(text) < 8:
-            return False
-        lowered = text.lower()
-        blocked = {
-            "n/a",
-            "없음",
-            "none",
-            "commit message",
-            "요약 없음",
-            "변경사항 없음",
-        }
-        if lowered in blocked:
-            return False
-        if "```" in text:
-            return False
-        return True
+        return SummaryRuntime.is_usable_commit_summary(summary)
 
     def _stage_review_with_gemini(
         self,
@@ -7350,37 +4207,12 @@ class Orchestrator:
         paths: Dict[str, Path],
         log_path: Path,
     ) -> None:
-        self._set_stage(job.job_id, JobStage.REVIEW_WITH_GEMINI, log_path)
-        self._write_memory_retrieval_artifacts(job=job, repository_path=repository_path, paths=paths)
-
-        reviewer_prompt_path = self._docs_file(repository_path, "REVIEWER_PROMPT.md")
-        reviewer_prompt_path.write_text(
-            build_reviewer_prompt(
-                spec_path=str(paths["spec"]),
-                plan_path=str(paths["plan"]),
-                review_path=str(paths["review"]),
-                memory_selection_path=str(paths.get("memory_selection", self._docs_file(repository_path, "MEMORY_SELECTION.json"))),
-                memory_context_path=str(paths.get("memory_context", self._docs_file(repository_path, "MEMORY_CONTEXT.json"))),
-                role_context=self._build_route_runtime_context("reviewer"),
-            ),
-            encoding="utf-8",
+        self._review_fix_runtime.stage_review_with_gemini(
+            job=job,
+            repository_path=repository_path,
+            paths=paths,
+            log_path=log_path,
         )
-
-        result = self.command_templates.run_template(
-            template_name=self._template_for_route("reviewer"),
-            variables=self._build_template_variables(job, paths, reviewer_prompt_path),
-            cwd=repository_path,
-            log_writer=self._actor_log_writer(log_path, "REVIEWER"),
-        )
-
-        if not paths["review"].exists() and result.stdout.strip():
-            paths["review"].write_text(result.stdout, encoding="utf-8")
-
-        if not paths["review"].exists():
-            raise CommandExecutionError(
-                "Reviewer did not produce REVIEW.md. Next action: ensure reviewer "
-                "template writes to REVIEW.md or outputs markdown to stdout."
-            )
 
     def _stage_fix_with_codex(
         self,
@@ -7389,61 +4221,11 @@ class Orchestrator:
         paths: Dict[str, Path],
         log_path: Path,
     ) -> None:
-        self._set_stage(job.job_id, JobStage.FIX_WITH_CODEX, log_path)
-        self._write_memory_retrieval_artifacts(job=job, repository_path=repository_path, paths=paths)
-        improvement_runtime = self._read_improvement_runtime_context(paths)
-        strategy = str(improvement_runtime.get("strategy", "")).strip()
-        scope_restriction = str(improvement_runtime.get("scope_restriction", "")).strip()
-
-        if strategy == "design_rebaseline" or scope_restriction == "MVP_redefinition":
-            self._append_actor_log(
-                log_path,
-                "ORCHESTRATOR",
-                "Improvement strategy requires re-planning. Routing fix stage to planner instead of coder.",
-            )
-            self._stage_plan_with_gemini(
-                job,
-                repository_path,
-                paths,
-                log_path,
-                planning_mode="dev_planning",
-            )
-            return
-
-        coding_goal = "REVIEW.md TODO 반영 및 테스트 안정화"
-        next_titles = improvement_runtime.get("task_titles", [])
-        if next_titles:
-            coding_goal = (
-                "NEXT_IMPROVEMENT_TASKS.json 기반 우선 개선 항목 반영 및 테스트 안정화: "
-                + ", ".join(str(title) for title in next_titles[:3])
-            )
-
-        coder_prompt_path = self._docs_file(repository_path, "CODER_PROMPT_FIX.md")
-        coder_prompt_path.write_text(
-            build_coder_prompt(
-                plan_path=str(paths["plan"]),
-                review_path=str(paths["review"]),
-                coding_goal=coding_goal,
-                design_path=str(paths.get("design", "")),
-                design_tokens_path=str(paths.get("design_tokens", self._docs_file(repository_path, "DESIGN_TOKENS.json"))),
-                token_handoff_path=str(paths.get("token_handoff", self._docs_file(repository_path, "TOKEN_HANDOFF.md"))),
-                publish_handoff_path=str(paths.get("publish_handoff", self._docs_file(repository_path, "PUBLISH_HANDOFF.md"))),
-                improvement_plan_path=str(paths.get("improvement_plan", self._docs_file(repository_path, "IMPROVEMENT_PLAN.md"))),
-                improvement_loop_state_path=str(paths.get("improvement_loop_state", self._docs_file(repository_path, "IMPROVEMENT_LOOP_STATE.json"))),
-                next_improvement_tasks_path=str(paths.get("next_improvement_tasks", self._docs_file(repository_path, "NEXT_IMPROVEMENT_TASKS.json"))),
-                memory_selection_path=str(paths.get("memory_selection", self._docs_file(repository_path, "MEMORY_SELECTION.json"))),
-                memory_context_path=str(paths.get("memory_context", self._docs_file(repository_path, "MEMORY_CONTEXT.json"))),
-                operator_inputs_path=str(paths.get("operator_inputs", self._docs_file(repository_path, "OPERATOR_INPUTS.json"))),
-                role_context=self._build_route_runtime_context("coder"),
-            ),
-            encoding="utf-8",
-        )
-
-        self.command_templates.run_template(
-            template_name=self._template_for_route("coder"),
-            variables=self._build_template_variables(job, paths, coder_prompt_path),
-            cwd=repository_path,
-            log_writer=self._actor_log_writer(log_path, "CODER"),
+        self._review_fix_runtime.stage_fix_with_codex(
+            job=job,
+            repository_path=repository_path,
+            paths=paths,
+            log_path=log_path,
         )
 
     @staticmethod
@@ -7452,12 +4234,10 @@ class Orchestrator:
         return read_improvement_runtime_context(paths)
 
     def _stage_push_branch(self, job: JobRecord, repository_path: Path, log_path: Path) -> None:
-        self._set_stage(job.job_id, JobStage.PUSH_BRANCH, log_path)
-        self._push_branch_with_recovery(
+        self._provider_runtime.stage_push_branch(
+            job=job,
             repository_path=repository_path,
-            branch_name=job.branch_name,
             log_path=log_path,
-            purpose="git push",
         )
 
     def _stage_create_pr(
@@ -7467,89 +4247,12 @@ class Orchestrator:
         paths: Dict[str, Path],
         log_path: Path,
     ) -> None:
-        self._set_stage(job.job_id, JobStage.CREATE_PR, log_path)
-        refreshed_job = self._require_job(job.job_id)
-        execution_repository = self._job_execution_repository(refreshed_job)
-        preview_info = self._deploy_preview_and_smoke_test(refreshed_job, repository_path, log_path)
-
-        pr_body_path = self._docs_file(repository_path, "PR_BODY.md")
-        generated_summary_path = self._stage_prepare_pr_summary_with_claude(
-            refreshed_job,
-            repository_path,
-            paths,
-            log_path,
+        self._provider_runtime.stage_create_pr(
+            job=job,
+            repository_path=repository_path,
+            paths=paths,
+            log_path=log_path,
         )
-        if generated_summary_path is not None and generated_summary_path.exists():
-            content = generated_summary_path.read_text(encoding="utf-8", errors="replace").strip()
-            if content:
-                pr_body_path.write_text(content + "\n", encoding="utf-8")
-            else:
-                pr_body_path.write_text(
-                    (
-                        "## Summary\n"
-                        "- Automated by AgentHub worker\n"
-                        "- Generated from deterministic stage pipeline\n\n"
-                        f"{self._issue_reference_line(refreshed_job)}\n"
-                    ),
-                    encoding="utf-8",
-                )
-        else:
-            pr_body_path.write_text(
-                (
-                    "## Summary\n"
-                    "- Automated by AgentHub worker\n"
-                    "- Generated from deterministic stage pipeline\n\n"
-                    f"{self._issue_reference_line(refreshed_job)}\n"
-                    ),
-                    encoding="utf-8",
-                )
-
-        self._append_preview_section_to_pr_body(pr_body_path, preview_info)
-
-        title = f"AgentHub: {refreshed_job.issue_title}"
-        create_command = (
-            f"gh pr create --repo {shlex.quote(execution_repository)} "
-            f"--head {shlex.quote(job.branch_name)} "
-            f"--base {shlex.quote(self.settings.default_branch)} "
-            f"--title {shlex.quote(title)} "
-            f"--body-file {shlex.quote(str(pr_body_path))}"
-        )
-
-        create_result = None
-        try:
-            create_result = self._run_shell(
-                command=create_command,
-                cwd=repository_path,
-                log_path=log_path,
-                purpose="create pull request",
-            )
-        except CommandExecutionError as error:
-            if "already exists" not in str(error).lower():
-                raise
-            self._append_actor_log(
-                log_path,
-                "GITHUB",
-                "PR already exists. Will update body and fetch existing PR URL.",
-            )
-            self._run_shell(
-                command=(
-                    f"gh pr edit --repo {shlex.quote(execution_repository)} "
-                    f"{shlex.quote(job.branch_name)} "
-                    f"--body-file {shlex.quote(str(pr_body_path))}"
-                ),
-                cwd=repository_path,
-                log_path=log_path,
-                purpose="update existing pull request body",
-            )
-
-        pr_url = self._get_pr_url(job, repository_path, log_path, create_result)
-        if pr_url:
-            self.store.update_job(job.job_id, pr_url=pr_url)
-        else:
-            raise CommandExecutionError(
-                "PR creation appears to have succeeded but URL was not found. "
-                "Next action: run `gh pr view <branch> --json url` manually."
-            )
 
     def _deploy_preview_and_smoke_test(
         self,
@@ -7557,234 +4260,34 @@ class Orchestrator:
         repository_path: Path,
         log_path: Path,
     ) -> Dict[str, str]:
-        """Build/run Docker preview and return metadata for PR body."""
-
-        info: Dict[str, str] = {
-            "status": "skipped",
-            "reason": "",
-            "container_name": "",
-            "image_tag": "",
-            "port": "",
-            "external_url": "",
-            "local_url": "",
-            "health_url": "",
-            "cors_origins": self.settings.docker_preview_cors_origins,
-        }
-
-        if not self.settings.docker_preview_enabled:
-            info["reason"] = "Docker preview is disabled by configuration."
-            self._write_preview_markdown(repository_path, info)
-            return info
-
-        dockerfile_path = repository_path / "Dockerfile"
-        if not dockerfile_path.exists():
-            info["reason"] = "Dockerfile not found in repository root."
-            self._append_actor_log(log_path, "DOCKER", info["reason"])
-            self._write_preview_markdown(repository_path, info)
-            return info
-
-        port = self._allocate_preview_port()
-        if port is None:
-            info["reason"] = (
-                f"No available preview port in range "
-                f"{self.settings.docker_preview_port_start}-{self.settings.docker_preview_port_end}."
-            )
-            self._append_actor_log(log_path, "DOCKER", info["reason"])
-            self._write_preview_markdown(repository_path, info)
-            return info
-
-        container_name = f"agenthub-preview-{job.job_id[:8]}"
-        image_tag = f"agenthub/{job.app_code}-{job.job_id[:8]}:latest"
-        container_port = self._detect_container_port(repository_path)
-        external_url = f"http://{self.settings.docker_preview_host}:{port}"
-        local_url = f"http://127.0.0.1:{port}"
-        health_url = f"{local_url}{self.settings.docker_preview_health_path}"
-
-        info.update(
-            {
-                "container_name": container_name,
-                "image_tag": image_tag,
-                "port": str(port),
-                "container_port": str(container_port),
-                "external_url": external_url,
-                "local_url": local_url,
-                "health_url": health_url,
-            }
+        return self._preview_runtime.deploy_preview_and_smoke_test(
+            job=job,
+            repository_path=repository_path,
+            log_path=log_path,
         )
 
-        try:
-            self._run_shell(
-                command="docker --version",
-                cwd=repository_path,
-                log_path=log_path,
-                purpose="check docker cli",
-            )
-
-            self._execute_shell_command(
-                command=f"docker rm -f {shlex.quote(container_name)}",
-                cwd=repository_path,
-                log_writer=self._actor_log_writer(log_path, "DOCKER"),
-                check=False,
-                command_purpose="cleanup previous preview container",
-            )
-
-            self._run_shell(
-                command=f"docker build -t {shlex.quote(image_tag)} .",
-                cwd=repository_path,
-                log_path=log_path,
-                purpose="docker build preview image",
-            )
-            self._run_shell(
-                command=(
-                    f"docker run -d --name {shlex.quote(container_name)} "
-                    f"-p {port}:{container_port} "
-                    f"-e PORT={container_port} "
-                    f"-e CORS_ALLOWED_ORIGINS={shlex.quote(self.settings.docker_preview_cors_origins)} "
-                    f"{shlex.quote(image_tag)}"
-                ),
-                cwd=repository_path,
-                log_path=log_path,
-                purpose="docker run preview container",
-            )
-
-            is_healthy = False
-            for _ in range(20):
-                if self._probe_http(health_url):
-                    is_healthy = True
-                    break
-                time.sleep(1)
-
-            if is_healthy:
-                info["status"] = "running"
-                info["reason"] = "Preview container is reachable."
-                self._append_actor_log(
-                    log_path,
-                    "DOCKER",
-                    f"Preview running at {external_url} (health: {health_url})",
-                )
-            else:
-                info["status"] = "failed"
-                info["reason"] = "Container started but health check did not pass in time."
-                self._append_actor_log(log_path, "DOCKER", info["reason"])
-        except Exception as error:  # noqa: BLE001
-            info["status"] = "failed"
-            info["reason"] = f"Docker preview failed: {error}"
-            self._append_actor_log(log_path, "DOCKER", info["reason"])
-
-        self._write_preview_markdown(repository_path, info)
-        return info
-
     def _detect_container_port(self, repository_path: Path) -> int:
-        """Detect container port from Dockerfile EXPOSE, fallback to configured default."""
-
-        dockerfile = repository_path / "Dockerfile"
-        if not dockerfile.exists():
-            return int(self.settings.docker_preview_container_port)
-        try:
-            content = dockerfile.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            return int(self.settings.docker_preview_container_port)
-
-        match = re.search(r"^\s*EXPOSE\s+(\d+)", content, flags=re.IGNORECASE | re.MULTILINE)
-        if not match:
-            return int(self.settings.docker_preview_container_port)
-        try:
-            parsed = int(match.group(1))
-        except ValueError:
-            return int(self.settings.docker_preview_container_port)
-        if parsed < 1 or parsed > 65535:
-            return int(self.settings.docker_preview_container_port)
-        return parsed
+        return self._preview_runtime.detect_container_port(repository_path)
 
     def _append_preview_section_to_pr_body(self, pr_body_path: Path, preview_info: Dict[str, str]) -> None:
-        """Append deployment preview metadata so PR always includes pod/container info."""
-
-        current = ""
-        if pr_body_path.exists():
-            current = pr_body_path.read_text(encoding="utf-8", errors="replace").rstrip() + "\n\n"
-
-        section = self._build_preview_pr_section(preview_info)
-        pr_body_path.write_text(current + section, encoding="utf-8")
+        self._preview_runtime.append_preview_section_to_pr_body(pr_body_path, preview_info)
 
     def _build_preview_pr_section(self, preview_info: Dict[str, str]) -> str:
-        """Render markdown section for Docker preview status."""
-
-        status = preview_info.get("status", "skipped")
-        reason = preview_info.get("reason", "")
-        container_name = preview_info.get("container_name", "")
-        port = preview_info.get("port", "")
-        container_port = preview_info.get("container_port", "")
-        external_url = preview_info.get("external_url", "")
-        health_url = preview_info.get("health_url", "")
-        cors_origins = preview_info.get("cors_origins", "")
-
-        lines = [
-            "## Deployment Preview",
-            f"- Docker Pod/Container: `{container_name or 'n/a'}`",
-            f"- Status: `{status}`",
-        ]
-        if port:
-            lines.append(f"- External port: `{port}` (7000 range policy)")
-        if container_port:
-            lines.append(f"- Container port: `{container_port}`")
-        if external_url:
-            lines.append(f"- External URL: {external_url}")
-        if health_url:
-            lines.append(f"- Health probe: {health_url}")
-        if cors_origins:
-            lines.append(f"- CORS allow list: `{cors_origins}`")
-        if reason:
-            lines.append(f"- Note: {reason}")
-        lines.append("")
-        return "\n".join(lines)
+        return self._preview_runtime.build_preview_pr_section(preview_info)
 
     def _write_preview_markdown(self, repository_path: Path, preview_info: Dict[str, str]) -> None:
-        """Persist preview metadata inside workspace for audit/debug."""
-
-        path = self._docs_file(repository_path, "PREVIEW.md")
-        lines = [
-            "# PREVIEW",
-            "",
-            f"- Status: `{preview_info.get('status', 'unknown')}`",
-            f"- Docker Pod/Container: `{preview_info.get('container_name', 'n/a')}`",
-            f"- Image: `{preview_info.get('image_tag', 'n/a')}`",
-            f"- Container Port: `{preview_info.get('container_port', 'n/a')}`",
-            f"- External URL: {preview_info.get('external_url', 'n/a')}",
-            f"- Health URL: {preview_info.get('health_url', 'n/a')}",
-            f"- CORS: `{preview_info.get('cors_origins', '')}`",
-            f"- Note: {preview_info.get('reason', '')}",
-            "",
-        ]
-        path.write_text("\n".join(lines), encoding="utf-8")
+        self._preview_runtime.write_preview_markdown(repository_path, preview_info)
 
     def _allocate_preview_port(self) -> Optional[int]:
-        """Allocate one free host port in configured preview range."""
-
-        for port in range(self.settings.docker_preview_port_start, self.settings.docker_preview_port_end + 1):
-            if self._is_local_port_in_use(port):
-                continue
-            return port
-        return None
+        return self._preview_runtime.allocate_preview_port()
 
     @staticmethod
     def _is_local_port_in_use(port: int) -> bool:
-        """Check localhost TCP port usage."""
-
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.settimeout(0.2)
-            return sock.connect_ex(("127.0.0.1", port)) == 0
+        return PreviewRuntime.is_local_port_in_use(port)
 
     @staticmethod
     def _probe_http(url: str) -> bool:
-        """Return True when preview endpoint returns a non-5xx response."""
-
-        req = urlrequest.Request(url, method="GET")
-        try:
-            with urlrequest.urlopen(req, timeout=2) as resp:
-                code = int(getattr(resp, "status", 0))
-                return 200 <= code < 500
-        except urlerror.URLError:
-            return False
+        return PreviewRuntime.probe_http(url)
 
     def _get_pr_url(
         self,
@@ -7793,25 +4296,12 @@ class Orchestrator:
         log_path: Path,
         create_result: Optional[object],
     ) -> Optional[str]:
-        """Resolve PR URL from gh output or fallback query."""
-
-        if create_result is not None:
-            for candidate in re.findall(r"https://\S+", getattr(create_result, "stdout", "")):
-                if "/pull/" in candidate:
-                    return candidate.strip()
-
-        query_result = self._run_shell(
-            command=(
-                f"gh pr view --repo {shlex.quote(self._job_execution_repository(job))} "
-                f"{shlex.quote(job.branch_name)} --json url --jq .url"
-            ),
-            cwd=repository_path,
+        return self._provider_runtime.get_pr_url(
+            job=job,
+            repository_path=repository_path,
             log_path=log_path,
-            purpose="read pull request url",
+            create_result=create_result,
         )
-
-        url = query_result.stdout.strip()
-        return url or None
 
     def _stage_prepare_pr_summary_with_claude(
         self,
@@ -7820,70 +4310,12 @@ class Orchestrator:
         paths: Dict[str, Path],
         log_path: Path,
     ) -> Optional[Path]:
-        """Generate PR summary markdown with configured summary route before PR creation."""
-
-        template_name = self._find_configured_template_for_route("pr_summary")
-        if not template_name:
-            self._append_actor_log(
-                log_path,
-                "ORCHESTRATOR",
-                "PR summary template not configured; using default PR body.",
-            )
-            return None
-
-        prompt_path = self._docs_file(repository_path, "PR_SUMMARY_PROMPT.md")
-        output_path = self._docs_file(repository_path, "PR_SUMMARY.md")
-        prompt_path.write_text(
-            build_pr_summary_prompt(
-                spec_path=str(paths["spec"]),
-                plan_path=str(paths["plan"]),
-                review_path=str(paths["review"]),
-                design_path=str(paths.get("design", self._docs_file(repository_path, "DESIGN_SYSTEM.md"))),
-                issue_title=job.issue_title,
-                issue_number=job.issue_number,
-                is_long_term=self._is_long_track(job),
-            ),
-            encoding="utf-8",
+        return self._summary_runtime.stage_prepare_pr_summary(
+            job=job,
+            repository_path=repository_path,
+            paths=paths,
+            log_path=log_path,
         )
-
-        self._append_actor_log(log_path, "ORCHESTRATOR", "Running PR summary route.")
-        try:
-            result = self.command_templates.run_template(
-                template_name=template_name,
-                variables={
-                    **self._build_template_variables(
-                        job,
-                        paths,
-                        prompt_path,
-                    ),
-                    "last_error": "",
-                    "pr_summary_path": str(output_path),
-                },
-                cwd=repository_path,
-                log_writer=self._actor_log_writer(log_path, "PR_SUMMARY"),
-            )
-            if not output_path.exists() and result.stdout.strip():
-                output_path.write_text(result.stdout, encoding="utf-8")
-            if output_path.exists():
-                self._append_actor_log(
-                    log_path,
-                    "PR_SUMMARY",
-                    f"PR summary written: {output_path.name}",
-                )
-                return output_path
-            self._append_actor_log(
-                log_path,
-                "PR_SUMMARY",
-                "PR summary output missing; fallback to default PR body.",
-            )
-            return None
-        except Exception as error:  # noqa: BLE001 - summary should not block PR creation
-            self._append_actor_log(
-                log_path,
-                "PR_SUMMARY",
-                f"PR summary generation failed: {error}. Fallback to default PR body.",
-            )
-            return None
 
     def _commit_markdown_changes_after_stage(
         self,
@@ -7892,95 +4324,11 @@ class Orchestrator:
         stage_name: str,
         log_path: Path,
     ) -> None:
-        """Create stage snapshots and docs commit when markdown files changed."""
-
-        if not self.settings.enable_stage_md_commits:
-            return
-
-        status_all = self._run_shell(
-            command=(
-                f"git -C {shlex.quote(str(repository_path))} status --porcelain"
-            ),
-            cwd=repository_path,
-            log_path=log_path,
-            purpose=f"git status all changes ({stage_name})",
-        )
-        changed_lines_all = [line for line in status_all.stdout.splitlines() if line.strip()]
-        if not changed_lines_all:
-            return
-
-        status_md = self._run_shell(
-            command=(
-                f"git -C {shlex.quote(str(repository_path))} status --porcelain -- "
-                f"{shlex.quote(':(glob)**/*.md')}"
-            ),
-            cwd=repository_path,
-            log_path=log_path,
-            purpose=f"git status md changes ({stage_name})",
-        )
-        changed_lines_md = [line for line in status_md.stdout.splitlines() if line.strip()]
-
-        canonical_stage = self._canonical_stage_name(stage_name)
-        self._write_stage_md_snapshot(
+        self._docs_snapshot_runtime.commit_markdown_changes_after_stage(
             job=job,
             repository_path=repository_path,
-            stage_name=canonical_stage,
-            changed_lines=changed_lines_md,
-            changed_lines_all=changed_lines_all,
+            stage_name=stage_name,
             log_path=log_path,
-        )
-        if not changed_lines_md:
-            return
-
-        changed_md_paths = [
-            self._parse_porcelain_path(line)
-            for line in changed_lines_md
-            if self._parse_porcelain_path(line)
-        ]
-        if self._should_skip_md_commit(changed_md_paths):
-            self._append_actor_log(
-                log_path,
-                "GIT",
-                f"Skipped markdown commit for stage '{stage_name}' (prompt/temporary docs only).",
-            )
-            return
-
-        self._run_shell(
-            command=(
-                f"git -C {shlex.quote(str(repository_path))} add -- "
-                f"{shlex.quote(':(glob)**/*.md')}"
-            ),
-            cwd=repository_path,
-            log_path=log_path,
-            purpose=f"git add md changes ({stage_name})",
-        )
-
-        display_stage = self._format_stage_display_name(canonical_stage)
-        summary = self._prepare_commit_summary_with_ai(
-            job=job,
-            repository_path=repository_path,
-            stage_name=canonical_stage,
-            commit_type="docs(stage)",
-            changed_paths=changed_md_paths,
-            log_path=log_path,
-        )
-        if summary:
-            commit_message = f"docs(stage): {summary}"
-        else:
-            commit_message = f"docs(stage): {display_stage} (issue #{job.issue_number})"
-        self._run_shell(
-            command=(
-                f"git -C {shlex.quote(str(repository_path))} commit -m "
-                f"{shlex.quote(commit_message)}"
-            ),
-            cwd=repository_path,
-            log_path=log_path,
-            purpose=f"git commit md changes ({stage_name})",
-        )
-        self._append_actor_log(
-            log_path,
-            "GIT",
-            f"Markdown snapshot committed after stage '{stage_name}'",
         )
 
     def _write_stage_md_snapshot(
@@ -7992,57 +4340,13 @@ class Orchestrator:
         changed_lines_all: List[str],
         log_path: Path,
     ) -> None:
-        """Persist per-stage markdown + file snapshot for dashboard stage toggle."""
-
-        snapshot_root = self.settings.data_dir / "md_snapshots" / job.job_id
-        snapshot_root.mkdir(parents=True, exist_ok=True)
-        safe_stage = re.sub(r"[^a-zA-Z0-9_-]+", "_", stage_name).strip("_") or "stage"
-        snapshot_path = snapshot_root / f"attempt_{job.attempt}_{safe_stage}.json"
-
-        md_files: List[Dict[str, str]] = []
-        md_paths: List[Path] = []
-        md_paths.extend(sorted(repository_path.glob("*.md")))
-        docs_dir = repository_path / "_docs"
-        if docs_dir.exists():
-            md_paths.extend(sorted(docs_dir.glob("*.md")))
-        seen_md = set()
-        for path in md_paths:
-            if not path.is_file():
-                continue
-            rel = str(path.relative_to(repository_path))
-            if rel in seen_md:
-                continue
-            seen_md.add(rel)
-            try:
-                content = path.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                continue
-            md_files.append(
-                {
-                    "path": rel,
-                    "content": content,
-                }
-            )
-        file_snapshots = self._collect_stage_file_snapshots(repository_path, changed_lines_all)
-
-        payload = {
-            "job_id": job.job_id,
-            "attempt": job.attempt,
-            "stage": stage_name,
-            "created_at": utc_now_iso(),
-            "changed_files": [line.strip() for line in changed_lines],
-            "changed_files_all": [line.strip() for line in changed_lines_all],
-            "md_files": md_files,
-            "file_snapshots": file_snapshots,
-        }
-        snapshot_path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        self._append_actor_log(
-            log_path,
-            "ORCHESTRATOR",
-            f"Stage snapshot saved: {snapshot_path.name}",
+        self._docs_snapshot_runtime.write_stage_md_snapshot(
+            job=job,
+            repository_path=repository_path,
+            stage_name=stage_name,
+            changed_lines=changed_lines,
+            changed_lines_all=changed_lines_all,
+            log_path=log_path,
         )
 
     def _collect_stage_file_snapshots(
@@ -8050,325 +4354,38 @@ class Orchestrator:
         repository_path: Path,
         changed_lines_all: List[str],
     ) -> List[Dict[str, Any]]:
-        """Capture changed file contents at stage boundary for point-in-time audit."""
-
-        snapshots: List[Dict[str, Any]] = []
-        seen_paths = set()
-        max_files = 24
-        max_bytes = 200_000
-
-        for raw in changed_lines_all:
-            if len(snapshots) >= max_files:
-                break
-            status = raw[:2].strip()
-            rel_path = self._parse_porcelain_path(raw)
-            if not rel_path or rel_path in seen_paths:
-                continue
-            seen_paths.add(rel_path)
-            abs_path = (repository_path / rel_path).resolve()
-            if repository_path.resolve() not in abs_path.parents and abs_path != repository_path.resolve():
-                continue
-
-            item: Dict[str, Any] = {
-                "path": rel_path,
-                "status": status or "??",
-                "exists": abs_path.exists() and abs_path.is_file(),
-                "truncated": False,
-                "binary": False,
-                "content": "",
-            }
-            if not item["exists"]:
-                snapshots.append(item)
-                continue
-            try:
-                blob = abs_path.read_bytes()
-            except OSError:
-                snapshots.append(item)
-                continue
-            if b"\x00" in blob:
-                item["binary"] = True
-                snapshots.append(item)
-                continue
-            if len(blob) > max_bytes:
-                blob = blob[:max_bytes]
-                item["truncated"] = True
-            item["content"] = blob.decode("utf-8", errors="replace")
-            snapshots.append(item)
-        return snapshots
+        return self._docs_snapshot_runtime.collect_stage_file_snapshots(
+            repository_path,
+            changed_lines_all,
+        )
 
     @staticmethod
     def _parse_porcelain_path(raw_line: str) -> str:
-        """Extract normalized file path from `git status --porcelain` one line."""
-
-        line = str(raw_line or "").rstrip()
-        if len(line) < 4:
-            return ""
-        payload = line[3:].strip()
-        if not payload:
-            return ""
-        if " -> " in payload:
-            payload = payload.split(" -> ", 1)[1].strip()
-        return payload
+        return DocsSnapshotRuntime.parse_porcelain_path(raw_line)
 
     @staticmethod
     def _should_skip_md_commit(changed_md_paths: List[str]) -> bool:
-        """Skip noisy docs commits when only transient prompt files changed."""
-
-        if not changed_md_paths:
-            return True
-        transient_prefixes = (
-            "_docs/PLANNER_PROMPT",
-            "_docs/CODER_PROMPT",
-            "_docs/DESIGNER_PROMPT",
-            "_docs/REVIEWER_PROMPT",
-            "_docs/CODEX_HELPER_",
-            "_docs/COPILOT_",
-            "_docs/PR_SUMMARY_PROMPT",
-            "_docs/COMMIT_MESSAGE_PROMPT_",
-            "_docs/PLANNER_TOOL_REQUEST",
-            "_docs/ESCALATION_PROMPT",
-            "_docs/DOCUMENTATION_PROMPT",
-            "_docs/DOCUMENTATION_BUNDLE",
-            "_docs/SCAFFOLD_PLAN_PROMPT",
-        )
-        normalized = [str(path).strip() for path in changed_md_paths if str(path).strip()]
-        if not normalized:
-            return True
-        return all(any(path.startswith(prefix) for prefix in transient_prefixes) for path in normalized)
+        return DocsSnapshotRuntime.should_skip_md_commit(changed_md_paths)
 
     @staticmethod
     def _canonical_stage_name(stage_name: str) -> str:
-        """Normalize workflow node types into JobStage-compatible stage names."""
-
-        node_to_stage = {
-            "gh_read_issue": JobStage.READ_ISSUE.value,
-            "write_spec": JobStage.WRITE_SPEC.value,
-            "idea_to_product_brief": JobStage.IDEA_TO_PRODUCT_BRIEF.value,
-            "generate_user_flows": JobStage.GENERATE_USER_FLOWS.value,
-            "define_mvp_scope": JobStage.DEFINE_MVP_SCOPE.value,
-            "architecture_planning": JobStage.ARCHITECTURE_PLANNING.value,
-            "project_scaffolding": JobStage.PROJECT_SCAFFOLDING.value,
-            "gemini_plan": JobStage.PLAN_WITH_GEMINI.value,
-            "designer_task": JobStage.DESIGN_WITH_CODEX.value,
-            "publisher_task": "publisher_task",
-            "copywriter_task": "copywriter_task",
-            "documentation_task": JobStage.DOCUMENTATION_TASK.value,
-            "codex_implement": JobStage.IMPLEMENT_WITH_CODEX.value,
-            "code_change_summary": JobStage.SUMMARIZE_CODE_CHANGES.value,
-            "test_after_implement": JobStage.TEST_AFTER_IMPLEMENT.value,
-            "ux_e2e_review": JobStage.UX_E2E_REVIEW.value,
-            "commit_implement": JobStage.COMMIT_IMPLEMENT.value,
-            "gemini_review": JobStage.REVIEW_WITH_GEMINI.value,
-            "product_review": JobStage.PRODUCT_REVIEW.value,
-            "improvement_stage": JobStage.IMPROVEMENT_STAGE.value,
-            "codex_fix": JobStage.FIX_WITH_CODEX.value,
-            "coder_fix_from_test_report": JobStage.FIX_WITH_CODEX.value,
-            "test_after_fix": JobStage.TEST_AFTER_FIX.value,
-            "test_after_fix_final": JobStage.TEST_AFTER_FIX.value,
-            "tester_run_e2e": JobStage.TEST_AFTER_FIX.value,
-            "tester_retest_e2e": JobStage.TEST_AFTER_FIX.value,
-            "commit_fix": JobStage.COMMIT_FIX.value,
-        }
-        return node_to_stage.get(stage_name, stage_name)
+        return DocsSnapshotRuntime.canonical_stage_name(stage_name)
 
     @staticmethod
     def _format_stage_display_name(stage_name: str) -> str:
-        """Return short Korean labels for markdown snapshot commit messages."""
-
-        stage_map = {
-            JobStage.READ_ISSUE.value: "이슈 읽기 문서 반영",
-            JobStage.WRITE_SPEC.value: "스펙 문서 작성",
-            JobStage.IDEA_TO_PRODUCT_BRIEF.value: "제품 정의 브리프 작성",
-            JobStage.GENERATE_USER_FLOWS.value: "사용자 흐름 작성",
-            JobStage.DEFINE_MVP_SCOPE.value: "MVP 범위 정의",
-            JobStage.ARCHITECTURE_PLANNING.value: "아키텍처 계획 작성",
-            JobStage.PROJECT_SCAFFOLDING.value: "프로젝트 스캐폴딩 작성",
-            JobStage.PLAN_WITH_GEMINI.value: "제미나이 플래너 작성",
-            JobStage.DESIGN_WITH_CODEX.value: "코덱스 디자이너 작성",
-            JobStage.COPYWRITER_TASK.value: "카피라이터 작성",
-            JobStage.DOCUMENTATION_TASK.value: "기술 문서 작성",
-            JobStage.IMPLEMENT_WITH_CODEX.value: "코덱스 구현자 작성",
-            JobStage.SUMMARIZE_CODE_CHANGES.value: "코드 변경 요약 작성",
-            JobStage.TEST_AFTER_IMPLEMENT.value: "구현 후 테스트 리포트 작성",
-            JobStage.UX_E2E_REVIEW.value: "UX E2E 검수 리포트 작성",
-            JobStage.COMMIT_IMPLEMENT.value: "구현 커밋 단계 문서 정리",
-            JobStage.REVIEW_WITH_GEMINI.value: "제미나이 리뷰어 작성",
-            JobStage.PRODUCT_REVIEW.value: "제품 품질 리뷰 작성",
-            JobStage.IMPROVEMENT_STAGE.value: "개선 루프 계획 작성",
-            JobStage.FIX_WITH_CODEX.value: "코덱스 수정자 작성",
-            JobStage.TEST_AFTER_FIX.value: "수정 후 테스트 리포트 작성",
-            JobStage.COMMIT_FIX.value: "수정 커밋 단계 문서 정리",
-            "gh_read_issue": "이슈 읽기 문서 반영",
-            "write_spec": "스펙 문서 작성",
-            "idea_to_product_brief": "제품 정의 브리프 작성",
-            "generate_user_flows": "사용자 흐름 작성",
-            "define_mvp_scope": "MVP 범위 정의",
-            "architecture_planning": "아키텍처 계획 작성",
-            "project_scaffolding": "프로젝트 스캐폴딩 작성",
-            "gemini_plan": "제미나이 플래너 작성",
-            "designer_task": "코덱스 디자이너 작성",
-            "publisher_task": "퍼블리셔 작성",
-            "copywriter_task": "카피라이터 작성",
-            "documentation_task": "기술 문서 작성",
-            "codex_implement": "코덱스 구현자 작성",
-            "code_change_summary": "코드 변경 요약 작성",
-            "test_after_implement": "구현 후 테스트 리포트 작성",
-            "ux_e2e_review": "UX E2E 검수 리포트 작성",
-            "commit_implement": "구현 커밋 단계 문서 정리",
-            "gemini_review": "제미나이 리뷰어 작성",
-            "product_review": "제품 품질 리뷰 작성",
-            "improvement_stage": "개선 루프 계획 작성",
-            "codex_fix": "코덱스 수정자 작성",
-            "coder_fix_from_test_report": "코덱스 수정자 작성",
-            "test_after_fix": "수정 후 테스트 리포트 작성",
-            "test_after_fix_final": "수정 후 테스트 리포트 작성",
-            "tester_run_e2e": "E2E/타입별 검증 리포트 작성",
-            "tester_retest_e2e": "E2E/타입별 재검증 리포트 작성",
-            "commit_fix": "수정 커밋 단계 문서 정리",
-        }
-        return stage_map.get(stage_name, f"{stage_name} 문서 반영")
+        return DocsSnapshotRuntime.format_stage_display_name(stage_name)
 
     def _run_optional_escalation(self, job_id: str, log_path: Path, last_error: str) -> None:
         """Run optional escalation template after a failure."""
-
-        job = self._require_job(job_id)
-        repository_path = self._job_workspace_path(job)
-        if not repository_path.exists():
-            self._append_actor_log(
-                log_path,
-                "ORCHESTRATOR",
-                "Escalation skipped because repository directory is not ready yet.",
-            )
-            return
-
-        escalation_prompt_path = self._docs_file(repository_path, "ESCALATION_PROMPT.md")
-        escalation_prompt_path.write_text(
-            (
-                "The main loop failed. Provide a short unblock plan.\n\n"
-                f"Last error:\n{last_error}\n"
-            ),
-            encoding="utf-8",
-        )
-
-        self._append_actor_log(log_path, "ORCHESTRATOR", "Running optional escalation template.")
-        try:
-            self.command_templates.run_template(
-                template_name=self._template_for_route("escalation"),
-                variables={
-                    **self._build_template_variables(
-                        job,
-                        {
-                            "spec": self._docs_file(repository_path, "SPEC.md"),
-                            "plan": self._docs_file(repository_path, "PLAN.md"),
-                            "review": self._docs_file(repository_path, "REVIEW.md"),
-                            "design": self._docs_file(repository_path, "DESIGN_SYSTEM.md"),
-                            "status": self._docs_file(repository_path, "STATUS.md"),
-                        },
-                        escalation_prompt_path,
-                    ),
-                    "last_error": last_error,
-                },
-                cwd=repository_path,
-                log_writer=self._actor_log_writer(log_path, "ESCALATION"),
-            )
-        except Exception as error:  # noqa: BLE001
-            self._append_actor_log(log_path, "ORCHESTRATOR", f"Escalation template failed: {error}")
+        self._job_failure_runtime.run_optional_escalation(job_id, log_path, last_error)
 
     def _finalize_failed_job(self, job_id: str, log_path: Path, last_error: str) -> None:
         """Best-effort cleanup when all retries are exhausted."""
-
-        job = self._require_job(job_id)
-        repository_path = self._job_workspace_path(job)
-        self._set_stage(job_id, JobStage.FAILED, log_path)
-
-        if repository_path.exists():
-            status_path = self._docs_file(repository_path, "STATUS.md")
-            status_path.write_text(
-                build_status_markdown(
-                    last_error=last_error,
-                    next_actions=[
-                        "Check failed command in job log and reproduce locally.",
-                        "Fix root cause, then rerun by re-labeling issue with agent:run.",
-                        "If needed, enable escalation template for extra guidance.",
-                    ],
-                ),
-                encoding="utf-8",
-            )
-            self._append_actor_log(log_path, "ORCHESTRATOR", f"Wrote failure status file at {status_path}")
-            self._try_create_wip_pr(job, repository_path, log_path)
-
-        self.store.update_job(
-            job_id,
-            status=JobStatus.FAILED.value,
-            stage=JobStage.FAILED.value,
-            error_message=last_error,
-            finished_at=utc_now_iso(),
-            heartbeat_at=utc_now_iso(),
-        )
+        self._job_failure_runtime.finalize_failed_job(job_id, log_path, last_error)
 
     def _try_create_wip_pr(self, job: JobRecord, repository_path: Path, log_path: Path) -> None:
         """Try to commit STATUS.md and open a draft PR after fatal failure."""
-
-        try:
-            status_result = self._run_shell(
-                command=f"git -C {shlex.quote(str(repository_path))} status --porcelain",
-                cwd=repository_path,
-                log_path=log_path,
-                purpose="git status before WIP PR",
-            )
-            if status_result.stdout.strip():
-                self._run_shell(
-                    command=f"git -C {shlex.quote(str(repository_path))} add -A",
-                    cwd=repository_path,
-                    log_path=log_path,
-                    purpose="git add for WIP PR",
-                )
-                self._run_shell(
-                    command=(
-                        f"git -C {shlex.quote(str(repository_path))} commit -m "
-                        f"{shlex.quote(f'chore: add failure status for issue #{job.issue_number}')}"
-                    ),
-                    cwd=repository_path,
-                    log_path=log_path,
-                    purpose="git commit for WIP PR",
-                )
-
-            self._push_branch_with_recovery(
-                repository_path=repository_path,
-                branch_name=job.branch_name,
-                log_path=log_path,
-                purpose="push WIP branch",
-            )
-
-            wip_title = f"[WIP] AgentHub failed for issue #{job.issue_number}"
-            wip_body = (
-                "Automated run failed after max retries.\n\n"
-                "Please check STATUS.md and job logs for next actions.\n"
-                f"{self._issue_reference_line(job)}\n"
-            )
-
-            create_result = self._run_shell(
-                command=(
-                    f"gh pr create --draft --repo {shlex.quote(self._job_execution_repository(job))} "
-                    f"--head {shlex.quote(job.branch_name)} "
-                    f"--base {shlex.quote(self.settings.default_branch)} "
-                    f"--title {shlex.quote(wip_title)} --body {shlex.quote(wip_body)}"
-                ),
-                cwd=repository_path,
-                log_path=log_path,
-                purpose="create WIP pull request",
-            )
-
-            pr_url = self._get_pr_url(job, repository_path, log_path, create_result)
-            if pr_url:
-                self.store.update_job(job.job_id, pr_url=pr_url)
-        except Exception as error:  # noqa: BLE001
-            # Failure finalization should never crash the worker loop.
-            self._append_actor_log(
-                log_path,
-                "ORCHESTRATOR",
-                f"WIP PR creation skipped due to error: {error}",
-            )
+        self._job_failure_runtime.try_create_wip_pr(job, repository_path, log_path)
 
     def _build_template_variables(
         self,
@@ -9660,48 +5677,11 @@ class Orchestrator:
         log_path: Path,
         purpose: str,
     ) -> None:
-        """Push branch with automatic non-fast-forward recovery.
-
-        For job-owned branches, force-with-lease is a safe recovery path when the
-        remote branch diverged due to earlier retries.
-        """
-
-        normal_push = (
-            f"git -C {shlex.quote(str(repository_path))} push -u origin "
-            f"{shlex.quote(branch_name)}"
-        )
-        try:
-            self._run_shell(
-                command=normal_push,
-                cwd=repository_path,
-                log_path=log_path,
-                purpose=purpose,
-            )
-            return
-        except CommandExecutionError as error:
-            message = str(error).lower()
-            if "non-fast-forward" not in message and "failed to push some refs" not in message:
-                raise
-
-        self._append_actor_log(
-            log_path,
-            "GIT",
-            "Detected push divergence. Retrying with --force-with-lease for job branch.",
-        )
-        self._run_shell(
-            command=f"git -C {shlex.quote(str(repository_path))} fetch origin",
-            cwd=repository_path,
+        self._provider_runtime.push_branch_with_recovery(
+            repository_path=repository_path,
+            branch_name=branch_name,
             log_path=log_path,
-            purpose="git fetch before force push",
-        )
-        self._run_shell(
-            command=(
-                f"git -C {shlex.quote(str(repository_path))} push --force-with-lease "
-                f"-u origin {shlex.quote(branch_name)}"
-            ),
-            cwd=repository_path,
-            log_path=log_path,
-            purpose=f"{purpose} (force-with-lease)",
+            purpose=purpose,
         )
 
     def _set_stage(self, job_id: str, stage: JobStage, log_path: Path) -> None:
@@ -9981,6 +5961,62 @@ class Orchestrator:
                 return candidate
         return candidates[0]
 
+    def _template_for_route_in_repository(
+        self,
+        route_name: str,
+        repository_path: Path,
+        log_path: Path | None = None,
+    ) -> str:
+        """Resolve one route to a repository-aware template when outages are active."""
+
+        default_template = self._template_for_route(route_name)
+        normalized_route = str(route_name or "").strip().lower()
+        if normalized_route not in {"planner", "reviewer"}:
+            return default_template
+
+        route = self._resolve_ai_route(route_name)
+        provider_hint = str(route.cli or "").strip().lower()
+        if provider_hint != "gemini":
+            return default_template
+
+        circuit_breaker = evaluate_workspace_provider_circuit_breaker(
+            repository_path,
+            provider_hint=provider_hint,
+        )
+        quarantine = evaluate_workspace_provider_quarantine(
+            repository_path,
+            provider_hint=provider_hint,
+        )
+        if not circuit_breaker.get("active") and not quarantine.get("active"):
+            return default_template
+
+        fallback_candidates: List[str] = []
+        for base_template in route.template_keys:
+            fallback_candidates.append(f"{base_template}_fallback")
+            if route.cli:
+                fallback_candidates.append(f"{base_template}__{route.cli}_fallback")
+
+        deduped_candidates: List[str] = []
+        for candidate in fallback_candidates:
+            if candidate and candidate not in deduped_candidates:
+                deduped_candidates.append(candidate)
+
+        for candidate in deduped_candidates:
+            if self.command_templates.has_template(candidate):
+                if log_path is not None:
+                    self._append_actor_log(
+                        log_path,
+                        "ORCHESTRATOR",
+                        (
+                            f"{provider_hint} provider "
+                            f"{'circuit open' if circuit_breaker.get('active') else 'quarantined'} "
+                            f"for route '{normalized_route}'. "
+                            f"Using alternate template '{candidate}'."
+                        ),
+                    )
+                return candidate
+        return default_template
+
     def _find_configured_template_for_route(self, route_name: str) -> Optional[str]:
         """Return the first configured template for one route, if any."""
 
@@ -10008,6 +6044,11 @@ class Orchestrator:
                 path.unlink()
         except OSError:
             pass
+
+    def _set_agent_profile(self, profile: str) -> None:
+        """Switch active AI profile for fallback-aware long jobs."""
+
+        self._agent_profile = str(profile or "primary").strip() or "primary"
 
     @staticmethod
     def _append_log(log_path: Path, message: str) -> None:
