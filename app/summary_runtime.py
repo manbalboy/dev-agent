@@ -147,6 +147,65 @@ class SummaryRuntime:
             f"Wrote code change summary with fallback: {summary_path.name}",
         )
 
+    def stage_commit(
+        self,
+        *,
+        job: JobRecord,
+        repository_path: Path,
+        stage: JobStage,
+        log_path: Path,
+        commit_type: str,
+    ) -> None:
+        """Commit current working tree with AI-assisted summary when possible."""
+
+        self.set_stage(job.job_id, stage, log_path)
+
+        status_result = self.run_shell(
+            command=f"git -C {shlex.quote(str(repository_path))} status --porcelain",
+            cwd=repository_path,
+            log_path=log_path,
+            purpose="git status",
+        )
+
+        if not status_result.stdout.strip():
+            self.append_log(log_path, f"No changes to commit at stage {stage.value}")
+            return
+
+        changed_paths: List[str] = []
+        for raw_line in status_result.stdout.splitlines():
+            path = self.parse_porcelain_path(raw_line)
+            if path:
+                changed_paths.append(path)
+
+        self.run_shell(
+            command=f"git -C {shlex.quote(str(repository_path))} add -A",
+            cwd=repository_path,
+            log_path=log_path,
+            purpose="git add",
+        )
+
+        summary = self.prepare_commit_summary_with_ai(
+            job=job,
+            repository_path=repository_path,
+            stage_name=stage.value,
+            commit_type=commit_type,
+            changed_paths=changed_paths,
+            log_path=log_path,
+        )
+        if summary:
+            commit_message = f"{commit_type}: {summary}"
+        else:
+            commit_message = f"{commit_type}: apply {stage.value} for issue #{job.issue_number}"
+        self.run_shell(
+            command=(
+                f"git -C {shlex.quote(str(repository_path))} commit -m "
+                f"{shlex.quote(commit_message)}"
+            ),
+            cwd=repository_path,
+            log_path=log_path,
+            purpose="git commit",
+        )
+
     def prepare_commit_summary_with_ai(
         self,
         *,

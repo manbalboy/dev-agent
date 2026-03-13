@@ -19,6 +19,9 @@ class ReviewFixRuntime:
         command_templates,
         set_stage: Callable[[str, JobStage, Path], None],
         write_memory_retrieval_artifacts: Callable[..., None],
+        write_integration_guide_summary_artifact: Callable[..., Dict[str, Any]] | None,
+        write_integration_code_patterns_artifact: Callable[..., Dict[str, Any]] | None,
+        write_integration_verification_checklist_artifact: Callable[..., Dict[str, Any]] | None,
         docs_file: Callable[[Path, str], Path],
         build_route_runtime_context: Callable[[str], str],
         build_template_variables,
@@ -28,10 +31,17 @@ class ReviewFixRuntime:
         read_improvement_runtime_context: Callable[[Dict[str, Path]], Dict[str, Any]],
         stage_plan_with_gemini: Callable[..., None],
         append_actor_log: Callable[[Path, str, str], None],
+        append_integration_usage_trail_event: Callable[..., Dict[str, Any]] | None = None,
     ) -> None:
         self.command_templates = command_templates
         self.set_stage = set_stage
         self.write_memory_retrieval_artifacts = write_memory_retrieval_artifacts
+        self.write_integration_guide_summary_artifact = write_integration_guide_summary_artifact
+        self.write_integration_code_patterns_artifact = write_integration_code_patterns_artifact
+        self.write_integration_verification_checklist_artifact = (
+            write_integration_verification_checklist_artifact
+        )
+        self.append_integration_usage_trail_event = append_integration_usage_trail_event
         self.docs_file = docs_file
         self.build_route_runtime_context = build_route_runtime_context
         self.build_template_variables = build_template_variables
@@ -52,6 +62,21 @@ class ReviewFixRuntime:
     ) -> None:
         self.set_stage(job.job_id, JobStage.REVIEW_WITH_GEMINI, log_path)
         self.write_memory_retrieval_artifacts(job=job, repository_path=repository_path, paths=paths)
+        if self.write_integration_guide_summary_artifact is not None:
+            self.write_integration_guide_summary_artifact(
+                repository_path=repository_path,
+                paths=paths,
+            )
+        if self.write_integration_code_patterns_artifact is not None:
+            self.write_integration_code_patterns_artifact(
+                repository_path=repository_path,
+                paths=paths,
+            )
+        if self.write_integration_verification_checklist_artifact is not None:
+            self.write_integration_verification_checklist_artifact(
+                repository_path=repository_path,
+                paths=paths,
+            )
         template_name = (
             self.template_for_route_in_repository("reviewer", repository_path, log_path)
             if self.template_for_route_in_repository is not None
@@ -70,10 +95,37 @@ class ReviewFixRuntime:
                 memory_context_path=str(
                     paths.get("memory_context", self.docs_file(repository_path, "MEMORY_CONTEXT.json"))
                 ),
+                integration_guide_summary_path=str(
+                    paths.get(
+                        "integration_guide_summary",
+                        self.docs_file(repository_path, "INTEGRATION_GUIDE_SUMMARY.md"),
+                    )
+                ),
+                integration_code_patterns_path=str(
+                    paths.get(
+                        "integration_code_patterns",
+                        self.docs_file(repository_path, "INTEGRATION_CODE_PATTERNS.md"),
+                    )
+                ),
+                integration_verification_checklist_path=str(
+                    paths.get(
+                        "integration_verification_checklist",
+                        self.docs_file(repository_path, "INTEGRATION_VERIFICATION_CHECKLIST.md"),
+                    )
+                ),
                 role_context=self.build_route_runtime_context("reviewer"),
             ),
             encoding="utf-8",
         )
+        if self.append_integration_usage_trail_event is not None:
+            self.append_integration_usage_trail_event(
+                job=job,
+                repository_path=repository_path,
+                paths=paths,
+                stage=JobStage.REVIEW_WITH_GEMINI.value,
+                route="reviewer",
+                prompt_path=reviewer_prompt_path,
+            )
 
         result = self.command_templates.run_template(
             template_name=template_name,
@@ -99,6 +151,21 @@ class ReviewFixRuntime:
     ) -> None:
         self.set_stage(job.job_id, JobStage.FIX_WITH_CODEX, log_path)
         self.write_memory_retrieval_artifacts(job=job, repository_path=repository_path, paths=paths)
+        if self.write_integration_guide_summary_artifact is not None:
+            self.write_integration_guide_summary_artifact(
+                repository_path=repository_path,
+                paths=paths,
+            )
+        if self.write_integration_code_patterns_artifact is not None:
+            self.write_integration_code_patterns_artifact(
+                repository_path=repository_path,
+                paths=paths,
+            )
+        if self.write_integration_verification_checklist_artifact is not None:
+            self.write_integration_verification_checklist_artifact(
+                repository_path=repository_path,
+                paths=paths,
+            )
         improvement_runtime = self.read_improvement_runtime_context(paths)
         strategy = str(improvement_runtime.get("strategy", "")).strip()
         scope_restriction = str(improvement_runtime.get("scope_restriction", "")).strip()
@@ -156,10 +223,37 @@ class ReviewFixRuntime:
                 ),
                 memory_context_path=str(paths.get("memory_context", self.docs_file(repository_path, "MEMORY_CONTEXT.json"))),
                 operator_inputs_path=str(paths.get("operator_inputs", self.docs_file(repository_path, "OPERATOR_INPUTS.json"))),
+                integration_guide_summary_path=str(
+                    paths.get(
+                        "integration_guide_summary",
+                        self.docs_file(repository_path, "INTEGRATION_GUIDE_SUMMARY.md"),
+                    )
+                ),
+                integration_code_patterns_path=str(
+                    paths.get(
+                        "integration_code_patterns",
+                        self.docs_file(repository_path, "INTEGRATION_CODE_PATTERNS.md"),
+                    )
+                ),
+                integration_verification_checklist_path=str(
+                    paths.get(
+                        "integration_verification_checklist",
+                        self.docs_file(repository_path, "INTEGRATION_VERIFICATION_CHECKLIST.md"),
+                    )
+                ),
                 role_context=self.build_route_runtime_context("coder"),
             ),
             encoding="utf-8",
         )
+        if self.append_integration_usage_trail_event is not None:
+            self.append_integration_usage_trail_event(
+                job=job,
+                repository_path=repository_path,
+                paths=paths,
+                stage=JobStage.FIX_WITH_CODEX.value,
+                route="coder",
+                prompt_path=coder_prompt_path,
+            )
 
         self.command_templates.run_template(
             template_name=self.template_for_route("coder"),

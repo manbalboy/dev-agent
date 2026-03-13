@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 import app.dashboard as dashboard
 from app.memory.runtime_store import MemoryRuntimeStore
-from app.models import JobRecord, JobStage, JobStatus, NodeRunRecord, RuntimeInputRecord, utc_now_iso
+from app.models import IntegrationRegistryRecord, JobRecord, JobStage, JobStatus, NodeRunRecord, RuntimeInputRecord, utc_now_iso
 from app.workflow_design import default_workflow_template
 from app.workflow_resume import build_workflow_artifact_paths
 
@@ -440,6 +440,204 @@ def test_job_detail_api_includes_runtime_signals(app_components):
     assert payload["failure_classification"]["source"] == "runtime_recovery_trace"
     assert payload["failure_classification"]["provider_hint"] == "runtime"
     assert payload["failure_classification"]["stage_family"] == "runtime_recovery"
+
+
+def test_job_detail_api_includes_integration_usage_trail(app_components):
+    settings, store, app = app_components
+    client = TestClient(app)
+
+    job = _make_job("job-detail-integration-usage")
+    job.status = JobStatus.RUNNING.value
+    job.stage = JobStage.IMPLEMENT_WITH_CODEX.value
+    store.create_job(job)
+
+    docs_dir = settings.repository_workspace_path(job.repository, job.app_code) / "_docs"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    build_workflow_artifact_paths(docs_dir.parent)["integration_usage_trail"].write_text(
+        json.dumps(
+            {
+                "events": [
+                    {
+                        "generated_at": "2026-03-13T03:00:00+00:00",
+                        "stage": "plan_with_gemini",
+                        "route": "planner",
+                        "prompt_path": str(docs_dir / "PLANNER_PROMPT.md"),
+                        "integration_count": 1,
+                        "blocked_integration_count": 0,
+                        "blocked_env_vars": [],
+                        "items": [
+                            {
+                                "integration_id": "google_maps",
+                                "display_name": "Google Maps",
+                                "usage_status": "prompt_injected",
+                                "required_input_summary": {
+                                    "provided_count": 1,
+                                    "requested_count": 0,
+                                    "missing_count": 0,
+                                },
+                            }
+                        ],
+                    }
+                ]
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    response = client.get(f"/api/jobs/{job.job_id}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["integration_usage_trail"]["active"] is True
+    assert payload["integration_usage_trail"]["event_count"] == 1
+    assert payload["integration_usage_trail"]["used_integration_ids"] == ["google_maps"]
+    assert payload["integration_usage_trail"]["latest_event"]["route"] == "planner"
+
+
+def test_job_detail_api_includes_self_growing_effectiveness(app_components):
+    settings, store, app = app_components
+    client = TestClient(app)
+
+    parent_job = _make_job("job-effect-parent")
+    child_job = _make_job("job-effect-child")
+    child_job.job_kind = "followup_backlog"
+    child_job.parent_job_id = parent_job.job_id
+    child_job.backlog_candidate_id = "failure_pattern_cluster:job-effect-parent:loop_guard_repeated_issue"
+    store.create_job(parent_job)
+    store.create_job(child_job)
+    runtime_store = MemoryRuntimeStore(settings.resolved_memory_dir / "memory_runtime.db")
+    runtime_store.upsert_backlog_candidate(
+        {
+            "candidate_id": child_job.backlog_candidate_id,
+            "repository": child_job.repository,
+            "execution_repository": child_job.repository,
+            "app_code": child_job.app_code,
+            "workflow_id": child_job.workflow_id or "wf-default",
+            "title": "반복 실패 묶음",
+            "summary": "loop guard 반복 실패 follow-up",
+            "priority": "P1",
+            "state": "queued",
+            "payload": {
+                "source_kind": "failure_pattern_cluster",
+                "pattern_id": "loop_guard_repeated_issue",
+                "count": 4,
+            },
+            "created_at": "2026-03-13T03:00:00+00:00",
+            "updated_at": "2026-03-13T03:00:00+00:00",
+        }
+    )
+
+    docs_dir = settings.repository_workspace_path(child_job.repository, child_job.app_code) / "_docs"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    build_workflow_artifact_paths(docs_dir.parent)["self_growing_effectiveness"].write_text(
+        json.dumps(
+            {
+                "active": True,
+                "generated_at": "2026-03-13T04:00:00+00:00",
+                "job_id": child_job.job_id,
+                "job_kind": "followup_backlog",
+                "parent_job_id": parent_job.job_id,
+                "backlog_candidate_id": child_job.backlog_candidate_id,
+                "status": "improved",
+                "status_label": "개선됨",
+                "summary": "follow-up 작업이 부모 작업 대비 개선되었습니다.",
+                "current": {
+                    "review_overall": 3.7,
+                    "maturity_level": "usable",
+                    "maturity_score": 77,
+                    "quality_trend_direction": "improving",
+                },
+                "parent": {
+                    "review_overall": 3.1,
+                    "maturity_level": "mvp",
+                    "maturity_score": 67,
+                },
+                "deltas": {
+                    "review_overall": 0.6,
+                    "maturity_score": 10,
+                    "quality_gate_passed": 1,
+                    "maturity_level_order": 1,
+                },
+                "status_reasons": ["리뷰 점수 +0.6", "성숙도 점수 +10"],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    build_workflow_artifact_paths(docs_dir.parent)["failure_patterns"].write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "pattern_id": "loop_guard:repeated_issue",
+                        "count": 2,
+                    }
+                ]
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    response = client.get(f"/api/jobs/{child_job.job_id}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["self_growing_effectiveness"]["active"] is True
+    assert payload["self_growing_effectiveness"]["status"] == "improved"
+    assert payload["self_growing_effectiveness"]["parent_job_id"] == parent_job.job_id
+    assert payload["self_growing_effectiveness"]["deltas"]["maturity_score"] == 10
+    assert payload["self_growing_effectiveness"]["cluster_recurrence"]["status"] == "reduced"
+    assert payload["self_growing_effectiveness"]["cluster_recurrence"]["current_count"] == 2
+
+
+def test_job_detail_api_includes_mobile_e2e_result(app_components):
+    settings, store, app = app_components
+    client = TestClient(app)
+
+    job = _make_job("job-detail-mobile-e2e")
+    job.app_code = "food"
+    store.create_job(job)
+
+    docs_dir = settings.repository_workspace_path(job.repository, job.app_code) / "_docs"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    build_workflow_artifact_paths(docs_dir.parent)["mobile_e2e_result"].write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-03-13T08:00:00+00:00",
+                "platform": "android",
+                "target_name": "Pixel 8",
+                "target_id": "emulator-5554",
+                "booted": True,
+                "command": "npm run test:e2e:android",
+                "exit_code": 0,
+                "status": "passed",
+                "runner": "npm_script",
+                "notes": "reused already booted android emulator",
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    response = client.get(f"/api/jobs/{job.job_id}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["mobile_e2e_result"]["active"] is True
+    assert payload["mobile_e2e_result"]["platform"] == "android"
+    assert payload["mobile_e2e_result"]["status"] == "passed"
+    assert payload["mobile_e2e_result"]["runner"] == "npm_script"
+    assert payload["mobile_e2e_result"]["target_id"] == "emulator-5554"
 
 
 def test_job_detail_page_renders_failure_visibility_shell(app_components):
@@ -1210,9 +1408,292 @@ def test_job_detail_api_includes_operator_inputs(app_components):
     operator_inputs = payload["operator_inputs"]
     assert operator_inputs["available_count"] == 1
     assert operator_inputs["pending_count"] == 1
+    assert operator_inputs["blocked_count"] == 0
     assert operator_inputs["available_env_vars"] == ["GOOGLE_MAPS_API_KEY"]
     assert operator_inputs["artifact_path"].endswith("OPERATOR_INPUTS.json")
     assert operator_inputs["resolved_inputs"][0]["env_var_name"] == "GOOGLE_MAPS_API_KEY"
     assert operator_inputs["resolved_inputs"][0]["value"] == ""
     assert operator_inputs["resolved_inputs"][0]["display_value"] != ""
     assert operator_inputs["pending_inputs"][0]["env_var_name"] == "GOOGLE_PLACES_DATASET"
+
+
+def test_job_detail_api_includes_blocked_operator_inputs_when_integration_not_ready(app_components):
+    settings, store, app = app_components
+    client = TestClient(app)
+
+    job = _make_job("job-detail-operator-inputs-blocked")
+    job.app_code = "maps"
+    store.create_job(job)
+    now = utc_now_iso()
+    store.upsert_runtime_input(
+        RuntimeInputRecord(
+            request_id="runtime-input-ready-but-blocked",
+            repository=job.repository,
+            app_code=job.app_code,
+            job_id=job.job_id,
+            scope="job",
+            key="google_maps_api_key",
+            label="Google Maps API Key",
+            description="지도 구현에 필요",
+            value_type="secret",
+            env_var_name="GOOGLE_MAPS_API_KEY",
+            sensitive=True,
+            status="provided",
+            value="secret-value-123",
+            placeholder="",
+            note="provided",
+            requested_by="operator",
+            requested_at=now,
+            provided_at=now,
+            updated_at=now,
+        )
+    )
+    store.upsert_integration_registry_entry(
+        IntegrationRegistryRecord(
+            integration_id="google_maps",
+            display_name="Google Maps",
+            category="mapping",
+            supported_app_types=["web", "app"],
+            tags=["maps"],
+            required_env_keys=["GOOGLE_MAPS_API_KEY"],
+            optional_env_keys=[],
+            operator_guide_markdown="",
+            implementation_guide_markdown="",
+            verification_notes="",
+            approval_required=True,
+            enabled=True,
+            created_at=now,
+            updated_at=now,
+            approval_status="pending",
+        )
+    )
+
+    response = client.get(f"/api/jobs/{job.job_id}")
+
+    assert response.status_code == 200
+    payload = response.json()["operator_inputs"]
+    assert payload["available_count"] == 0
+    assert payload["blocked_count"] == 1
+    assert payload["blocked_env_vars"] == ["GOOGLE_MAPS_API_KEY"]
+    assert payload["blocked_inputs"][0]["bridge_allowed"] is False
+    assert "승인" in payload["blocked_inputs"][0]["bridge_reason"]
+
+
+def test_job_detail_api_includes_integration_operator_boundary(app_components):
+    settings, store, app = app_components
+    client = TestClient(app)
+
+    job = _make_job("job-detail-integration-boundary")
+    job.app_code = "maps"
+    job.status = "failed"
+    job.recovery_status = "needs_human"
+    job.error_message = "integration blocked"
+    store.create_job(job)
+    now = utc_now_iso()
+    store.upsert_runtime_input(
+        RuntimeInputRecord(
+            request_id="runtime-input-boundary",
+            repository=job.repository,
+            app_code=job.app_code,
+            job_id=job.job_id,
+            scope="job",
+            key="google_maps_api_key",
+            label="Google Maps API Key",
+            description="지도 구현에 필요",
+            value_type="secret",
+            env_var_name="GOOGLE_MAPS_API_KEY",
+            sensitive=True,
+            status="provided",
+            value="secret-value-123",
+            placeholder="",
+            note="provided",
+            requested_by="operator",
+            requested_at=now,
+            provided_at=now,
+            updated_at=now,
+        )
+    )
+    store.upsert_integration_registry_entry(
+        IntegrationRegistryRecord(
+            integration_id="google_maps",
+            display_name="Google Maps",
+            category="mapping",
+            supported_app_types=["web", "app"],
+            tags=["maps"],
+            required_env_keys=["GOOGLE_MAPS_API_KEY"],
+            optional_env_keys=[],
+            operator_guide_markdown="",
+            implementation_guide_markdown="",
+            verification_notes="",
+            approval_required=True,
+            enabled=True,
+            created_at=now,
+            updated_at=now,
+            approval_status="pending",
+        )
+    )
+    workspace = settings.repository_workspace_path(job.repository, job.app_code)
+    docs_dir = workspace / "_docs"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    (docs_dir / "INTEGRATION_RECOMMENDATIONS.json").write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "integration_id": "google_maps",
+                        "display_name": "Google Maps",
+                        "recommendation_status": "operator_review_and_input_required",
+                        "input_readiness_status": "approval_required",
+                        "input_readiness_reason": "승인이 필요합니다.",
+                        "approval_status": "pending",
+                        "approval_required": True,
+                        "required_env_keys": ["GOOGLE_MAPS_API_KEY"],
+                        "reason": "지도 기능 후보",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    response = client.get(f"/api/jobs/{job.job_id}")
+
+    assert response.status_code == 200
+    payload = response.json()["integration_operator_boundary"]
+    assert payload["active"] is True
+    assert payload["boundary_status"] == "approval_and_input_required"
+    assert payload["candidate_count"] == 1
+    assert payload["blocked_input_count"] == 1
+    assert payload["candidates"][0]["integration_id"] == "google_maps"
+
+
+def test_job_detail_api_includes_integration_health_facets(app_components):
+    settings, store, app = app_components
+    client = TestClient(app)
+
+    job = _make_job("job-detail-integration-health-facets")
+    job.app_code = "maps"
+    job.status = "failed"
+    job.stage = JobStage.IMPLEMENT_WITH_CODEX.value
+    job.error_message = "quota exceeded"
+    store.create_job(job)
+    now = utc_now_iso()
+    store.upsert_runtime_input(
+        RuntimeInputRecord(
+            request_id="runtime-input-health",
+            repository=job.repository,
+            app_code=job.app_code,
+            job_id=job.job_id,
+            scope="job",
+            key="google_maps_api_key",
+            label="Google Maps API Key",
+            description="지도 구현에 필요",
+            value_type="secret",
+            env_var_name="GOOGLE_MAPS_API_KEY",
+            sensitive=True,
+            status="requested",
+            value="",
+            placeholder="",
+            note="requested",
+            requested_by="operator",
+            requested_at=now,
+            provided_at=None,
+            updated_at=now,
+        )
+    )
+    store.upsert_integration_registry_entry(
+        IntegrationRegistryRecord(
+            integration_id="google_maps",
+            display_name="Google Maps",
+            category="mapping",
+            supported_app_types=["web", "app"],
+            tags=["maps"],
+            required_env_keys=["GOOGLE_MAPS_API_KEY"],
+            optional_env_keys=[],
+            operator_guide_markdown="",
+            implementation_guide_markdown="",
+            verification_notes="",
+            approval_required=True,
+            enabled=True,
+            created_at=now,
+            updated_at=now,
+            approval_status="approved",
+        )
+    )
+    workspace = settings.repository_workspace_path(job.repository, job.app_code)
+    docs_dir = workspace / "_docs"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    (docs_dir / "INTEGRATION_RECOMMENDATIONS.json").write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "integration_id": "google_maps",
+                        "display_name": "Google Maps",
+                        "recommendation_status": "approved_candidate",
+                        "input_readiness_status": "input_requested",
+                        "input_readiness_reason": "필수 env가 요청됨 상태입니다.",
+                        "approval_status": "approved",
+                        "approval_required": True,
+                        "required_env_keys": ["GOOGLE_MAPS_API_KEY"],
+                        "reason": "지도 기능 후보",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    build_workflow_artifact_paths(workspace)["integration_usage_trail"].write_text(
+        json.dumps(
+            {
+                "events": [
+                    {
+                        "generated_at": "2026-03-13T04:00:00+00:00",
+                        "stage": "implement_with_codex",
+                        "route": "coder",
+                        "prompt_path": str(docs_dir / "CODER_PROMPT_IMPLEMENT.md"),
+                        "integration_count": 1,
+                        "blocked_integration_count": 1,
+                        "blocked_env_vars": ["GOOGLE_MAPS_API_KEY"],
+                        "items": [
+                            {
+                                "integration_id": "google_maps",
+                                "display_name": "Google Maps",
+                                "usage_status": "prompt_injected",
+                                "required_input_summary": {
+                                    "provided": 0,
+                                    "requested": 1,
+                                    "missing": 0,
+                                    "total": 1,
+                                },
+                            }
+                        ],
+                    }
+                ]
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    debug_log_path = settings.logs_dir / "debug" / job.log_file
+    debug_log_path.parent.mkdir(parents=True, exist_ok=True)
+    debug_log_path.write_text(
+        "[2026-03-13T04:00:01+00:00] Commit summary route unavailable; using deterministic fallback: commit_summary failed with exit code 1. Next action: run the logged command manually in the same repository directory and verify CLI login/state. stderr preview: no quota remaining\n",
+        encoding="utf-8",
+    )
+
+    response = client.get(f"/api/jobs/{job.job_id}")
+
+    assert response.status_code == 200
+    payload = response.json()["integration_health_facets"]
+    assert payload["active"] is True
+    assert payload["missing_input"]["active"] is True
+    assert payload["missing_input"]["candidate_ids"] == ["google_maps"]
+    assert payload["quota"]["active"] is True
+    assert payload["quota"]["provider_hint"] == "codex"

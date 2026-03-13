@@ -12,7 +12,7 @@ from app.ai_role_routing import AIRoleRouter, default_ai_role_routing_payload
 from app.command_runner import CommandResult
 from app.command_runner import CommandExecutionError
 from app.memory.runtime_store import MemoryRuntimeStore
-from app.models import JobRecord, JobStage, JobStatus, NodeRunRecord, utc_now_iso
+from app.models import IntegrationRegistryRecord, JobRecord, JobStage, JobStatus, NodeRunRecord, utc_now_iso
 from app.orchestrator import IssueDetails, Orchestrator
 from app.models import RuntimeInputRecord
 from app.workflow_resume import build_workflow_artifact_paths
@@ -189,6 +189,80 @@ def test_orchestrator_resolves_runtime_inputs_into_env_and_prompt_safe_artifact(
     assert payload["resolved_inputs"][0]["env_var_name"] == "GOOGLE_MAPS_API_KEY"
     assert payload["resolved_inputs"][0]["value"] == ""
     assert payload["resolved_inputs"][0]["display_value"] != ""
+
+
+def test_orchestrator_blocks_runtime_input_env_when_integration_not_approved(app_components) -> None:
+    settings, store, _ = app_components
+    job = _make_job("job-runtime-input-blocked")
+    job.app_code = "maps"
+    store.create_job(job)
+    now = utc_now_iso()
+    store.upsert_runtime_input(
+        RuntimeInputRecord(
+            request_id="runtime-input-secret-blocked",
+            repository=job.repository,
+            app_code=job.app_code,
+            job_id=job.job_id,
+            scope="job",
+            key="google_maps_api_key",
+            label="Google Maps API Key",
+            description="지도 기능 구현용",
+            value_type="secret",
+            env_var_name="GOOGLE_MAPS_API_KEY",
+            sensitive=True,
+            status="provided",
+            value="secret-value-123",
+            placeholder="",
+            note="provided",
+            requested_by="operator",
+            requested_at=now,
+            provided_at=now,
+            updated_at=now,
+        )
+    )
+    store.upsert_integration_registry_entry(
+        IntegrationRegistryRecord(
+            integration_id="google_maps",
+            display_name="Google Maps",
+            category="mapping",
+            supported_app_types=["web", "app"],
+            tags=["maps"],
+            required_env_keys=["GOOGLE_MAPS_API_KEY"],
+            optional_env_keys=[],
+            operator_guide_markdown="",
+            implementation_guide_markdown="",
+            verification_notes="",
+            approval_required=True,
+            enabled=True,
+            created_at=now,
+            updated_at=now,
+            approval_status="pending",
+        )
+    )
+
+    orchestrator = Orchestrator(
+        settings=settings,
+        store=store,
+        command_templates=FakeTemplateRunner(),
+    )
+    orchestrator._set_active_runtime_input_environment(job)
+
+    assert orchestrator.command_templates.extra_env == {}
+
+    repository_path = settings.repository_workspace_path(job.repository, job.app_code)
+    repository_path.mkdir(parents=True, exist_ok=True)
+    paths = build_workflow_artifact_paths(repository_path)
+    variables = orchestrator._build_template_variables(
+        job,
+        paths,
+        repository_path / "_docs" / "PROMPT.md",
+    )
+
+    artifact_path = Path(variables["operator_inputs_path"])
+    payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+    assert payload["available_env_vars"] == []
+    assert payload["blocked_env_vars"] == ["GOOGLE_MAPS_API_KEY"]
+    assert payload["blocked_inputs"][0]["bridge_allowed"] is False
 
 
 def _improvement_paths(repository_path: Path) -> dict[str, Path]:

@@ -130,6 +130,20 @@
 - `_docs/MOBILE_APP_CHECKLIST.md` 또는 `_docs/UI_BENCHMARK_NOTES.md`에 모바일 점검 결과 기록
 - 현재 상태: `DONE`
 
+### 7-E. Emulator Boot + Mobile E2E Runner
+- `scripts/mobile_e2e_runner.sh`가 Android emulator / iOS simulator를 부팅 또는 재사용하고 E2E 명령을 실행
+- `scripts/run_agenthub_tests.sh`는 아래 모드를 지원
+  - `mobile-e2e-android`
+  - `mobile-e2e-ios`
+  - `e2e` 모드에서 mobile E2E script가 있으면 Android 우선으로 자동 선택
+- 결과는 `_docs/MOBILE_E2E_RESULT.json`에 기록되고 `_docs/MOBILE_APP_CHECKLIST.md`에도 같이 요약됨
+- 현재 상태: `DONE`
+
+### 7-F. Mobile E2E Operator Surface
+- job detail의 workflow 탭에서 마지막 `MOBILE_E2E_RESULT`를 직접 본다.
+- admin 운영 지표의 `앱 실행 상태` 카드에서 최근 모바일 E2E 결과와 상태 분포를 같이 본다.
+- 현재 상태: `DONE`
+
 ## 8. Exit Criteria
 
 - planner/coder/reviewer가 앱 분류 작업에서 React Native/Expo/에뮬레이터 규칙을 기본 전제로 다룬다.
@@ -137,3 +151,5 @@
 - 필요한 API key는 runtime input registry 경유로 요청할 수 있다.
 - dashboard 운영 지표에서 앱별 실행 모드와 최근 실행 명령을 읽을 수 있다.
 - 앱 작업의 테스트 단계가 끝나면 `_docs/MOBILE_APP_CHECKLIST.md`에 마지막 emulator/simulator 검증 요약이 자동 기록된다.
+- mobile E2E를 실행하면 `_docs/MOBILE_E2E_RESULT.json`에 platform / target / runner / command / status가 기록된다.
+- job detail과 admin 운영 지표에서 마지막 모바일 E2E 결과를 직접 읽을 수 있다.

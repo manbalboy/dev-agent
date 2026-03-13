@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, Optional
@@ -162,6 +162,42 @@ class RuntimeInputRecord:
     @classmethod
     def from_dict(cls, payload: Dict[str, Any]) -> "RuntimeInputRecord":
         """Create a RuntimeInputRecord from stored JSON data."""
+
+        return cls(**payload)
+
+
+@dataclass
+class IntegrationRegistryRecord:
+    """Stored third-party integration registry entry."""
+
+    integration_id: str
+    display_name: str
+    category: str
+    supported_app_types: list[str]
+    tags: list[str]
+    required_env_keys: list[str]
+    optional_env_keys: list[str]
+    operator_guide_markdown: str
+    implementation_guide_markdown: str
+    verification_notes: str
+    approval_required: bool
+    enabled: bool
+    created_at: str
+    updated_at: str
+    approval_status: str = ""
+    approval_note: str = ""
+    approval_updated_at: str = ""
+    approval_updated_by: str = "operator"
+    approval_trail: list[dict[str, Any]] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize to a plain dictionary for JSON storage."""
+
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: Dict[str, Any]) -> "IntegrationRegistryRecord":
+        """Create an IntegrationRegistryRecord from stored JSON data."""
 
         return cls(**payload)
 

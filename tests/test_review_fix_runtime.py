@@ -78,6 +78,9 @@ def _build_runtime(
         write_memory_retrieval_artifacts=lambda **kwargs: actor_logs.append(
             (str(kwargs["repository_path"]), "MEMORY", "written")
         ),
+        write_integration_guide_summary_artifact=None,
+        write_integration_code_patterns_artifact=None,
+        write_integration_verification_checklist_artifact=None,
         docs_file=lambda repository_path, name: repository_path / "_docs" / name,
         build_route_runtime_context=lambda route: f"{route}-context",
         build_template_variables=lambda job, paths, prompt_path: {
@@ -226,3 +229,125 @@ def test_stage_review_with_gemini_uses_repository_aware_fallback_template(tmp_pa
 
     assert [call[0] for call in runner.calls] == ["reviewer_fallback"]
     assert "fallback" in paths["review"].read_text(encoding="utf-8")
+
+
+def test_stage_review_with_gemini_embeds_integration_guide_summary(tmp_path: Path) -> None:
+    repository_path = tmp_path / "repo"
+    docs_path = repository_path / "_docs"
+    docs_path.mkdir(parents=True)
+    actor_logs: list[tuple[str, str, str]] = []
+    planner_calls: list[dict[str, object]] = []
+    runner = _FakeTemplateRunner(stdout_by_template={"reviewer": "# REVIEW\n- [ ] guide\n"})
+    runtime = _build_runtime(
+        template_runner=runner,
+        actor_logs=actor_logs,
+        planner_calls=planner_calls,
+    )
+    runtime.write_integration_guide_summary_artifact = lambda **kwargs: (
+        kwargs["paths"]["integration_guide_summary"].write_text(
+            "# INTEGRATION_GUIDE_SUMMARY\n\n## Google Maps\n\n- required_env_keys: GOOGLE_MAPS_API_KEY\n",
+            encoding="utf-8",
+        )
+        or {"count": 1}
+    )
+    runtime.write_integration_code_patterns_artifact = lambda **kwargs: (
+        kwargs["paths"]["integration_code_patterns"].write_text(
+            "# INTEGRATION_CODE_PATTERNS\n\n## Google Maps\n\n- MapLoader 래퍼 사용\n",
+            encoding="utf-8",
+        )
+        or {"count": 1}
+    )
+    runtime.write_integration_verification_checklist_artifact = lambda **kwargs: (
+        kwargs["paths"]["integration_verification_checklist"].write_text(
+            "# INTEGRATION_VERIFICATION_CHECKLIST\n\n## Google Maps\n\n- [ ] 지도 로딩 검증\n",
+            encoding="utf-8",
+        )
+        or {"count": 1}
+    )
+    paths = {
+        "spec": docs_path / "SPEC.md",
+        "plan": docs_path / "PLAN.md",
+        "review": docs_path / "REVIEW.md",
+        "integration_guide_summary": docs_path / "INTEGRATION_GUIDE_SUMMARY.md",
+        "integration_code_patterns": docs_path / "INTEGRATION_CODE_PATTERNS.md",
+        "integration_verification_checklist": docs_path / "INTEGRATION_VERIFICATION_CHECKLIST.md",
+    }
+    paths["spec"].write_text("# SPEC\n", encoding="utf-8")
+    paths["plan"].write_text("# PLAN\n", encoding="utf-8")
+
+    runtime.stage_review_with_gemini(
+        job=_make_job("job-review-guide-summary"),
+        repository_path=repository_path,
+        paths=paths,
+        log_path=tmp_path / "job.log",
+    )
+
+    prompt_text = (docs_path / "REVIEWER_PROMPT.md").read_text(encoding="utf-8")
+    assert "Integration Guide Summary" in prompt_text
+    assert "INTEGRATION_GUIDE_SUMMARY.md" in prompt_text
+    assert "Integration Code Patterns" in prompt_text
+    assert "INTEGRATION_CODE_PATTERNS.md" in prompt_text
+    assert "Integration Verification Checklist" in prompt_text
+    assert "INTEGRATION_VERIFICATION_CHECKLIST.md" in prompt_text
+    assert "Google Maps" in prompt_text
+
+
+def test_stage_fix_with_codex_embeds_integration_guide_summary(tmp_path: Path) -> None:
+    repository_path = tmp_path / "repo"
+    docs_path = repository_path / "_docs"
+    docs_path.mkdir(parents=True)
+    actor_logs: list[tuple[str, str, str]] = []
+    planner_calls: list[dict[str, object]] = []
+    runner = _FakeTemplateRunner()
+    runtime = _build_runtime(
+        template_runner=runner,
+        actor_logs=actor_logs,
+        planner_calls=planner_calls,
+        improvement_runtime={"task_titles": ["지도 화면 정리"]},
+    )
+    runtime.write_integration_guide_summary_artifact = lambda **kwargs: (
+        kwargs["paths"]["integration_guide_summary"].write_text(
+            "# INTEGRATION_GUIDE_SUMMARY\n\n## Google Maps\n\n- required_env_keys: GOOGLE_MAPS_API_KEY\n",
+            encoding="utf-8",
+        )
+        or {"count": 1}
+    )
+    runtime.write_integration_code_patterns_artifact = lambda **kwargs: (
+        kwargs["paths"]["integration_code_patterns"].write_text(
+            "# INTEGRATION_CODE_PATTERNS\n\n## Google Maps\n\n- MapLoader 래퍼 사용\n",
+            encoding="utf-8",
+        )
+        or {"count": 1}
+    )
+    runtime.write_integration_verification_checklist_artifact = lambda **kwargs: (
+        kwargs["paths"]["integration_verification_checklist"].write_text(
+            "# INTEGRATION_VERIFICATION_CHECKLIST\n\n## Google Maps\n\n- [ ] 지도 로딩 검증\n",
+            encoding="utf-8",
+        )
+        or {"count": 1}
+    )
+    paths = {
+        "plan": docs_path / "PLAN.md",
+        "review": docs_path / "REVIEW.md",
+        "integration_guide_summary": docs_path / "INTEGRATION_GUIDE_SUMMARY.md",
+        "integration_code_patterns": docs_path / "INTEGRATION_CODE_PATTERNS.md",
+        "integration_verification_checklist": docs_path / "INTEGRATION_VERIFICATION_CHECKLIST.md",
+    }
+    paths["plan"].write_text("# PLAN\n", encoding="utf-8")
+    paths["review"].write_text("# REVIEW\n", encoding="utf-8")
+
+    runtime.stage_fix_with_codex(
+        job=_make_job("job-fix-guide-summary"),
+        repository_path=repository_path,
+        paths=paths,
+        log_path=tmp_path / "job.log",
+    )
+
+    prompt_text = (docs_path / "CODER_PROMPT_FIX.md").read_text(encoding="utf-8")
+    assert "Integration Guide Summary" in prompt_text
+    assert "INTEGRATION_GUIDE_SUMMARY.md" in prompt_text
+    assert "Integration Code Patterns" in prompt_text
+    assert "INTEGRATION_CODE_PATTERNS.md" in prompt_text
+    assert "Integration Verification Checklist" in prompt_text
+    assert "INTEGRATION_VERIFICATION_CHECKLIST.md" in prompt_text
+    assert "Google Maps" in prompt_text

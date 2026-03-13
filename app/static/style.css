@@ -647,6 +647,85 @@ code {
   min-height: 120px;
 }
 
+.admin-kv {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.admin-kv div {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.admin-kv span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.admin-kv strong {
+  font-size: 1.05rem;
+}
+
+.admin-simple-list,
+.admin-list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.admin-simple-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.admin-list-item {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.admin-list-item strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.admin-list-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.admin-list-meta span {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 4px 10px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  background: var(--surface-strong);
+}
+
 .admin-drilldown-filters {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -665,6 +744,7 @@ code {
   font-weight: 700;
 }
 
+.admin-drilldown-filters input,
 .admin-drilldown-filters select {
   width: 100%;
   border: 1px solid var(--line-strong);
@@ -675,6 +755,7 @@ code {
   font: inherit;
 }
 
+.admin-drilldown-filters input:focus,
 .admin-drilldown-filters select:focus {
   outline: none;
   border-color: var(--accent);
@@ -1000,6 +1081,34 @@ code {
   margin-bottom: 4px;
 }
 
+.admin-integration-filter-form {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.admin-integration-guide-list {
+  display: grid;
+  gap: 12px;
+}
+
+.admin-integration-guide-list h4 {
+  margin: 0 0 6px;
+  font-size: 0.95rem;
+}
+
+.admin-integration-guide {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line-color);
+  border-radius: 12px;
+  background: var(--surface-soft);
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--muted-text);
+  font-family: inherit;
+  font-size: 0.92rem;
+  line-height: 1.55;
+}
+
 .admin-backlog-list .admin-memory-subhead {
   align-items: flex-start;
 }
@@ -1234,6 +1343,32 @@ code {
 .action-button:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+}
+
+.secondary-button {
+  background: transparent;
+}
+
+.danger-button {
+  border-color: rgba(214, 61, 61, 0.5);
+  background: var(--danger-soft);
+  color: #ffd7d7;
+}
+
+[data-theme="light"] .danger-button {
+  color: #8f1f1f;
+}
+
+.admin-textarea {
+  width: 100%;
+  min-height: 92px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface-soft);
+  color: var(--text);
+  padding: 12px 14px;
+  font: inherit;
+  resize: vertical;
 }
 
 .app-delete {
@@ -3108,6 +3243,10 @@ tbody tr:hover {
   }
 
   .admin-drilldown-filters {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-kv {
     grid-template-columns: 1fr;
   }
 

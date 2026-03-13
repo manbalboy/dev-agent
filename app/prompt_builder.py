@@ -631,6 +631,10 @@ def build_planner_prompt(
     memory_selection_path: str = "",
     memory_context_path: str = "",
     operator_inputs_path: str = "",
+    integration_recommendations_path: str = "",
+    integration_guide_summary_path: str = "",
+    integration_code_patterns_path: str = "",
+    integration_verification_checklist_path: str = "",
     role_context: str = "",
     is_long_term: bool = False,
     is_refinement_round: bool = False,
@@ -652,6 +656,10 @@ def build_planner_prompt(
         - {memory_selection_path} (memory retrieval selection 결과가 있으면 참고)
         - {memory_context_path} (retrieved memory context가 있으면 참고)
         - {operator_inputs_path} (운영자가 나중에 제공할 입력/키 상태가 있으면 반영)
+        - {integration_recommendations_path} (외부 통합 도입 검토 후보가 있으면 승인 전 검토 항목으로만 반영)
+        - {integration_guide_summary_path} (승인된 통합 가이드가 있으면 구현/검증 기준으로 우선 반영)
+        - {integration_code_patterns_path} (승인된 통합 코드 패턴/스니펫 힌트가 있으면 구현 접근의 기본안으로 반영)
+        - {integration_verification_checklist_path} (승인된 통합 검증 체크리스트가 있으면 구현/리뷰/테스트 계획의 기준으로 반영)
 
         출력 대상 경로(참고용):
         - {plan_path}
@@ -705,6 +713,16 @@ def build_planner_prompt(
         - IMPROVEMENT_PLAN.md / NEXT_IMPROVEMENT_TASKS.json 이 있으면 strategy와 우선순위를 계획에 직접 반영.
         - FOLLOWUP_BACKLOG_TASK.json 이 있으면 이 후보를 이번 라운드의 최우선 next action으로 반영.
         - OPERATOR_INPUTS.json 에 pending input이 있으면 차단 요소와 대체 경로를 함께 계획에 쓴다.
+        - INTEGRATION_RECOMMENDATIONS.json 이 있으면 외부 통합을 자동 채택하지 말고 `도입 검토 후보`로만 계획에 반영한다.
+        - INTEGRATION_GUIDE_SUMMARY.md 가 있으면 승인된 통합의 구현 가이드/검증 기준을 우선 참조한다.
+        - INTEGRATION_CODE_PATTERNS.md 가 있으면 승인된 통합의 코드 패턴/스니펫 힌트를 구현 접근의 기본안으로 반영한다.
+        - INTEGRATION_VERIFICATION_CHECKLIST.md 가 있으면 승인된 통합 검증 체크리스트를 구현/리뷰/테스트 계획에 직접 반영한다.
+        - recommendation_status 가 `operator_rejected` 인 항목은 이번 라운드 구현 후보에서 제외하고 대체 경로만 적는다.
+        - recommendation_status 가 `approved_candidate` 인 항목은 필요한 env와 검증 계획이 준비된 경우에만 구현 후보로 올린다.
+        - 승인된 통합 가이드가 있으면 임의의 다른 SDK/라이브러리를 발명하지 말고 해당 가이드를 기본안으로 쓴다.
+        - 승인된 통합 코드 패턴이 있으면 그 패턴을 기본안으로 쓰고, 다른 코드 스타일/SDK 예시는 대체안으로만 적는다.
+        - secret 값은 절대 문서/로그/프롬프트 본문에 쓰지 말고 env var 이름만 사용한다.
+        - 외부 통합은 승인 전 기본 의존성으로 확정하지 말고, 필요한 env/승인 상태와 대체 경로를 함께 적는다.
         - improvement strategy가 `design_rebaseline` 또는 scope_restriction이 `MVP_redefinition`이면,
           구현 확대가 아니라 제품 정의/범위/설계 문서 재정렬 계획을 우선 작성.
         - improvement strategy가 `feature_expansion`이면 품질 게이트를 깨지 않는 범위에서 사용자 가치가 높은 기능 1개만 확장.
@@ -743,6 +761,10 @@ def build_planner_prompt(
             _read_prompt_context(memory_selection_path, label="Memory Selection"),
             _read_prompt_context(memory_context_path, label="Memory Context"),
             _read_prompt_context(operator_inputs_path, label="Operator Inputs"),
+            _read_prompt_context(integration_recommendations_path, label="Integration Recommendations"),
+            _read_prompt_context(integration_guide_summary_path, label="Integration Guide Summary"),
+            _read_prompt_context(integration_code_patterns_path, label="Integration Code Patterns"),
+            _read_prompt_context(integration_verification_checklist_path, label="Integration Verification Checklist"),
         ]
         if block
     ).strip()
@@ -838,6 +860,9 @@ def build_coder_prompt(
     memory_selection_path: str = "",
     memory_context_path: str = "",
     operator_inputs_path: str = "",
+    integration_guide_summary_path: str = "",
+    integration_code_patterns_path: str = "",
+    integration_verification_checklist_path: str = "",
     role_context: str = "",
 ) -> str:
     """Prompt text for coder model (Codex)."""
@@ -859,6 +884,9 @@ def build_coder_prompt(
         {improvement_loop_state_path}가 존재하면 strategy / rollback / principle enforcement 신호를 참고하세요.
         {next_improvement_tasks_path}가 존재하고 비어있지 않으면 listed task를 우선순위대로 처리하세요.
         {operator_inputs_path}가 존재하면 운영자 제공 입력 상태를 참고하세요. secret 값은 직접 출력하지 말고 env var 존재 여부만 활용하세요.
+        {integration_guide_summary_path}가 존재하면 승인된 통합 가이드 요약을 구현 기준으로 우선 반영하세요.
+        {integration_code_patterns_path}가 존재하면 승인된 통합 코드 패턴/스니펫 힌트를 구현 기본안으로 우선 반영하세요.
+        {integration_verification_checklist_path}가 존재하면 승인된 통합 검증 체크리스트를 구현 완료 self-check 기준으로 우선 반영하세요.
 
         Requirements:
         - 아래 운영 원칙을 따른다.
@@ -887,6 +915,9 @@ def build_coder_prompt(
         - 회귀(regression) 유발 금지.
         - 보안 민감정보 하드코딩 금지.
         - secret input은 코드/로그/문서에 그대로 출력하지 말고 env var 참조로만 연결.
+        - 승인된 통합 가이드가 있으면 해당 가이드의 SDK/설정/검증 방식을 우선 따르고 임의의 대체 라이브러리를 도입하지 않는다.
+        - 승인된 통합 코드 패턴이 있으면 컴포넌트 구조, loader 방식, env 참조 방식, 검증 포인트를 그 패턴에 맞춰 구현한다.
+        - 외부 통합 secret 값은 절대 출력하지 말고 env var 이름만 사용한다.
         - 실패 시 우회가 아닌 원인 기반 수정 우선.
         - UI 변경 시 모바일(360~430px) 우선으로 레이아웃이 깨지지 않게 유지.
         - 화면 복잡도가 이미 높으면 새 UI를 덧대기보다 탭/메뉴/접힘 구조로 분리.
@@ -916,6 +947,9 @@ def build_coder_prompt(
             _read_prompt_context(memory_selection_path, label="Memory Selection"),
             _read_prompt_context(memory_context_path, label="Memory Context"),
             _read_prompt_context(operator_inputs_path, label="Operator Inputs"),
+            _read_prompt_context(integration_guide_summary_path, label="Integration Guide Summary"),
+            _read_prompt_context(integration_code_patterns_path, label="Integration Code Patterns"),
+            _read_prompt_context(integration_verification_checklist_path, label="Integration Verification Checklist"),
         ]
         if block
     ).strip()
@@ -1202,6 +1236,9 @@ def build_reviewer_prompt(
     review_path: str,
     memory_selection_path: str = "",
     memory_context_path: str = "",
+    integration_guide_summary_path: str = "",
+    integration_code_patterns_path: str = "",
+    integration_verification_checklist_path: str = "",
     role_context: str = "",
 ) -> str:
     """Prompt text for reviewer model (Gemini)."""
@@ -1244,6 +1281,9 @@ def build_reviewer_prompt(
         - 실행/재현 예시에서 포트가 나오면 3100번대만 사용.
         - 같은 문제의 반복 여부와 품질 개선 정체 여부를 반드시 지적한다.
         - "코드가 돌아간다"는 이유만으로 합격 처리하지 말고 제품 품질 기준으로 판단한다.
+        - INTEGRATION_GUIDE_SUMMARY.md 가 있으면 승인된 통합 가이드와 required env 계약 준수 여부를 함께 리뷰한다.
+        - INTEGRATION_CODE_PATTERNS.md 가 있으면 승인된 코드 패턴/스니펫/검증 힌트가 실제 구현에 반영됐는지 함께 리뷰한다.
+        - INTEGRATION_VERIFICATION_CHECKLIST.md 가 있으면 승인된 통합 검증 체크리스트가 실제 구현/리뷰/테스트 결과에 반영됐는지 함께 리뷰한다.
         - app 분류 작업이면 아래 모바일 앱 개발 모드 규칙을 따른다.
         {MOBILE_APP_RULESET_BRIEF}
         - markdown 본문만 출력하고 작업 과정/내부 추론/메타 코멘트 금지.
@@ -1262,6 +1302,9 @@ def build_reviewer_prompt(
         for block in [
             _read_prompt_context(memory_selection_path, label="Memory Selection"),
             _read_prompt_context(memory_context_path, label="Memory Context"),
+            _read_prompt_context(integration_guide_summary_path, label="Integration Guide Summary"),
+            _read_prompt_context(integration_code_patterns_path, label="Integration Code Patterns"),
+            _read_prompt_context(integration_verification_checklist_path, label="Integration Verification Checklist"),
         ]
         if block
     ).strip()

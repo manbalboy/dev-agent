@@ -1,18 +1,23 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 
 from app.config import AppSettings
 from app.dashboard_job_runtime import DashboardJobRuntime
-from app.models import JobRecord, RuntimeInputRecord, utc_now_iso
+from app.models import IntegrationRegistryRecord, JobRecord, RuntimeInputRecord, utc_now_iso
 
 
 class _Store:
-    def __init__(self, runtime_inputs=None) -> None:
+    def __init__(self, runtime_inputs=None, integration_entries=None) -> None:
         self._runtime_inputs = list(runtime_inputs or [])
+        self._integration_entries = list(integration_entries or [])
 
     def list_runtime_inputs(self):
         return list(self._runtime_inputs)
+
+    def list_integration_registry_entries(self):
+        return list(self._integration_entries)
 
 
 def _build_settings(tmp_path: Path) -> AppSettings:
@@ -202,7 +207,319 @@ def test_build_job_operator_inputs_returns_masked_env_inventory(tmp_path: Path) 
 
     assert payload["available_count"] == 1
     assert payload["pending_count"] == 1
+    assert payload["blocked_count"] == 0
     assert payload["available_env_vars"] == ["GOOGLE_MAPS_API_KEY"]
     assert payload["resolved_inputs"][0]["value"] == ""
     assert payload["resolved_inputs"][0]["display_value"] != ""
     assert payload["pending_inputs"][0]["env_var_name"] == "GOOGLE_PLACES_DATASET"
+
+
+def test_build_job_operator_inputs_surfaces_blocked_env_by_integration_policy(tmp_path: Path) -> None:
+    settings = _build_settings(tmp_path)
+    now = utc_now_iso()
+    runtime_input = RuntimeInputRecord(
+        request_id="ri-1",
+        repository="owner/repo",
+        app_code="app",
+        job_id="",
+        scope="repository",
+        key="google_maps_api_key",
+        label="Google Maps API Key",
+        description="maps",
+        value_type="secret",
+        env_var_name="GOOGLE_MAPS_API_KEY",
+        sensitive=True,
+        status="provided",
+        value="secret-value",
+        requested_at=now,
+        updated_at=now,
+    )
+    integration = IntegrationRegistryRecord(
+        integration_id="google_maps",
+        display_name="Google Maps",
+        category="mapping",
+        supported_app_types=["web", "app"],
+        tags=["maps"],
+        required_env_keys=["GOOGLE_MAPS_API_KEY"],
+        optional_env_keys=[],
+        operator_guide_markdown="",
+        implementation_guide_markdown="",
+        verification_notes="",
+        approval_required=True,
+        enabled=True,
+        created_at=now,
+        updated_at=now,
+        approval_status="pending",
+    )
+    runtime = DashboardJobRuntime(
+        store=_Store(runtime_inputs=[runtime_input], integration_entries=[integration]),
+        settings=settings,
+        get_memory_runtime_store=lambda: None,
+        compute_job_resume_state=lambda job, node_runs, runtime_settings: {},
+        resolve_channel_log_path=lambda runtime_settings, file_name, channel="debug": runtime_settings.logs_dir / channel / file_name,
+    )
+
+    payload = runtime.build_job_operator_inputs(_build_job())
+
+    assert payload["available_count"] == 0
+    assert payload["blocked_count"] == 1
+    assert payload["blocked_env_vars"] == ["GOOGLE_MAPS_API_KEY"]
+    assert payload["blocked_inputs"][0]["env_var_name"] == "GOOGLE_MAPS_API_KEY"
+    assert payload["blocked_inputs"][0]["bridge_allowed"] is False
+    assert "운영자 승인" in payload["blocked_inputs"][0]["bridge_reason"]
+
+
+def test_build_job_integration_operator_boundary_surfaces_failed_job_gate(tmp_path: Path) -> None:
+    settings = _build_settings(tmp_path)
+    now = utc_now_iso()
+    job = _build_job()
+    job.status = "failed"
+    job.recovery_status = "needs_human"
+    runtime_input = RuntimeInputRecord(
+        request_id="ri-1",
+        repository="owner/repo",
+        app_code="app",
+        job_id=job.job_id,
+        scope="job",
+        key="google_maps_api_key",
+        label="Google Maps API Key",
+        description="maps",
+        value_type="secret",
+        env_var_name="GOOGLE_MAPS_API_KEY",
+        sensitive=True,
+        status="provided",
+        value="secret-value",
+        requested_at=now,
+        updated_at=now,
+    )
+    integration = IntegrationRegistryRecord(
+        integration_id="google_maps",
+        display_name="Google Maps",
+        category="mapping",
+        supported_app_types=["web", "app"],
+        tags=["maps"],
+        required_env_keys=["GOOGLE_MAPS_API_KEY"],
+        optional_env_keys=[],
+        operator_guide_markdown="",
+        implementation_guide_markdown="",
+        verification_notes="",
+        approval_required=True,
+        enabled=True,
+        created_at=now,
+        updated_at=now,
+        approval_status="pending",
+    )
+    runtime = DashboardJobRuntime(
+        store=_Store(runtime_inputs=[runtime_input], integration_entries=[integration]),
+        settings=settings,
+        get_memory_runtime_store=lambda: None,
+        compute_job_resume_state=lambda job, node_runs, runtime_settings: {},
+        resolve_channel_log_path=lambda runtime_settings, file_name, channel="debug": runtime_settings.logs_dir / channel / file_name,
+    )
+    workspace = settings.repository_workspace_path(job.repository, job.app_code)
+    docs_path = workspace / "_docs"
+    docs_path.mkdir(parents=True, exist_ok=True)
+    (docs_path / "INTEGRATION_RECOMMENDATIONS.json").write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "integration_id": "google_maps",
+                        "display_name": "Google Maps",
+                        "recommendation_status": "operator_review_and_input_required",
+                        "input_readiness_status": "approval_required",
+                        "input_readiness_reason": "승인이 필요합니다.",
+                        "approval_status": "pending",
+                        "approval_required": True,
+                        "required_env_keys": ["GOOGLE_MAPS_API_KEY"],
+                        "reason": "지도 기능 후보",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    payload = runtime.build_job_integration_operator_boundary(job)
+
+    assert payload["active"] is True
+    assert payload["boundary_status"] == "approval_and_input_required"
+    assert payload["candidate_count"] == 1
+    assert payload["blocked_input_count"] == 1
+    assert payload["candidates"][0]["integration_id"] == "google_maps"
+    assert payload["candidates"][0]["blocked_inputs"][0]["env_var_name"] == "GOOGLE_MAPS_API_KEY"
+
+
+def test_build_job_integration_usage_trail_summarizes_recent_events(tmp_path: Path) -> None:
+    settings = _build_settings(tmp_path)
+    runtime = DashboardJobRuntime(
+        store=None,
+        settings=settings,
+        get_memory_runtime_store=lambda: None,
+        compute_job_resume_state=lambda job, node_runs, runtime_settings: {},
+        resolve_channel_log_path=lambda runtime_settings, file_name, channel="debug": runtime_settings.logs_dir / channel / file_name,
+    )
+    workspace = settings.repository_workspace_path("owner/repo", "app")
+    docs_path = workspace / "_docs"
+    docs_path.mkdir(parents=True, exist_ok=True)
+    (docs_path / "INTEGRATION_USAGE_TRAIL.json").write_text(
+        json.dumps(
+            {
+                "events": [
+                    {
+                        "generated_at": "2026-03-13T00:00:00+00:00",
+                        "stage": "plan_with_gemini",
+                        "route": "planner",
+                        "prompt_path": str(docs_path / "PLANNER_PROMPT.md"),
+                        "integration_count": 1,
+                        "blocked_integration_count": 0,
+                        "blocked_env_vars": [],
+                        "items": [
+                            {
+                                "integration_id": "google_maps",
+                                "display_name": "Google Maps",
+                                "usage_status": "prompt_injected",
+                                "required_input_summary": {
+                                    "provided_count": 1,
+                                    "requested_count": 0,
+                                    "missing_count": 0,
+                                },
+                            }
+                        ],
+                    },
+                    {
+                        "generated_at": "2026-03-13T00:05:00+00:00",
+                        "stage": "implement_with_codex",
+                        "route": "coder",
+                        "prompt_path": str(docs_path / "CODER_PROMPT_IMPLEMENT.md"),
+                        "integration_count": 1,
+                        "blocked_integration_count": 1,
+                        "blocked_env_vars": ["GOOGLE_MAPS_DATASET"],
+                        "items": [
+                            {
+                                "integration_id": "google_maps",
+                                "display_name": "Google Maps",
+                                "usage_status": "prompt_injected",
+                                "required_input_summary": {
+                                    "provided_count": 1,
+                                    "requested_count": 1,
+                                    "missing_count": 0,
+                                },
+                            }
+                        ],
+                    },
+                ]
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    payload = runtime.build_job_integration_usage_trail(_build_job())
+
+    assert payload["active"] is True
+    assert payload["event_count"] == 2
+    assert payload["used_integration_count"] == 1
+    assert payload["used_integration_ids"] == ["google_maps"]
+    assert payload["latest_event"]["route"] == "coder"
+    assert payload["latest_event"]["blocked_env_vars"] == ["GOOGLE_MAPS_DATASET"]
+    assert payload["recent_events"][1]["route"] == "planner"
+
+
+def test_build_job_integration_health_facets_combines_missing_input_and_quota(tmp_path: Path) -> None:
+    settings = _build_settings(tmp_path)
+    runtime = DashboardJobRuntime(
+        store=None,
+        settings=settings,
+        get_memory_runtime_store=lambda: None,
+        compute_job_resume_state=lambda job, node_runs, runtime_settings: {},
+        resolve_channel_log_path=lambda runtime_settings, file_name, channel="debug": runtime_settings.logs_dir / channel / file_name,
+    )
+
+    payload = runtime.build_job_integration_health_facets(
+        job=_build_job(),
+        integration_operator_boundary={
+            "active": True,
+            "candidates": [
+                {
+                    "integration_id": "google_maps",
+                    "display_name": "Google Maps",
+                    "input_readiness_status": "input_required",
+                    "input_readiness_reason": "필수 env가 아직 없습니다.",
+                    "blocked_inputs": [
+                        {
+                            "env_var_name": "GOOGLE_MAPS_API_KEY",
+                            "bridge_reason": "운영자 입력 필요",
+                            "status": "missing",
+                        }
+                    ],
+                }
+            ],
+        },
+        integration_usage_trail={
+            "active": True,
+            "used_integration_ids": ["google_maps"],
+            "latest_event": {"blocked_env_vars": ["GOOGLE_MAPS_API_KEY"]},
+        },
+        log_summary={
+            "latest_auth_hint": {
+                "message": "Codex CLI 사용량/쿼터 확인 필요",
+            }
+        },
+        failure_classification={
+            "failure_class": "provider_quota",
+            "provider_hint": "codex",
+            "stage_family": "implementation",
+            "reason": "quota exceeded",
+            "source": "job_record",
+        },
+    )
+
+    assert payload["active"] is True
+    assert payload["missing_input"]["active"] is True
+    assert payload["missing_input"]["candidate_ids"] == ["google_maps"]
+    assert payload["missing_input"]["blocked_env_vars"] == ["GOOGLE_MAPS_API_KEY"]
+    assert payload["missing_input"]["candidates"][0]["used_in_this_job"] is True
+    assert payload["auth"]["active"] is False
+    assert payload["quota"]["active"] is True
+    assert payload["quota"]["provider_hint"] == "codex"
+
+
+def test_build_job_self_growing_effectiveness_ignores_mismatched_job_artifact(tmp_path: Path) -> None:
+    settings = _build_settings(tmp_path)
+    job = _build_job()
+    job.job_kind = "followup_backlog"
+    job.parent_job_id = "job-parent"
+    docs_dir = settings.repository_workspace_path(job.repository, job.app_code) / "_docs"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    (docs_dir / "SELF_GROWING_EFFECTIVENESS.json").write_text(
+        json.dumps(
+            {
+                "active": True,
+                "job_id": "other-followup-job",
+                "status": "improved",
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    runtime = DashboardJobRuntime(
+        store=_Store(),
+        settings=settings,
+        get_memory_runtime_store=lambda: None,
+        compute_job_resume_state=lambda job, node_runs, runtime_settings: {},
+        resolve_channel_log_path=lambda runtime_settings, file_name, channel="debug": runtime_settings.logs_dir / channel / file_name,
+    )
+
+    payload = runtime.build_job_self_growing_effectiveness(job)
+
+    assert payload["active"] is False
+    assert payload["expected"] is True
+    assert payload["mismatched_job_artifact"] is True
+    assert payload["artifact_job_id"] == "other-followup-job"

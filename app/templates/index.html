@@ -867,6 +867,12 @@
                 <div id="admin-recovery-history-list" class="admin-list-body">불러오는 중...</div>
               </article>
               <article class="admin-list-card">
+                <h3>자기 성장 효과</h3>
+                <p class="hint">후속 개선 작업이 실제로 개선됐는지, 회귀했는지, 비교 기준이 부족한지 최근 사례 기준으로 봅니다.</p>
+                <div id="admin-self-growing-summary" class="admin-list-body">불러오는 중...</div>
+                <div id="admin-self-growing-recent" class="admin-list-body">불러오는 중...</div>
+              </article>
+              <article class="admin-list-card">
                 <h3>복구 액션 그룹</h3>
                 <p class="hint">최근 recovery trace를 dead-letter, requeue, handoff, outage 같은 운영 액션 그룹으로 묶어서 봅니다.</p>
                 <div id="admin-recovery-action-group-list" class="admin-list-body">불러오는 중...</div>
@@ -1047,13 +1053,19 @@
                   <div><span>실행 메타</span><strong id="admin-app-runner-active-count">0</strong></div>
                   <div><span>모바일 모드</span><strong id="admin-app-runner-mobile-count">0</strong></div>
                   <div><span>웹 모드</span><strong id="admin-app-runner-web-count">0</strong></div>
+                  <div><span>모바일 E2E 기록</span><strong id="admin-app-runner-e2e-count">0</strong></div>
                 </div>
                 <div id="admin-app-runner-mode-list" class="admin-list-body">불러오는 중...</div>
                 <div id="admin-app-runner-state-list" class="admin-list-body">불러오는 중...</div>
+                <div id="admin-app-runner-e2e-status-list" class="admin-list-body">불러오는 중...</div>
               </article>
               <article class="admin-list-card">
                 <h3>최근 앱 실행 상태</h3>
                 <div id="admin-app-runner-list" class="admin-list-body">불러오는 중...</div>
+              </article>
+              <article class="admin-list-card">
+                <h3>최근 모바일 E2E 결과</h3>
+                <div id="admin-app-runner-e2e-list" class="admin-list-body">불러오는 중...</div>
               </article>
             </div>
           </section>
@@ -1145,6 +1157,65 @@
               <article class="admin-list-card">
                 <h3>입력 제공 / 상세</h3>
                 <div id="admin-runtime-input-detail" class="admin-list-body">왼쪽에서 입력 요청을 선택하세요.</div>
+              </article>
+            </div>
+          </section>
+
+          <section class="quick-panel admin-panel">
+            <div class="quick-panel-head">
+              <div>
+                <h2>서드파티 통합 레지스트리</h2>
+                <p class="hint">Google Maps, Supabase, Stripe 같은 외부 통합을 읽기 전용으로 조회합니다. 구현 전 어떤 env와 가이드가 준비돼 있는지 확인하는 용도입니다.</p>
+              </div>
+            </div>
+            <form id="admin-integration-filter-form" class="admin-drilldown-filters admin-integration-filter-form">
+              <label>
+                <span>검색</span>
+                <input id="admin-integration-filter-q" type="text" maxlength="200" placeholder="이름, 태그, env, 가이드 문구" />
+              </label>
+              <label>
+                <span>카테고리</span>
+                <input id="admin-integration-filter-category" type="text" maxlength="60" placeholder="mapping, payments" />
+              </label>
+              <label>
+                <span>앱 유형</span>
+                <select id="admin-integration-filter-app-type">
+                  <option value="">전체</option>
+                  <option value="web">웹</option>
+                  <option value="app">앱</option>
+                  <option value="api">API</option>
+                </select>
+              </label>
+              <label>
+                <span>사용 여부</span>
+                <select id="admin-integration-filter-enabled">
+                  <option value="">전체</option>
+                  <option value="true">사용 중</option>
+                  <option value="false">중지됨</option>
+                </select>
+              </label>
+            </form>
+            <div class="admin-memory-actions">
+              <button id="admin-integration-filter-submit" class="action-button" type="button">조회</button>
+              <button id="admin-integration-filter-reset" class="action-button secondary-button" type="button">초기화</button>
+            </div>
+            <p id="admin-integration-result" class="hint"></p>
+            <div class="admin-grid admin-grid-lists">
+              <article class="admin-list-card">
+                <h3>통합 Health 요약</h3>
+                <div id="admin-integration-health-summary" class="admin-list-body">불러오는 중...</div>
+              </article>
+              <article class="admin-list-card">
+                <h3>최근 막힌 작업</h3>
+                <div id="admin-integration-health-blocked" class="admin-list-body">불러오는 중...</div>
+              </article>
+              <article class="admin-list-card">
+                <h3>통합 항목 목록</h3>
+                <div id="admin-integration-list" class="admin-list-body">불러오는 중...</div>
+              </article>
+              <article class="admin-list-card">
+                <h3>통합 상세</h3>
+                <div id="admin-integration-detail" class="admin-list-body">왼쪽에서 통합 항목을 선택하세요.</div>
               </article>
             </div>
           </section>
@@ -1374,6 +1445,37 @@
                   <p class="hint">${esc(String(item?.repository || "-"))} · ${esc(formatAppRunnerMode(item?.mode))} · ${esc(formatKstDateTime(String(item?.updated_at || "")))}</p>
                   <p class="hint">PID ${esc(pid || "-")}${port ? ` · 포트 ${esc(port)}` : ""}${item?.is_mobile ? " · 모바일 실행" : " · 웹 실행"}</p>
                   <p class="hint">명령: ${esc(command || "-")}</p>
+                </li>
+              `;
+            }).join("")}
+          </ul>
+        `;
+      }
+
+      function renderAdminMobileE2EList(targetId, payload, emptyText = "최근 모바일 E2E 결과 없음") {
+        const node = document.getElementById(targetId);
+        if (!node) return;
+        const items = Array.isArray(payload?.recent_mobile_e2e_runs) ? payload.recent_mobile_e2e_runs : [];
+        if (items.length === 0) {
+          node.innerHTML = `<p class="hint">${esc(emptyText)}</p>`;
+          return;
+        }
+        node.innerHTML = `
+          <ul class="admin-status-list">
+            ${items.map((item) => {
+              const status = String(item?.status || "").trim() || "unknown";
+              const badgeClass = status === "passed" ? "done" : status === "failed" ? "failed" : "queued";
+              const statusLabel = status === "passed" ? "통과" : status === "failed" ? "실패" : status;
+              return `
+                <li>
+                  <div class="admin-status-head">
+                    <strong>${esc(String(item?.app_code || "-"))}</strong>
+                    <span class="badge status-${badgeClass}">${esc(statusLabel)}</span>
+                  </div>
+                  <p class="hint">${esc(String(item?.repository || "-"))} · ${esc(formatAppRunnerMode(item?.mode))} · ${esc(formatKstDateTime(String(item?.generated_at || "")))}</p>
+                  <p class="hint">${esc(String(item?.platform || "-"))} · ${esc(String(item?.runner || "-"))} · ${esc(String(item?.target_name || "-"))}</p>
+                  <p class="hint">명령: ${esc(String(item?.command || "-"))}</p>
+                  <p class="hint">artifact: ${esc(String(item?.artifact_path || "-"))}</p>
                 </li>
               `;
             }).join("")}
@@ -1929,6 +2031,7 @@
         assign("admin-app-runner-active-count", runtime?.app_runner_status?.active_count ?? 0);
         assign("admin-app-runner-mobile-count", runtime?.app_runner_status?.mobile_count ?? 0);
         assign("admin-app-runner-web-count", runtime?.app_runner_status?.web_count ?? 0);
+        assign("admin-app-runner-e2e-count", runtime?.app_runner_status?.mobile_e2e_count ?? 0);
 
         renderAdminCountList("admin-strategy-list", runtime.strategy_counts, "전략 데이터 없음", "strategy");
         renderAdminCountList("admin-app-list", runtime.app_counts, "앱 데이터 없음", "app_code");
@@ -1948,7 +2051,11 @@
         renderAdminProviderOutageHistoryList("admin-provider-outage-history-list", runtime.provider_outage_history, "공급자 장애 이력 없음");
         renderAdminCountList("admin-app-runner-mode-list", runtime?.app_runner_status?.mode_counts, "앱 실행 모드 없음");
         renderAdminCountList("admin-app-runner-state-list", runtime?.app_runner_status?.state_counts, "앱 실행 상태 없음");
+        renderAdminCountList("admin-app-runner-e2e-status-list", runtime?.app_runner_status?.mobile_e2e_status_counts, "모바일 E2E 기록 없음");
         renderAdminAppRunnerList("admin-app-runner-list", runtime?.app_runner_status, "최근 앱 실행 상태 없음");
+        renderAdminMobileE2EList("admin-app-runner-e2e-list", runtime?.app_runner_status, "최근 모바일 E2E 결과 없음");
+        renderAdminIntegrationHealthSummary(runtime?.integration_health_summary);
+        renderAdminSelfGrowingEffectivenessSummary(runtime?.self_growing_effectiveness_summary);
         assign("admin-startup-sweep-at", formatKstDateTime(runtime?.startup_sweep?.latest_generated_at || ""));
         assign("admin-startup-mismatch-detected", runtime?.startup_sweep?.running_node_job_mismatches_detected ?? 0);
         assign("admin-startup-mismatch-remaining", runtime?.startup_sweep?.running_node_job_mismatches_remaining ?? 0);
@@ -2022,6 +2129,237 @@
         if (lastUpdated) {
           lastUpdated.textContent = `어드민 지표 갱신: ${formatKstDateTime(payload?.generated_at || new Date().toISOString())}`;
         }
+      }
+
+      function renderAdminIntegrationHealthSummary(summary) {
+        const item = summary && typeof summary === "object" ? summary : {};
+        const summaryNode = document.getElementById("admin-integration-health-summary");
+        const blockedNode = document.getElementById("admin-integration-health-blocked");
+        if (!summaryNode || !blockedNode) return;
+        if (!item.active) {
+          summaryNode.innerHTML = `<p class="hint">통합 health 요약이 아직 없습니다.</p>`;
+          blockedNode.innerHTML = `<p class="hint">최근 막힌 작업이 없습니다.</p>`;
+          return;
+        }
+
+        const renderCounts = (items, emptyText) => {
+          const list = Array.isArray(items) ? items : [];
+          if (!list.length) return `<p class="hint">${esc(emptyText)}</p>`;
+          return `<ul class="admin-simple-list">${list.map((entry) => `
+            <li><strong>${esc(String(entry?.name || "-"))}</strong><span>${esc(String(entry?.count || 0))}</span></li>
+          `).join("")}</ul>`;
+        };
+
+        summaryNode.innerHTML = `
+          <div class="admin-kv">
+            <div><span>전체 통합</span><strong>${esc(String(item.total_integrations || 0))}</strong></div>
+            <div><span>사용 중</span><strong>${esc(String(item.enabled_integrations || 0))}</strong></div>
+            <div><span>Auth blocker</span><strong>${esc(String(item.auth_blocked_jobs || 0))}</strong></div>
+            <div><span>Quota blocker</span><strong>${esc(String(item.quota_blocked_jobs || 0))}</strong></div>
+          </div>
+          <h4>승인 상태</h4>
+          ${renderCounts(item.approval_counts, "승인 상태 없음")}
+          <h4>준비 상태</h4>
+          ${renderCounts(item.readiness_counts, "준비 상태 없음")}
+          <h4>최근 사용 통합</h4>
+          ${renderCounts(item.used_integration_counts, "최근 사용 통합 없음")}
+          <h4>차단 경계</h4>
+          ${renderCounts(item.blocked_boundary_counts, "차단 경계 없음")}
+          <h4>자주 막히는 env</h4>
+          ${renderCounts(item.blocked_env_counts, "차단 env 없음")}
+        `;
+
+        const blockedJobs = Array.isArray(item.recent_blocked_jobs) ? item.recent_blocked_jobs : [];
+        blockedNode.innerHTML = blockedJobs.length
+          ? `<ul class="admin-list">${blockedJobs.map((entry) => `
+              <li class="admin-list-item">
+                <div>
+                  <strong><a href="${esc(String(entry?.detail_url || "#"))}" target="_blank" rel="noreferrer">${esc(String(entry?.job_id || "-"))}</a></strong>
+                  <div class="hint">${esc(String(entry?.issue_title || "-"))}</div>
+                </div>
+                <div class="admin-list-meta">
+                  <span>${esc(String(entry?.boundary_status || "-"))}</span>
+                  <span>${esc(String(entry?.failure_class || "-"))}</span>
+                  <span>${esc((Array.isArray(entry?.candidate_ids) ? entry.candidate_ids : []).join(", ") || "-")}</span>
+                </div>
+              </li>
+            `).join("")}</ul>`
+          : `<p class="hint">최근 막힌 작업이 없습니다.</p>`;
+      }
+
+      function renderAdminSelfGrowingEffectivenessSummary(summary) {
+        const item = summary && typeof summary === "object" ? summary : {};
+        const summaryNode = document.getElementById("admin-self-growing-summary");
+        const recentNode = document.getElementById("admin-self-growing-recent");
+        if (!summaryNode || !recentNode) return;
+        if (!item.active) {
+          summaryNode.innerHTML = `<p class="hint">후속 개선 효과 데이터가 아직 없습니다.</p>`;
+          recentNode.innerHTML = `<p class="hint">최근 follow-up 비교 사례가 없습니다.</p>`;
+          return;
+        }
+
+        const renderCounts = (items, emptyText) => {
+          const list = Array.isArray(items) ? items : [];
+          if (!list.length) return `<p class="hint">${esc(emptyText)}</p>`;
+          return `<ul class="admin-simple-list">${list.map((entry) => `
+            <li><strong>${esc(String(entry?.name || "-"))}</strong><span>${esc(String(entry?.count || 0))}</span></li>
+          `).join("")}</ul>`;
+        };
+        const renderTrendTimeline = (items, emptyText) => {
+          const list = Array.isArray(items) ? items : [];
+          if (!list.length) return `<p class="hint">${esc(emptyText)}</p>`;
+          return `<ul class="admin-simple-list">${list.map((entry) => `
+            <li>
+              <strong>${esc(String(entry?.day || "-"))}</strong>
+              <span>개선 ${esc(String(entry?.improved_count || 0))} / 회귀 ${esc(String(entry?.regressed_count || 0))} / 총 ${esc(String(entry?.total || 0))}</span>
+            </li>
+          `).join("")}</ul>`;
+        };
+        const renderAppBreakdown = (items, emptyText) => {
+          const list = Array.isArray(items) ? items : [];
+          if (!list.length) return `<p class="hint">${esc(emptyText)}</p>`;
+          return `<ul class="admin-simple-list">${list.map((entry) => `
+            <li>
+              <strong>${esc(String(entry?.app_code || "-"))}</strong>
+              <span>개선 ${esc(String(entry?.improved_count || 0))} / 회귀 ${esc(String(entry?.regressed_count || 0))} / 비율 ${esc(formatAdminRatio(entry?.improved_share))}</span>
+            </li>
+          `).join("")}</ul>`;
+        };
+        const renderClusterRecent = (items, emptyText) => {
+          const list = Array.isArray(items) ? items : [];
+          if (!list.length) return `<p class="hint">${esc(emptyText)}</p>`;
+          return `<ul class="admin-simple-list">${list.map((entry) => `
+            <li>
+              <strong>${esc(String(entry?.pattern_id || entry?.candidate_title || entry?.candidate_id || "-"))}</strong>
+              <span>${esc(String(entry?.status_label || entry?.status || "-"))} / count ${esc(String(entry?.pattern_count || 0))}</span>
+            </li>
+          `).join("")}</ul>`;
+        };
+        const renderClusterRecurrence = (items, emptyText) => {
+          const list = Array.isArray(items) ? items : [];
+          if (!list.length) return `<p class="hint">${esc(emptyText)}</p>`;
+          return `<ul class="admin-simple-list">${list.map((entry) => `
+            <li>
+              <strong>${esc(String(entry?.pattern_id || "-"))}</strong>
+              <span>${esc(String(entry?.status_label || entry?.status || "-"))} / ${esc(String(entry?.baseline_count ?? "-"))} → ${esc(String(entry?.current_count ?? "-"))}</span>
+            </li>
+          `).join("")}</ul>`;
+        };
+        const renderRecentEffectItems = (items, mode, emptyText) => {
+          const list = Array.isArray(items) ? items : [];
+          if (!list.length) return `<p class="hint">${esc(emptyText)}</p>`;
+          return `<ul class="admin-status-list">${list.map((entry) => {
+            const detailUrl = String(entry?.detail_url || "").trim();
+            const header = detailUrl
+              ? `<a href="${esc(detailUrl)}">${esc(String(entry?.job_id || "").slice(0, 8) || "-")}</a>`
+              : esc(String(entry?.job_id || "").slice(0, 8) || "-");
+            const reasons = mode === "regressed"
+              ? (Array.isArray(entry?.status_reasons) ? entry.status_reasons : [])
+              : (Array.isArray(entry?.baseline_missing) ? entry.baseline_missing : []);
+            return `
+              <li>
+                <div class="admin-status-head">
+                  <strong>${header}</strong>
+                  <span class="badge status-${mode === "regressed" ? "failed" : "queued"}">${esc(String(entry?.status_label || "-"))}</span>
+                </div>
+                <p class="hint">${esc(String(entry?.issue_title || "-"))}</p>
+                <p class="hint">${esc(String(entry?.summary || "-"))}</p>
+                <p class="hint">${esc(String(entry?.app_code || "-"))} · ${esc(formatKstDateTime(String(entry?.generated_at || "")))}</p>
+                <p class="hint">${esc(reasons.join(" / ") || "-")}</p>
+              </li>
+            `;
+          }).join("")}</ul>`;
+        };
+
+        summaryNode.innerHTML = `
+          <div class="admin-kv">
+            <div><span>후속 작업</span><strong>${esc(String(item.followup_job_count || 0))}</strong></div>
+            <div><span>비교 완료</span><strong>${esc(String(item.active_artifact_jobs || 0))}</strong></div>
+            <div><span>개선됨</span><strong>${esc(String(item.improved_count || 0))}</strong></div>
+            <div><span>회귀됨</span><strong>${esc(String(item.regressed_count || 0))}</strong></div>
+            <div><span>기준 부족</span><strong>${esc(String(item.insufficient_baseline_count || 0))}</strong></div>
+            <div><span>artifact 대기</span><strong>${esc(String(item.missing_artifact_jobs || 0))}</strong></div>
+          </div>
+          <p class="hint">개선 비율: ${esc(formatAdminRatio(item.improved_share))}</p>
+          <h4>상태 분포</h4>
+          ${renderCounts(item.status_counts, "상태 분포 없음")}
+          <h4>앱 분포</h4>
+          ${renderCounts(item.app_counts, "앱 분포 없음")}
+          <h4>최근 7일 추세</h4>
+          <p class="hint">기준일: ${esc(String(item.latest_generated_day || "-"))}</p>
+          ${renderTrendTimeline(item.recent_timeline, "최근 7일 추세 없음")}
+          <h4>앱별 개선/회귀</h4>
+          ${renderAppBreakdown(item.app_status_breakdown, "앱별 효과 분포 없음")}
+          <h4>실패 클러스터 follow-up</h4>
+          <div class="admin-kv">
+            <div><span>연결된 후속</span><strong>${esc(String(item.cluster_linked_followup_count || 0))}</strong></div>
+            <div><span>개선됨</span><strong>${esc(String(item.cluster_improved_count || 0))}</strong></div>
+            <div><span>회귀됨</span><strong>${esc(String(item.cluster_regressed_count || 0))}</strong></div>
+            <div><span>기준 부족</span><strong>${esc(String(item.cluster_insufficient_baseline_count || 0))}</strong></div>
+          </div>
+          <h4>재발 감소 측정</h4>
+          <div class="admin-kv">
+            <div><span>감소됨</span><strong>${esc(String(item.cluster_recurrence_reduced_count || 0))}</strong></div>
+            <div><span>유지됨</span><strong>${esc(String(item.cluster_recurrence_unchanged_count || 0))}</strong></div>
+            <div><span>증가함</span><strong>${esc(String(item.cluster_recurrence_increased_count || 0))}</strong></div>
+            <div><span>기준 부족</span><strong>${esc(String(item.cluster_recurrence_insufficient_baseline_count || 0))}</strong></div>
+            <div><span>줄인 총 발생 수</span><strong>${esc(String(item.cluster_reduced_occurrences_total || 0))}</strong></div>
+            <div><span>늘어난 총 발생 수</span><strong>${esc(String(item.cluster_added_occurrences_total || 0))}</strong></div>
+          </div>
+          <h4>재발 감소 상태 분포</h4>
+          ${renderCounts(item.cluster_recurrence_status_counts, "재발 감소 상태 데이터 없음")}
+          <h4>클러스터 패턴</h4>
+          ${renderCounts(item.cluster_pattern_counts, "실패 클러스터 연결 없음")}
+          <h4>최근 클러스터 사례</h4>
+          ${renderClusterRecent(item.cluster_recent_items, "최근 클러스터 기반 follow-up 없음")}
+          <h4>최근 재발 감소 사례</h4>
+          ${renderClusterRecurrence(item.cluster_recent_recurrence_items, "최근 재발 감소 사례 없음")}
+          <h4>회귀 원인 분포</h4>
+          ${renderCounts(item.regressed_reason_counts, "회귀 원인 데이터 없음")}
+          <h4>기준 부족 분포</h4>
+          ${renderCounts(item.insufficient_baseline_reasons, "기준 부족 데이터 없음")}
+        `;
+
+        const recentItems = Array.isArray(item.recent_items) ? item.recent_items : [];
+        recentNode.innerHTML = recentItems.length
+          ? `<ul class="admin-status-list">${recentItems.map((entry) => {
+              const detailUrl = String(entry?.detail_url || "").trim();
+              const badgeValue = String(entry?.status_label || entry?.status || "-");
+              const tone = String(entry?.status || "").trim() === "improved"
+                ? "done"
+                : String(entry?.status || "").trim() === "regressed"
+                  ? "failed"
+                  : "running";
+              const header = detailUrl
+                ? `<a href="${esc(detailUrl)}">${esc(String(entry?.job_id || "").slice(0, 8) || "-")}</a>`
+                : esc(String(entry?.job_id || "").slice(0, 8) || "-");
+              const deltas = [
+                entry?.review_delta != null ? `review ${esc(formatAdminValue(entry.review_delta))}` : "",
+                entry?.maturity_delta != null ? `maturity ${esc(String(entry.maturity_delta))}` : "",
+                entry?.quality_gate_delta != null ? `gate ${esc(String(entry.quality_gate_delta))}` : "",
+              ].filter(Boolean).join(" / ");
+              return `
+                <li>
+                  <div class="admin-status-head">
+                    <strong>${header}</strong>
+                    <span class="badge status-${tone}">${esc(badgeValue)}</span>
+                  </div>
+                  <p class="hint">${esc(String(entry?.issue_title || "-"))}</p>
+                  <p class="hint">${esc(String(entry?.summary || "-"))}</p>
+                  <p class="hint">${esc(String(entry?.app_code || "-"))} / parent ${esc(String(entry?.parent_job_id || "-"))} / backlog ${esc(String(entry?.backlog_candidate_id || "-"))}</p>
+                  <p class="hint">${esc(String(entry?.backlog_source_kind || "-"))} / ${esc(String(entry?.backlog_title || "-"))}</p>
+                  <p class="hint">${deltas || "-"}</p>
+                  <p class="hint">${esc(formatKstDateTime(String(entry?.generated_at || "")))}</p>
+                </li>
+              `;
+            }).join("")}</ul>`
+          : `<p class="hint">최근 follow-up 비교 사례가 없습니다.</p>`;
+        recentNode.innerHTML += `
+          <h4>최근 회귀 사례</h4>
+          ${renderRecentEffectItems(item.recent_regressed_items, "regressed", "최근 회귀 사례 없음")}
+          <h4>최근 기준 부족 사례</h4>
+          ${renderRecentEffectItems(item.recent_insufficient_baseline_items, "insufficient", "최근 기준 부족 사례 없음")}
+        `;
       }
 
       function memoryStateBadgeClass(state) {
@@ -2268,9 +2606,276 @@
       const adminRuntimeInputDraftState = {
         items: [],
       };
+      const adminIntegrationState = {
+        items: [],
+        selectedId: "",
+        filters: {
+          q: "",
+          category: "",
+          app_type: "",
+          enabled: "",
+        },
+      };
 
       function runtimeInputBadgeClass(status) {
         return String(status || "").trim().toLowerCase() === "provided" ? "done" : "queued";
+      }
+
+      function integrationEnabledBadgeClass(enabled) {
+        return enabled ? "done" : "failed";
+      }
+
+      function integrationApprovalBadgeClass(required) {
+        return required ? "queued" : "done";
+      }
+
+      function integrationInputBadgeClass(status) {
+        if (status === "provided") return "done";
+        if (status === "requested") return "queued";
+        return "failed";
+      }
+
+      function integrationReadinessBadgeClass(status) {
+        if (status === "ready") return "done";
+        if (status === "approval_required" || status === "input_requested") return "queued";
+        return "failed";
+      }
+
+      function integrationReadinessLabel(status) {
+        if (status === "ready") return "준비 완료";
+        if (status === "approval_required") return "승인 대기";
+        if (status === "input_requested") return "입력 요청됨";
+        if (status === "approval_rejected") return "보류됨";
+        return "운영자 입력 필요";
+      }
+
+      function integrationApprovalStatusBadgeClass(status) {
+        if (status === "approved" || status === "not_required") return "done";
+        if (status === "pending") return "queued";
+        return "failed";
+      }
+
+      function integrationApprovalActionLabel(action) {
+        if (action === "approve") return "승인";
+        if (action === "reject") return "보류";
+        if (action === "reset") return "다시 검토";
+        return action || "-";
+      }
+
+      function applyAdminIntegrationFiltersToForm() {
+        const filters = adminIntegrationState.filters;
+        const query = document.getElementById("admin-integration-filter-q");
+        const category = document.getElementById("admin-integration-filter-category");
+        const appType = document.getElementById("admin-integration-filter-app-type");
+        const enabled = document.getElementById("admin-integration-filter-enabled");
+        if (query) query.value = filters.q || "";
+        if (category) category.value = filters.category || "";
+        if (appType) appType.value = filters.app_type || "";
+        if (enabled) enabled.value = filters.enabled || "";
+      }
+
+      function readAdminIntegrationFiltersFromForm() {
+        adminIntegrationState.filters = {
+          q: document.getElementById("admin-integration-filter-q")?.value.trim() || "",
+          category: document.getElementById("admin-integration-filter-category")?.value.trim() || "",
+          app_type: document.getElementById("admin-integration-filter-app-type")?.value.trim() || "",
+          enabled: document.getElementById("admin-integration-filter-enabled")?.value.trim() || "",
+        };
+      }
+
+      function setAdminIntegrationResult(message = "", isError = false) {
+        const node = document.getElementById("admin-integration-result");
+        if (!node) return;
+        node.textContent = message;
+        node.classList.toggle("error-text", Boolean(isError));
+      }
+
+      function renderAdminIntegrationList(items) {
+        const node = document.getElementById("admin-integration-list");
+        if (!node) return;
+        const rows = Array.isArray(items) ? items : [];
+        adminIntegrationState.items = rows;
+        if (!rows.length) {
+          node.innerHTML = `<p class="hint">등록된 통합 항목이 없습니다.</p>`;
+          return;
+        }
+        node.innerHTML = `
+          <ul class="admin-status-list">
+            ${rows.map((item) => {
+              const integrationId = String(item?.integration_id || "").trim();
+              const selected = integrationId && integrationId === adminIntegrationState.selectedId;
+              const supportedAppTypes = Array.isArray(item?.supported_app_types) ? item.supported_app_types : [];
+              const requiredEnv = Array.isArray(item?.required_env_keys) ? item.required_env_keys : [];
+              const tags = Array.isArray(item?.tags) ? item.tags : [];
+              const requiredInputSummary = item?.required_input_summary || {};
+              const readinessStatus = String(item?.input_readiness_status || "").trim();
+              const readinessReason = String(item?.input_readiness_reason || "").trim();
+              return `
+                <li${selected ? ` class="is-selected"` : ""}>
+                  <div class="admin-status-head">
+                    <strong>
+                      <button type="button" class="admin-integration-select" data-integration-id="${esc(integrationId)}">
+                        ${esc(String(item?.display_name || item?.integration_id || "-"))}
+                      </button>
+                    </strong>
+                    <span class="badge status-${integrationEnabledBadgeClass(Boolean(item?.enabled))}">
+                      ${item?.enabled ? "사용" : "중지"}
+                    </span>
+                  </div>
+                  <p class="hint">${esc(String(item?.category || "-"))} · ${esc(supportedAppTypes.join(", ") || "-")}</p>
+                  <p class="hint">${requiredEnv.length ? esc(requiredEnv.join(", ")) : "필수 env 없음"}${Boolean(item?.approval_required) ? " · 승인 필요" : " · 즉시 사용 가능"}</p>
+                  <p class="hint">
+                    <span class="badge status-${integrationReadinessBadgeClass(readinessStatus)}">
+                      ${integrationReadinessLabel(readinessStatus)}
+                    </span>
+                    ${esc(readinessReason || "입력 준비 상태 정보가 없습니다.")}
+                  </p>
+                  <p class="hint">입력 상태 · 제공 ${esc(String(requiredInputSummary?.provided || 0))} / 요청 ${esc(String(requiredInputSummary?.requested || 0))} / 미연결 ${esc(String(requiredInputSummary?.missing || 0))}</p>
+                  <div class="admin-memory-meta">
+                    <code>${esc(integrationId || "-")}</code>
+                    ${tags.slice(0, 3).map((tag) => `<code>${esc(String(tag || ""))}</code>`).join("")}
+                  </div>
+                </li>
+              `;
+            }).join("")}
+          </ul>
+        `;
+      }
+
+      function renderAdminIntegrationDetail(item) {
+        const node = document.getElementById("admin-integration-detail");
+        if (!node) return;
+        const detail = item && typeof item === "object" ? item : null;
+        if (!detail) {
+          node.innerHTML = `<p class="hint">왼쪽에서 통합 항목을 선택하세요.</p>`;
+          return;
+        }
+        const requiredEnv = Array.isArray(detail?.required_env_keys) ? detail.required_env_keys : [];
+        const optionalEnv = Array.isArray(detail?.optional_env_keys) ? detail.optional_env_keys : [];
+        const supportedAppTypes = Array.isArray(detail?.supported_app_types) ? detail.supported_app_types : [];
+        const tags = Array.isArray(detail?.tags) ? detail.tags : [];
+        const requiredInputSummary = detail?.required_input_summary || {};
+        const requiredInputLinks = Array.isArray(detail?.required_input_links) ? detail.required_input_links : [];
+        const readinessStatus = String(detail?.input_readiness_status || "").trim();
+        const readinessReason = String(detail?.input_readiness_reason || "").trim();
+        const approvalStatus = String(detail?.approval_status || "").trim();
+        const approvalNote = String(detail?.approval_note || "").trim();
+        const approvalUpdatedAt = String(detail?.approval_updated_at || "").trim();
+        const approvalUpdatedBy = String(detail?.approval_updated_by || "").trim();
+        const approvalTrail = Array.isArray(detail?.approval_trail) ? detail.approval_trail : [];
+        node.innerHTML = `
+          <div class="admin-memory-detail">
+            <div class="admin-memory-detail-head">
+              <div>
+                <strong>${esc(String(detail?.display_name || detail?.integration_id || "-"))}</strong>
+                <p class="admin-memory-summary">${esc(String(detail?.category || "-"))} · ${esc(supportedAppTypes.join(", ") || "-")}</p>
+              </div>
+              <div class="admin-memory-meta">
+                <span class="badge status-${integrationEnabledBadgeClass(Boolean(detail?.enabled))}">${detail?.enabled ? "사용" : "중지"}</span>
+                <span class="badge status-${integrationApprovalBadgeClass(Boolean(detail?.approval_required))}">${detail?.approval_required ? "승인 필요" : "승인 생략"}</span>
+              </div>
+            </div>
+            <div class="admin-memory-meta">
+              <code>${esc(String(detail?.integration_id || "-"))}</code>
+              ${tags.map((tag) => `<code>${esc(String(tag || ""))}</code>`).join("")}
+            </div>
+            <dl class="admin-memory-detail-grid">
+              <div><dt>지원 앱 유형</dt><dd>${esc(supportedAppTypes.join(", ") || "-")}</dd></div>
+              <div><dt>카테고리</dt><dd>${esc(String(detail?.category || "-"))}</dd></div>
+              <div><dt>필수 env</dt><dd>${esc(requiredEnv.join(", ") || "-")}</dd></div>
+              <div><dt>선택 env</dt><dd>${esc(optionalEnv.join(", ") || "-")}</dd></div>
+              <div><dt>운영자 가이드</dt><dd>${detail?.has_operator_guide ? "등록됨" : "없음"}</dd></div>
+              <div><dt>구현 가이드</dt><dd>${detail?.has_implementation_guide ? "등록됨" : "없음"}</dd></div>
+              <div><dt>입력 연결</dt><dd>제공 ${esc(String(requiredInputSummary?.provided || 0))} / 요청 ${esc(String(requiredInputSummary?.requested || 0))} / 미연결 ${esc(String(requiredInputSummary?.missing || 0))}</dd></div>
+              <div><dt>준비 상태</dt><dd><span class="badge status-${integrationReadinessBadgeClass(readinessStatus)}">${integrationReadinessLabel(readinessStatus)}</span></dd></div>
+              <div><dt>승인 상태</dt><dd><span class="badge status-${integrationApprovalStatusBadgeClass(approvalStatus)}">${approvalStatus === "approved" ? "승인됨" : approvalStatus === "rejected" ? "보류됨" : approvalStatus === "not_required" ? "승인 불필요" : "검토 대기"}</span></dd></div>
+              <div><dt>필수 env 수</dt><dd>${esc(String(requiredInputSummary?.total || 0))}</dd></div>
+              <div><dt>최근 조치자</dt><dd>${esc(approvalUpdatedBy || "-")}</dd></div>
+              <div><dt>최근 조치 시각</dt><dd>${esc(formatKstDateTime(approvalUpdatedAt))}</dd></div>
+              <div><dt>생성 시각</dt><dd>${esc(formatKstDateTime(String(detail?.created_at || "")))}</dd></div>
+              <div><dt>수정 시각</dt><dd>${esc(formatKstDateTime(String(detail?.updated_at || "")))}</dd></div>
+            </dl>
+            <p class="hint">${esc(readinessReason || "입력 준비 상태 정보가 없습니다.")}</p>
+            <div class="admin-memory-actions">
+              <textarea id="admin-integration-approval-note" class="admin-textarea" rows="3" placeholder="승인/보류 사유를 남길 수 있습니다.">${esc(approvalNote)}</textarea>
+            </div>
+            <div class="admin-memory-actions">
+              <button type="button" class="action-button" data-integration-approval-action="approve" data-integration-id="${esc(String(detail?.integration_id || ""))}">승인</button>
+              <button type="button" class="action-button secondary-button" data-integration-approval-action="reset" data-integration-id="${esc(String(detail?.integration_id || ""))}">다시 검토</button>
+              <button type="button" class="action-button danger-button" data-integration-approval-action="reject" data-integration-id="${esc(String(detail?.integration_id || ""))}">보류</button>
+            </div>
+            <div class="admin-integration-guide-list">
+              <article>
+                <h4>승인 이력</h4>
+                ${approvalTrail.length ? `
+                  <ul class="admin-memory-sublist">
+                    ${approvalTrail.map((item) => `
+                      <li>
+                        <div class="admin-memory-subhead">
+                          <strong>${esc(integrationApprovalActionLabel(String(item?.action || "").trim()))}</strong>
+                          <span class="badge status-${integrationApprovalStatusBadgeClass(String(item?.current_status || "").trim())}">
+                            ${esc(String(item?.current_status || "").trim() === "approved" ? "승인됨" : String(item?.current_status || "").trim() === "rejected" ? "보류됨" : String(item?.current_status || "").trim() === "not_required" ? "승인 불필요" : "검토 대기")}
+                          </span>
+                        </div>
+                        <p class="hint">${esc(String(item?.acted_by || "-"))} · ${esc(formatKstDateTime(String(item?.acted_at || "")))} · ${esc(String(item?.source || "operator"))}</p>
+                        <p class="hint">${esc(String(item?.previous_status || "-"))} → ${esc(String(item?.current_status || "-"))}</p>
+                        <p class="hint">${esc(String(item?.note || "메모 없음"))}</p>
+                      </li>
+                    `).join("")}
+                  </ul>
+                ` : `<p class="hint">아직 승인/보류 이력이 없습니다.</p>`}
+              </article>
+            </div>
+            <div class="admin-integration-guide-list">
+              <article>
+                <h4>필수 env 연결 상태</h4>
+                ${requiredInputLinks.length ? `
+                  <ul class="admin-memory-sublist">
+                    ${requiredInputLinks.map((item) => {
+                      const latest = item?.latest_request || null;
+                      return `
+                        <li>
+                          <div class="admin-memory-subhead">
+                            <strong>${esc(String(item?.env_var_name || "-"))}</strong>
+                            <span class="badge status-${integrationInputBadgeClass(String(item?.status || ""))}">
+                              ${item?.status === "provided" ? "제공됨" : item?.status === "requested" ? "요청됨" : "미연결"}
+                            </span>
+                          </div>
+                          <p class="hint">
+                            ${latest
+                              ? `${esc(String(latest?.scope || "-"))} · ${esc(String(latest?.repository || "-"))}${latest?.app_code ? ` / ${esc(String(latest?.app_code || ""))}` : ""}`
+                              : "연결된 runtime input 요청이 없습니다."}
+                          </p>
+                          <p class="hint">
+                            ${latest
+                              ? `최근 요청: ${esc(String(latest?.label || latest?.key || "-"))} · ${esc(formatKstDateTime(String(latest?.updated_at || latest?.requested_at || "")))}`
+                              : "운영자 입력 요청을 먼저 등록해야 합니다."}
+                          </p>
+                          <p class="hint">연결된 요청 ${esc(String(item?.linked_request_count || 0))}건</p>
+                        </li>
+                      `;
+                    }).join("")}
+                  </ul>
+                ` : `<p class="hint">필수 env가 없는 통합입니다.</p>`}
+              </article>
+            </div>
+            <div class="admin-integration-guide-list">
+              <article>
+                <h4>운영자 가이드</h4>
+                <pre class="admin-integration-guide">${esc(String(detail?.operator_guide_markdown || "등록된 운영자 가이드가 없습니다."))}</pre>
+              </article>
+              <article>
+                <h4>구현 가이드</h4>
+                <pre class="admin-integration-guide">${esc(String(detail?.implementation_guide_markdown || "등록된 구현 가이드가 없습니다."))}</pre>
+              </article>
+              <article>
+                <h4>검증 메모</h4>
+                <pre class="admin-integration-guide">${esc(String(detail?.verification_notes || "등록된 검증 메모가 없습니다."))}</pre>
+              </article>
+            </div>
+            <p class="hint">현재 단계에서는 승인/보류 상태를 기록할 수 있습니다. 등록/수정 편집 폼은 별도 슬라이스로 이어집니다.</p>
+          </div>
+        `;
       }
 
       function renderAdminRuntimeInputList(items) {
@@ -2427,6 +3032,66 @@
         renderAdminRuntimeInputList(items);
         const selected = items.find((item) => String(item?.request_id || "").trim() === adminRuntimeInputState.selectedId) || null;
         renderAdminRuntimeInputDetail(selected);
+      }
+
+      async function loadAdminIntegrations({ preserveSelection = true } = {}) {
+        applyAdminIntegrationFiltersToForm();
+        const params = new URLSearchParams();
+        const filters = adminIntegrationState.filters || {};
+        if (filters.q) params.set("q", filters.q);
+        if (filters.category) params.set("category", filters.category);
+        if (filters.app_type) params.set("app_type", filters.app_type);
+        if (filters.enabled) params.set("enabled", filters.enabled);
+        params.set("limit", "40");
+        const response = await fetch(`/api/admin/integrations?${params.toString()}`, { cache: "no-store" });
+        const payload = await response.json();
+        if (!response.ok) {
+          setAdminIntegrationResult(payload.detail || "통합 레지스트리 조회 실패", true);
+          const node = document.getElementById("admin-integration-list");
+          if (node) node.innerHTML = `<p class="hint">${esc(payload.detail || "통합 레지스트리 조회 실패")}</p>`;
+          renderAdminIntegrationDetail(null);
+          return;
+        }
+        const items = Array.isArray(payload?.items) ? payload.items : [];
+        const hasSelected = preserveSelection
+          && adminIntegrationState.selectedId
+          && items.some((item) => String(item?.integration_id || "").trim() === adminIntegrationState.selectedId);
+        if (!hasSelected) {
+          adminIntegrationState.selectedId = items.length ? String(items[0]?.integration_id || "").trim() : "";
+        }
+        renderAdminIntegrationList(items);
+        const selected = items.find((item) => String(item?.integration_id || "").trim() === adminIntegrationState.selectedId) || null;
+        renderAdminIntegrationDetail(selected);
+        setAdminIntegrationResult(items.length ? `통합 항목 ${payload?.count || items.length}건` : "조건에 맞는 통합 항목이 없습니다.");
+      }
+
+      async function saveAdminIntegrationApprovalAction(integrationId, action) {
+        const normalizedId = String(integrationId || "").trim();
+        const normalizedAction = String(action || "").trim();
+        if (!normalizedId || !normalizedAction) return;
+        const note = document.getElementById("admin-integration-approval-note")?.value.trim() || "";
+        setAdminIntegrationResult("통합 승인 상태를 반영하는 중...");
+        try {
+          const response = await fetch(`/api/admin/integrations/${encodeURIComponent(normalizedId)}/approval`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              action: normalizedAction,
+              note,
+              acted_by: "dashboard_operator",
+            }),
+          });
+          const payload = await response.json();
+          if (!response.ok || !payload?.saved) {
+            setAdminIntegrationResult(payload?.detail || "통합 승인 상태 반영 실패", true);
+            return;
+          }
+          setAdminIntegrationResult(`통합 상태 반영 완료: ${normalizedId} / ${normalizedAction}`);
+          adminIntegrationState.selectedId = normalizedId;
+          await loadAdminIntegrations({ preserveSelection: true });
+        } catch {
+          setAdminIntegrationResult("네트워크 오류로 통합 승인 상태 반영 실패", true);
+        }
       }
 
       async function requestAdminRuntimeInputDrafts(event) {
@@ -2657,6 +3322,7 @@
       async function loadAdminPanel() {
         await loadAdminMetrics();
         await loadAdminRuntimeInputs({ preserveSelection: true });
+        await loadAdminIntegrations({ preserveSelection: true });
         await loadAdminMemorySearch({ preserveSelection: true });
         await loadAdminBacklogCandidates();
       }
@@ -5318,6 +5984,9 @@
         const panel = document.getElementById("panel-admin");
         const runtimeInputForm = document.getElementById("admin-runtime-input-request-form");
         const runtimeInputDraftForm = document.getElementById("admin-runtime-input-draft-form");
+        const integrationFilterForm = document.getElementById("admin-integration-filter-form");
+        const integrationFilterSubmit = document.getElementById("admin-integration-filter-submit");
+        const integrationFilterReset = document.getElementById("admin-integration-filter-reset");
         refreshButton?.addEventListener("click", async () => {
           refreshButton.disabled = true;
           try {
@@ -5328,6 +5997,23 @@
         });
         runtimeInputForm?.addEventListener("submit", saveAdminRuntimeInputRequest);
         runtimeInputDraftForm?.addEventListener("submit", requestAdminRuntimeInputDrafts);
+        integrationFilterForm?.addEventListener("submit", async (event) => {
+          event.preventDefault();
+          readAdminIntegrationFiltersFromForm();
+          adminIntegrationState.selectedId = "";
+          await loadAdminIntegrations({ preserveSelection: false });
+        });
+        integrationFilterSubmit?.addEventListener("click", async () => {
+          readAdminIntegrationFiltersFromForm();
+          adminIntegrationState.selectedId = "";
+          await loadAdminIntegrations({ preserveSelection: false });
+        });
+        integrationFilterReset?.addEventListener("click", async () => {
+          adminIntegrationState.filters = { q: "", category: "", app_type: "", enabled: "" };
+          adminIntegrationState.selectedId = "";
+          applyAdminIntegrationFiltersToForm();
+          await loadAdminIntegrations({ preserveSelection: false });
+        });
         panel?.addEventListener("click", async (event) => {
           const target = event.target;
           const button = target instanceof Element ? target.closest(".admin-drilldown-button") : null;
@@ -5416,6 +6102,24 @@
           renderAdminRuntimeInputList(adminRuntimeInputState.items);
           const selected = adminRuntimeInputState.items.find((item) => String(item?.request_id || "").trim() === requestId) || null;
           renderAdminRuntimeInputDetail(selected);
+        });
+        panel?.addEventListener("click", async (event) => {
+          const target = event.target instanceof Element ? event.target.closest(".admin-integration-select") : null;
+          if (!(target instanceof HTMLButtonElement)) return;
+          const integrationId = String(target.getAttribute("data-integration-id") || "").trim();
+          if (!integrationId) return;
+          adminIntegrationState.selectedId = integrationId;
+          renderAdminIntegrationList(adminIntegrationState.items);
+          const selected = adminIntegrationState.items.find((item) => String(item?.integration_id || "").trim() === integrationId) || null;
+          renderAdminIntegrationDetail(selected);
+        });
+        panel?.addEventListener("click", async (event) => {
+          const target = event.target instanceof Element ? event.target.closest("[data-integration-approval-action]") : null;
+          if (!(target instanceof HTMLButtonElement)) return;
+          const integrationId = String(target.getAttribute("data-integration-id") || "").trim();
+          const action = String(target.getAttribute("data-integration-approval-action") || "").trim();
+          if (!integrationId || !action) return;
+          await saveAdminIntegrationApprovalAction(integrationId, action);
         });
         panel?.addEventListener("click", async (event) => {
           const provideTarget = event.target instanceof Element ? event.target.closest("[data-runtime-input-provide]") : null;

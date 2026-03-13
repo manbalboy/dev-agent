@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 
 import app.dashboard as dashboard
 from app.memory.runtime_store import MemoryRuntimeStore
-from app.models import JobRecord
+from app.models import IntegrationRegistryRecord, JobRecord, RuntimeInputRecord, utc_now_iso
 from app.workflow_resume import build_workflow_artifact_paths
 
 
@@ -411,6 +411,8 @@ def test_dashboard_root_renders_shell_without_preloading_jobs(app_components):
     assert "위험 플래그 제거" in response.text
     assert "현재 입력 기준 위험 플래그를 점검합니다." in response.text
     assert "상태 / 실패 분류" in response.text
+    assert "서드파티 통합 레지스트리" in response.text
+    assert "Google Maps, Supabase, Stripe 같은 외부 통합을 읽기 전용으로 조회합니다." in response.text
 
 
 def test_agent_models_api_reports_dangerous_codex_templates(app_components):
@@ -573,6 +575,155 @@ def test_admin_metrics_api_aggregates_system_quality_and_memory_signals(app_comp
         workflow_id="wf-default",
     )
     store.create_job(default_job)
+    followup_parent = _make_job(
+        "job-followup-parent",
+        issue_number=503,
+        issue_title="Parent baseline",
+        status="done",
+        stage="done",
+        app_code="maps",
+        track="enhance",
+        created_at="2026-03-07T06:00:00+00:00",
+        updated_at="2026-03-07T06:30:00+00:00",
+        workflow_id="wf-default",
+    )
+    store.create_job(followup_parent)
+    followup_job = _make_job(
+        "job-followup-child",
+        issue_number=504,
+        issue_title="Follow-up Google Maps hardening",
+        status="done",
+        stage="product_review",
+        app_code="maps",
+        track="enhance",
+        created_at="2026-03-08T05:00:00+00:00",
+        updated_at="2026-03-08T05:45:00+00:00",
+        workflow_id="wf-default",
+    )
+    followup_job.job_kind = "followup_backlog"
+    followup_job.parent_job_id = followup_parent.job_id
+    followup_job.backlog_candidate_id = "failure_pattern_cluster:job-followup-parent:loop_guard_repeated_issue"
+    store.create_job(followup_job)
+    prior_followup_job = _make_job(
+        "job-followup-child-prior",
+        issue_number=505,
+        issue_title="Follow-up regression sample",
+        status="done",
+        stage="product_review",
+        app_code="maps",
+        track="enhance",
+        created_at="2026-03-06T05:00:00+00:00",
+        updated_at="2026-03-06T05:30:00+00:00",
+        workflow_id="wf-default",
+    )
+    prior_followup_job.job_kind = "followup_backlog"
+    prior_followup_job.repository = "owner/repo-alt"
+    prior_followup_job.parent_job_id = followup_parent.job_id
+    prior_followup_job.backlog_candidate_id = "next_improvement_task:job-followup-parent:0"
+    store.create_job(prior_followup_job)
+    insufficient_followup_job = _make_job(
+        "job-followup-child-insufficient",
+        issue_number=506,
+        issue_title="Follow-up insufficient baseline sample",
+        status="done",
+        stage="product_review",
+        app_code="maps",
+        track="enhance",
+        created_at="2026-03-09T07:00:00+00:00",
+        updated_at="2026-03-09T07:30:00+00:00",
+        workflow_id="wf-default",
+    )
+    insufficient_followup_job.job_kind = "followup_backlog"
+    insufficient_followup_job.repository = "owner/repo-insufficient"
+    insufficient_followup_job.parent_job_id = followup_parent.job_id
+    insufficient_followup_job.backlog_candidate_id = "next_improvement_task:job-followup-parent:1"
+    store.create_job(insufficient_followup_job)
+    now = utc_now_iso()
+    runtime_store = MemoryRuntimeStore(settings.resolved_memory_dir / "memory_runtime.db")
+    runtime_store.upsert_backlog_candidate(
+        {
+            "candidate_id": followup_job.backlog_candidate_id,
+            "repository": followup_job.repository,
+            "execution_repository": followup_job.repository,
+            "app_code": followup_job.app_code,
+            "workflow_id": followup_job.workflow_id or "wf-default",
+            "title": "반복 실패 클러스터: loop_guard_repeated_issue",
+            "summary": "loop guard 관련 반복 실패를 follow-up으로 보강",
+            "priority": "P1",
+            "state": "queued",
+            "payload": {
+                "source_kind": "failure_pattern_cluster",
+                "job_id": followup_parent.job_id,
+                "pattern_id": "loop_guard_repeated_issue",
+                "count": 4,
+            },
+            "created_at": "2026-03-08T05:20:00+00:00",
+            "updated_at": "2026-03-08T05:20:00+00:00",
+        }
+    )
+    runtime_store.upsert_backlog_candidate(
+        {
+            "candidate_id": prior_followup_job.backlog_candidate_id,
+            "repository": prior_followup_job.repository,
+            "execution_repository": prior_followup_job.repository,
+            "app_code": prior_followup_job.app_code,
+            "workflow_id": prior_followup_job.workflow_id or "wf-default",
+            "title": "회귀 테스트 보강",
+            "summary": "기본 follow-up 샘플",
+            "priority": "P1",
+            "state": "queued",
+            "payload": {
+                "source_kind": "next_improvement_task",
+                "job_id": followup_parent.job_id,
+            },
+            "created_at": "2026-03-06T05:20:00+00:00",
+            "updated_at": "2026-03-06T05:20:00+00:00",
+        }
+    )
+    store.upsert_integration_registry_entry(
+        IntegrationRegistryRecord(
+            integration_id="google_maps",
+            display_name="Google Maps",
+            category="mapping",
+            supported_app_types=["web", "app"],
+            tags=["maps", "places"],
+            required_env_keys=["GOOGLE_MAPS_API_KEY"],
+            optional_env_keys=[],
+            operator_guide_markdown="운영자 가이드",
+            implementation_guide_markdown="구현 가이드",
+            verification_notes="지도 로딩 확인",
+            approval_required=True,
+            approval_status="approved",
+            approval_note="지도 기능 도입 승인",
+            approval_updated_at=now,
+            approval_updated_by="operator",
+            approval_trail=[],
+            enabled=True,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    store.upsert_runtime_input(
+        RuntimeInputRecord(
+            request_id="runtime-input-google-maps",
+            repository=job.repository,
+            app_code=job.app_code,
+            job_id="",
+            scope="repository",
+            key="google_maps_api_key",
+            label="Google Maps API Key",
+            description="지도 기능 구현에 필요",
+            value_type="secret",
+            env_var_name="GOOGLE_MAPS_API_KEY",
+            sensitive=True,
+            status="requested",
+            value="",
+            requested_by="operator",
+            requested_at=now,
+            provided_at="",
+            updated_at=now,
+        )
+    )
 
     docs_dir = settings.repository_workspace_path(job.repository, job.app_code) / "_docs"
     docs_dir.mkdir(parents=True, exist_ok=True)
@@ -720,6 +871,174 @@ def test_admin_metrics_api_aggregates_system_quality_and_memory_signals(app_comp
                         "recent_failures": [],
                     }
                 },
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    build_workflow_artifact_paths(docs_dir.parent)["integration_usage_trail"].write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-03-10T05:22:00+00:00",
+                "repository": job.repository,
+                "job_id": job.job_id,
+                "event_count": 1,
+                "events": [
+                    {
+                        "generated_at": "2026-03-10T05:22:00+00:00",
+                        "stage": "implement_with_codex",
+                        "route": "coder",
+                        "prompt_path": str(docs_dir / "CODER_PROMPT_IMPLEMENT.md"),
+                        "integration_count": 1,
+                        "blocked_integration_count": 1,
+                        "blocked_env_vars": ["GOOGLE_MAPS_API_KEY"],
+                        "items": [
+                            {
+                                "integration_id": "google_maps",
+                                "display_name": "Google Maps",
+                                "category": "mapping",
+                                "required_input_summary": {
+                                    "total": 1,
+                                    "provided": 0,
+                                    "requested": 1,
+                                    "missing": 0,
+                                },
+                                "approval_status": "approved",
+                                "input_readiness_status": "input_requested",
+                                "input_readiness_reason": "필수 env가 요청 상태입니다.",
+                                "usage_status": "prompt_injected",
+                                "blocked_inputs": [
+                                    {
+                                        "env_var_name": "GOOGLE_MAPS_API_KEY",
+                                        "bridge_reason": "필수 env가 아직 provided 상태가 아니라 runtime env bridge에 포함되지 않았습니다.",
+                                        "status": "requested",
+                                    }
+                                ],
+                            }
+                        ],
+                        "active": True,
+                    }
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    build_workflow_artifact_paths(docs_dir.parent)["integration_recommendations"].write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "integration_id": "google_maps",
+                        "display_name": "Google Maps",
+                        "recommendation_status": "operator_review_and_input_required",
+                        "reason": "지도 화면 구현에는 지도 SDK 도입 검토가 필요합니다.",
+                        "required_env_keys": ["GOOGLE_MAPS_API_KEY"],
+                        "input_readiness_status": "input_requested",
+                        "input_readiness_reason": "필수 env가 요청 상태라 값 제공 전까지 구현을 진행할 수 없습니다.",
+                        "approval_status": "approved",
+                        "approval_required": True,
+                    }
+                ]
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    followup_docs_dir = settings.repository_workspace_path(followup_job.repository, followup_job.app_code) / "_docs"
+    followup_docs_dir.mkdir(parents=True, exist_ok=True)
+    build_workflow_artifact_paths(followup_docs_dir.parent)["self_growing_effectiveness"].write_text(
+        json.dumps(
+            {
+                "active": True,
+                "generated_at": "2026-03-10T05:24:00+00:00",
+                "job_id": followup_job.job_id,
+                "job_kind": "followup_backlog",
+                "parent_job_id": followup_parent.job_id,
+                "backlog_candidate_id": followup_job.backlog_candidate_id,
+                "status": "improved",
+                "status_label": "개선됨",
+                "summary": "follow-up 작업이 부모 작업 대비 개선되었습니다.",
+                "deltas": {
+                    "review_overall": 0.6,
+                    "maturity_score": 8,
+                    "quality_gate_passed": 1,
+                    "maturity_level_order": 1,
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    build_workflow_artifact_paths(followup_docs_dir.parent)["failure_patterns"].write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "pattern_id": "loop_guard:repeated_issue",
+                        "count": 2,
+                    }
+                ]
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    prior_followup_docs_dir = settings.repository_workspace_path(prior_followup_job.repository, prior_followup_job.app_code) / "_docs"
+    prior_followup_docs_dir.mkdir(parents=True, exist_ok=True)
+    build_workflow_artifact_paths(prior_followup_docs_dir.parent)["self_growing_effectiveness"].write_text(
+        json.dumps(
+            {
+                "active": True,
+                "generated_at": "2026-03-09T05:24:00+00:00",
+                "job_id": prior_followup_job.job_id,
+                "job_kind": "followup_backlog",
+                "parent_job_id": followup_parent.job_id,
+                "backlog_candidate_id": prior_followup_job.backlog_candidate_id,
+                "status": "regressed",
+                "status_label": "회귀됨",
+                "summary": "follow-up 작업이 부모 작업 대비 회귀했습니다.",
+                "deltas": {
+                    "review_overall": -0.3,
+                    "maturity_score": -2,
+                    "quality_gate_passed": 0,
+                    "maturity_level_order": 0,
+                },
+                "status_reasons": ["성숙도 점수 -2"],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    insufficient_followup_docs_dir = settings.repository_workspace_path(insufficient_followup_job.repository, insufficient_followup_job.app_code) / "_docs"
+    insufficient_followup_docs_dir.mkdir(parents=True, exist_ok=True)
+    build_workflow_artifact_paths(insufficient_followup_docs_dir.parent)["self_growing_effectiveness"].write_text(
+        json.dumps(
+            {
+                "active": True,
+                "generated_at": "2026-03-09T09:24:00+00:00",
+                "job_id": insufficient_followup_job.job_id,
+                "job_kind": "followup_backlog",
+                "parent_job_id": followup_parent.job_id,
+                "backlog_candidate_id": insufficient_followup_job.backlog_candidate_id,
+                "status": "insufficient_baseline",
+                "status_label": "비교 기준 부족",
+                "summary": "부모 작업 기준 산출물이 부족해 follow-up 효과를 비교할 수 없습니다.",
+                "baseline_missing": ["parent_review_history_entry", "parent_maturity_score"],
+                "status_reasons": ["부모 작업 기준 산출물이 부족합니다."],
+                "deltas": {},
             },
             ensure_ascii=False,
             indent=2,
@@ -943,6 +1262,28 @@ def test_admin_metrics_api_aggregates_system_quality_and_memory_signals(app_comp
         + "\n",
         encoding="utf-8",
     )
+    food_docs_dir = settings.repository_workspace_path("owner/repo", "food") / "_docs"
+    food_docs_dir.mkdir(parents=True, exist_ok=True)
+    build_workflow_artifact_paths(food_docs_dir.parent)["mobile_e2e_result"].write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-03-10T05:32:00+00:00",
+                "platform": "android",
+                "target_name": "Pixel 8",
+                "target_id": "emulator-5554",
+                "booted": True,
+                "command": "npm run test:e2e:android",
+                "exit_code": 0,
+                "status": "passed",
+                "runner": "npm_script",
+                "notes": "reused already booted android emulator",
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     response = client.get("/api/admin/metrics")
 
@@ -954,12 +1295,12 @@ def test_admin_metrics_api_aggregates_system_quality_and_memory_signals(app_comp
     assert payload["system"]["role_presets_count"] == 1
     assert payload["runtime"]["job_summary"]["failed"] == 1
     assert payload["runtime"]["strategy_counts"][0]["name"] == "test_hardening"
-    assert {item["name"] for item in payload["runtime"]["app_counts"]} == {"food", "default"}
-    assert {item["name"] for item in payload["runtime"]["stage_counts"]} == {"improvement_stage", "done"}
+    assert {item["name"] for item in payload["runtime"]["app_counts"]} == {"food", "default", "maps"}
+    assert {item["name"] for item in payload["runtime"]["stage_counts"]} == {"improvement_stage", "done", "product_review"}
     assert payload["runtime"]["track_counts"][0]["name"] == "enhance"
-    assert payload["runtime"]["workflow_counts"][0]["name"] == "adaptive_quality_loop_v1"
+    assert {item["name"] for item in payload["runtime"]["workflow_counts"]} == {"adaptive_quality_loop_v1", "wf-default"}
     assert payload["runtime"]["adaptive_job_count"] == 1
-    assert payload["runtime"]["default_job_count"] == 1
+    assert payload["runtime"]["default_job_count"] == 5
     assert payload["runtime"]["provider_failure_counts"][0]["name"] == "codex"
     assert payload["runtime"]["provider_failure_counts"][0]["count"] == 3
     assert payload["runtime"]["provider_failure_workspaces"] == 2
@@ -997,6 +1338,10 @@ def test_admin_metrics_api_aggregates_system_quality_and_memory_signals(app_comp
     assert {item["name"] for item in payload["runtime"]["app_runner_status"]["mode_counts"]} == {"expo-android", "web"}
     assert {item["name"] for item in payload["runtime"]["app_runner_status"]["state_counts"]} == {"running", "stopped"}
     assert {item["app_code"] for item in payload["runtime"]["app_runner_status"]["recent_runs"]} == {"food", "default"}
+    assert payload["runtime"]["app_runner_status"]["mobile_e2e_count"] == 1
+    assert payload["runtime"]["app_runner_status"]["mobile_e2e_status_counts"][0]["name"] == "passed"
+    assert payload["runtime"]["app_runner_status"]["recent_mobile_e2e_runs"][0]["app_code"] == "food"
+    assert payload["runtime"]["app_runner_status"]["recent_mobile_e2e_runs"][0]["platform"] == "android"
     assert payload["runtime"]["startup_sweep"]["stale_running_jobs_recovered"] == 2
     assert payload["runtime"]["startup_sweep"]["running_node_job_mismatches_detected"] == 3
     assert payload["runtime"]["startup_sweep"]["running_node_job_mismatches_remaining"] == 1
@@ -1004,6 +1349,56 @@ def test_admin_metrics_api_aggregates_system_quality_and_memory_signals(app_comp
     assert payload["runtime"]["startup_sweep_history"][0]["stale_running_jobs_recovered"] == 2
     assert payload["runtime"]["startup_sweep_history"][0]["running_node_job_mismatches_detected"] == 3
     assert payload["runtime"]["startup_sweep_history"][0]["mismatch_counts_before"][0]["name"] == "running_job_missing_current_running_node"
+    assert payload["runtime"]["integration_health_summary"]["total_integrations"] == 1
+    assert payload["runtime"]["integration_health_summary"]["enabled_integrations"] == 1
+    assert {item["name"] for item in payload["runtime"]["integration_health_summary"]["approval_counts"]} == {"approved"}
+    assert {item["name"] for item in payload["runtime"]["integration_health_summary"]["readiness_counts"]} == {"input_requested"}
+    assert payload["runtime"]["integration_health_summary"]["used_integration_counts"][0]["name"] == "google_maps"
+    assert payload["runtime"]["integration_health_summary"]["used_integration_counts"][0]["count"] == 1
+    assert payload["runtime"]["integration_health_summary"]["blocked_boundary_counts"][0]["name"] == "approval_and_input_required"
+    assert payload["runtime"]["integration_health_summary"]["blocked_env_counts"][0]["name"] == "GOOGLE_MAPS_API_KEY"
+    assert payload["runtime"]["integration_health_summary"]["recent_blocked_jobs"][0]["job_id"] == job.job_id
+    assert payload["runtime"]["integration_health_summary"]["recent_blocked_jobs"][0]["boundary_status"] == "approval_and_input_required"
+    assert payload["runtime"]["self_growing_effectiveness_summary"]["followup_job_count"] == 3
+    assert payload["runtime"]["self_growing_effectiveness_summary"]["active_artifact_jobs"] == 3
+    assert payload["runtime"]["self_growing_effectiveness_summary"]["improved_count"] == 1
+    assert payload["runtime"]["self_growing_effectiveness_summary"]["regressed_count"] == 1
+    assert payload["runtime"]["self_growing_effectiveness_summary"]["insufficient_baseline_count"] == 1
+    assert payload["runtime"]["self_growing_effectiveness_summary"]["status_counts"][0]["name"] == "improved"
+    assert payload["runtime"]["self_growing_effectiveness_summary"]["recent_items"][0]["job_id"] == insufficient_followup_job.job_id
+    assert payload["runtime"]["self_growing_effectiveness_summary"]["recent_items"][0]["parent_job_id"] == followup_parent.job_id
+    assert payload["runtime"]["self_growing_effectiveness_summary"]["latest_generated_day"] == "2026-03-10"
+    assert payload["runtime"]["self_growing_effectiveness_summary"]["recent_timeline"][-1]["day"] == "2026-03-10"
+    assert payload["runtime"]["self_growing_effectiveness_summary"]["recent_timeline"][-1]["improved_count"] == 1
+    assert payload["runtime"]["self_growing_effectiveness_summary"]["recent_timeline"][-2]["day"] == "2026-03-09"
+    assert payload["runtime"]["self_growing_effectiveness_summary"]["recent_timeline"][-2]["regressed_count"] == 1
+    assert payload["runtime"]["self_growing_effectiveness_summary"]["recent_timeline"][-2]["insufficient_baseline_count"] == 1
+    assert payload["runtime"]["self_growing_effectiveness_summary"]["app_status_breakdown"][0]["app_code"] == "maps"
+    assert payload["runtime"]["self_growing_effectiveness_summary"]["app_status_breakdown"][0]["total"] == 3
+    assert payload["runtime"]["self_growing_effectiveness_summary"]["app_status_breakdown"][0]["improved_count"] == 1
+    assert payload["runtime"]["self_growing_effectiveness_summary"]["app_status_breakdown"][0]["regressed_count"] == 1
+    assert payload["runtime"]["self_growing_effectiveness_summary"]["app_status_breakdown"][0]["insufficient_baseline_count"] == 1
+    assert payload["runtime"]["self_growing_effectiveness_summary"]["cluster_linked_followup_count"] == 1
+    assert payload["runtime"]["self_growing_effectiveness_summary"]["cluster_improved_count"] == 1
+    assert payload["runtime"]["self_growing_effectiveness_summary"]["cluster_regressed_count"] == 0
+    assert payload["runtime"]["self_growing_effectiveness_summary"]["cluster_insufficient_baseline_count"] == 0
+    assert payload["runtime"]["self_growing_effectiveness_summary"]["cluster_recurrence_reduced_count"] == 1
+    assert payload["runtime"]["self_growing_effectiveness_summary"]["cluster_recurrence_unchanged_count"] == 0
+    assert payload["runtime"]["self_growing_effectiveness_summary"]["cluster_recurrence_increased_count"] == 0
+    assert payload["runtime"]["self_growing_effectiveness_summary"]["cluster_reduced_occurrences_total"] == 2
+    assert payload["runtime"]["self_growing_effectiveness_summary"]["cluster_pattern_counts"][0]["name"] == "loop_guard_repeated_issue"
+    assert payload["runtime"]["self_growing_effectiveness_summary"]["cluster_recent_items"][0]["candidate_id"] == followup_job.backlog_candidate_id
+    assert payload["runtime"]["self_growing_effectiveness_summary"]["cluster_recent_items"][0]["pattern_count"] == 4
+    assert payload["runtime"]["self_growing_effectiveness_summary"]["cluster_recurrence_status_counts"][0]["name"] == "reduced"
+    assert payload["runtime"]["self_growing_effectiveness_summary"]["cluster_recent_recurrence_items"][0]["pattern_id"] == "loop_guard_repeated_issue"
+    assert payload["runtime"]["self_growing_effectiveness_summary"]["cluster_recent_recurrence_items"][0]["current_count"] == 2
+    assert payload["runtime"]["self_growing_effectiveness_summary"]["regressed_reason_counts"][0]["name"] == "성숙도 점수 -2"
+    assert {
+        item["name"]
+        for item in payload["runtime"]["self_growing_effectiveness_summary"]["insufficient_baseline_reasons"][:2]
+    } == {"parent_review_history_entry", "parent_maturity_score"}
+    assert payload["runtime"]["self_growing_effectiveness_summary"]["recent_regressed_items"][0]["job_id"] == prior_followup_job.job_id
+    assert payload["runtime"]["self_growing_effectiveness_summary"]["recent_insufficient_baseline_items"][0]["job_id"] == insufficient_followup_job.job_id
     assert payload["quality"]["average_review_overall"] == 3.6
     assert payload["quality"]["average_maturity_score"] == 74.0
     assert payload["quality"]["trend_direction_counts"][0]["name"] == "improving"
@@ -1011,11 +1406,14 @@ def test_admin_metrics_api_aggregates_system_quality_and_memory_signals(app_comp
     assert payload["workflow_adoption"]["apps_using_default_workflow"] == 2
     assert payload["workflow_adoption"]["app_workflow_counts"][0]["name"] == "wf-default"
     assert len(payload["workflow_adoption"]["timeline"]) == 7
-    assert payload["workflow_adoption"]["timeline"][-1]["day"] == "2026-03-08"
-    assert payload["workflow_adoption"]["timeline"][-1]["adaptive_count"] == 1
-    assert payload["workflow_adoption"]["timeline"][-1]["default_count"] == 0
-    assert payload["workflow_adoption"]["timeline"][-2]["day"] == "2026-03-07"
-    assert payload["workflow_adoption"]["timeline"][-2]["default_count"] == 1
+    workflow_timeline = {
+        item["day"]: item for item in payload["workflow_adoption"]["timeline"]
+    }
+    assert workflow_timeline["2026-03-09"]["adaptive_count"] == 0
+    assert workflow_timeline["2026-03-09"]["default_count"] == 1
+    assert workflow_timeline["2026-03-08"]["adaptive_count"] == 1
+    assert workflow_timeline["2026-03-08"]["default_count"] == 1
+    assert workflow_timeline["2026-03-07"]["default_count"] == 2
     assert payload["memory"]["episodic_entries"] == 1
     assert payload["memory"]["decision_entries"] == 1
     assert payload["memory"]["feedback_entries"] == 1
@@ -1430,6 +1828,148 @@ def test_admin_runtime_inputs_request_api_accepts_assistant_draft_origin(app_com
     stored = store.get_runtime_input(payload["request_id"])
     assert stored is not None
     assert stored.requested_by == "assistant_draft"
+
+
+def test_admin_integrations_api_persists_and_lists_registry_entries(app_components):
+    _, store, app = app_components
+    client = TestClient(app)
+
+    create_response = client.post(
+        "/api/admin/integrations",
+        json={
+            "integration_id": "google_maps",
+            "display_name": "Google Maps",
+            "category": "mapping",
+            "supported_app_types": ["web", "app"],
+            "tags": ["maps", "places"],
+            "required_env_keys": ["google_maps_api_key"],
+            "optional_env_keys": ["google_maps_map_id"],
+            "operator_guide_markdown": "운영자 가이드",
+            "implementation_guide_markdown": "구현 가이드",
+            "verification_notes": "지도 로딩 확인",
+            "approval_required": True,
+            "enabled": True,
+        },
+    )
+
+    assert create_response.status_code == 200
+    created = create_response.json()["item"]
+    assert created["integration_id"] == "google_maps"
+    assert created["required_env_keys"] == ["GOOGLE_MAPS_API_KEY"]
+    assert created["supported_app_types"] == ["web", "app"]
+
+    list_response = client.get(
+        "/api/admin/integrations",
+        params={"q": "maps", "category": "mapping", "app_type": "web", "enabled": "true"},
+    )
+    assert list_response.status_code == 200
+    payload = list_response.json()
+    assert payload["count"] == 1
+    assert payload["items"][0]["integration_id"] == "google_maps"
+    assert payload["items"][0]["required_input_summary"] == {
+        "total": 1,
+        "provided": 0,
+        "requested": 0,
+        "missing": 1,
+    }
+    assert payload["items"][0]["input_readiness_status"] == "input_required"
+    assert "운영자 입력이 필요합니다" in payload["items"][0]["input_readiness_reason"]
+    stored = store.get_integration_registry_entry("google_maps")
+    assert stored is not None
+    assert stored.display_name == "Google Maps"
+
+    request_response = client.post(
+        "/api/admin/runtime-inputs/request",
+        json={
+            "scope": "repository",
+            "repository": "owner/repo",
+            "app_code": "default",
+            "job_id": "",
+            "key": "google_maps_api_key",
+            "label": "Google Maps API Key",
+            "description": "지도 기능 구현용 키",
+            "value_type": "secret",
+            "env_var_name": "GOOGLE_MAPS_API_KEY",
+            "sensitive": True,
+            "placeholder": "나중에 입력",
+        },
+    )
+    assert request_response.status_code == 200
+
+    linked_response = client.get("/api/admin/integrations", params={"q": "maps"})
+    assert linked_response.status_code == 200
+    linked_item = linked_response.json()["items"][0]
+    assert linked_item["required_input_summary"] == {
+        "total": 1,
+        "provided": 0,
+        "requested": 1,
+        "missing": 0,
+    }
+    assert linked_item["input_readiness_status"] == "input_requested"
+    assert "준비 대기" in linked_item["input_readiness_reason"]
+    assert linked_item["required_input_links"][0]["latest_request"]["label"] == "Google Maps API Key"
+
+
+def test_admin_integrations_approval_action_api_updates_status(app_components):
+    _, store, app = app_components
+    client = TestClient(app)
+
+    now = utc_now_iso()
+    store.upsert_integration_registry_entry(
+        IntegrationRegistryRecord(
+            integration_id="google_maps",
+            display_name="Google Maps",
+            category="mapping",
+            supported_app_types=["web", "app"],
+            tags=["maps"],
+            required_env_keys=["GOOGLE_MAPS_API_KEY"],
+            optional_env_keys=[],
+            operator_guide_markdown="운영자 가이드",
+            implementation_guide_markdown="구현 가이드",
+            verification_notes="",
+            approval_required=True,
+            enabled=True,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+
+    reject_response = client.post(
+        "/api/admin/integrations/google_maps/approval",
+        json={
+            "action": "reject",
+            "note": "현재 범위에서는 지도 기능 제외",
+            "acted_by": "dashboard_operator",
+        },
+    )
+    assert reject_response.status_code == 200
+    rejected = reject_response.json()["item"]
+    assert rejected["approval_status"] == "rejected"
+    assert rejected["input_readiness_status"] == "approval_rejected"
+    assert "현재 범위에서는 지도 기능 제외" in rejected["input_readiness_reason"]
+    assert rejected["approval_trail_count"] == 1
+    assert rejected["approval_trail"][0]["action"] == "reject"
+
+    approve_response = client.post(
+        "/api/admin/integrations/google_maps/approval",
+        json={
+            "action": "approve",
+            "note": "도입 승인",
+            "acted_by": "dashboard_operator",
+        },
+    )
+    assert approve_response.status_code == 200
+    approved = approve_response.json()["item"]
+    assert approved["approval_status"] == "approved"
+    assert approved["input_readiness_status"] == "input_required"
+    assert approved["approval_trail_count"] == 2
+    assert approved["approval_trail"][0]["action"] == "approve"
+
+    stored = store.get_integration_registry_entry("google_maps")
+    assert stored is not None
+    assert stored.approval_status == "approved"
+    assert stored.approval_note == "도입 승인"
+    assert len(stored.approval_trail) == 2
 
 
 def test_jobs_api_query_matches_runtime_quality_signals(app_components):

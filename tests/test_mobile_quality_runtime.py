@@ -56,6 +56,20 @@ def test_mobile_quality_runtime_writes_checklist_for_app_targets(app_components,
         ),
         encoding="utf-8",
     )
+    (docs_dir / "MOBILE_E2E_RESULT.json").write_text(
+        json.dumps(
+            {
+                "platform": "android",
+                "status": "passed",
+                "runner": "npm_script",
+                "command": "npm run test:e2e:android",
+                "target_name": "Pixel 8",
+                "target_id": "emulator-5554",
+                "notes": "reused already booted android emulator",
+            }
+        ),
+        encoding="utf-8",
+    )
 
     artifact_path = runtime.write_mobile_app_checklist(
         job=_make_job(),
@@ -81,6 +95,9 @@ def test_mobile_quality_runtime_writes_checklist_for_app_targets(app_components,
     assert "Verification Target: `android_emulator`" in content
     assert "State: `running`" in content
     assert "Command: `npx expo run:android`" in content
+    assert "## Mobile E2E Result" in content
+    assert "Status: `passed`" in content
+    assert "Target ID: `emulator-5554`" in content
     assert "`gpt`: `PASS`" in content
     assert "TEST_REPORT_TEST_AFTER_IMPLEMENT.md" in content
 

@@ -36,6 +36,11 @@ class PlannerRuntime:
         execute_planner_tool_request: Callable[..., Dict[str, Any]],
         feature_enabled: Callable[[str], bool],
         planner_shadow_runner,
+        write_integration_recommendation_artifact: Callable[..., Dict[str, Any]] | None = None,
+        write_integration_guide_summary_artifact: Callable[..., Dict[str, Any]] | None = None,
+        write_integration_code_patterns_artifact: Callable[..., Dict[str, Any]] | None = None,
+        write_integration_verification_checklist_artifact: Callable[..., Dict[str, Any]] | None = None,
+        append_integration_usage_trail_event: Callable[..., Dict[str, Any]] | None = None,
     ) -> None:
         self.command_templates = command_templates
         self.set_stage = set_stage
@@ -52,6 +57,13 @@ class PlannerRuntime:
         self.execute_planner_tool_request = execute_planner_tool_request
         self.feature_enabled = feature_enabled
         self.planner_shadow_runner = planner_shadow_runner
+        self.write_integration_recommendation_artifact = write_integration_recommendation_artifact
+        self.write_integration_guide_summary_artifact = write_integration_guide_summary_artifact
+        self.write_integration_code_patterns_artifact = write_integration_code_patterns_artifact
+        self.write_integration_verification_checklist_artifact = (
+            write_integration_verification_checklist_artifact
+        )
+        self.append_integration_usage_trail_event = append_integration_usage_trail_event
 
     def stage_plan_with_gemini(
         self,
@@ -117,6 +129,28 @@ class PlannerRuntime:
         )
         planner_prompt_path = self.docs_file(repository_path, "PLANNER_PROMPT.md")
         self.write_memory_retrieval_artifacts(job=job, repository_path=repository_path, paths=paths)
+        if self.write_integration_recommendation_artifact is not None:
+            self.write_integration_recommendation_artifact(
+                job=job,
+                repository_path=repository_path,
+                paths=paths,
+                log_path=log_path,
+            )
+        if self.write_integration_guide_summary_artifact is not None:
+            self.write_integration_guide_summary_artifact(
+                repository_path=repository_path,
+                paths=paths,
+            )
+        if self.write_integration_code_patterns_artifact is not None:
+            self.write_integration_code_patterns_artifact(
+                repository_path=repository_path,
+                paths=paths,
+            )
+        if self.write_integration_verification_checklist_artifact is not None:
+            self.write_integration_verification_checklist_artifact(
+                repository_path=repository_path,
+                paths=paths,
+            )
         review_ready = paths["review"].exists() and bool(paths["review"].read_text(encoding="utf-8", errors="replace").strip())
         planner_prompt_path.write_text(
             build_planner_prompt(
@@ -140,6 +174,30 @@ class PlannerRuntime:
                 ),
                 memory_context_path=str(paths.get("memory_context", self.docs_file(repository_path, "MEMORY_CONTEXT.json"))),
                 operator_inputs_path=str(paths.get("operator_inputs", self.docs_file(repository_path, "OPERATOR_INPUTS.json"))),
+                integration_recommendations_path=str(
+                    paths.get(
+                        "integration_recommendations",
+                        self.docs_file(repository_path, "INTEGRATION_RECOMMENDATIONS.json"),
+                    )
+                ),
+                integration_guide_summary_path=str(
+                    paths.get(
+                        "integration_guide_summary",
+                        self.docs_file(repository_path, "INTEGRATION_GUIDE_SUMMARY.md"),
+                    )
+                ),
+                integration_code_patterns_path=str(
+                    paths.get(
+                        "integration_code_patterns",
+                        self.docs_file(repository_path, "INTEGRATION_CODE_PATTERNS.md"),
+                    )
+                ),
+                integration_verification_checklist_path=str(
+                    paths.get(
+                        "integration_verification_checklist",
+                        self.docs_file(repository_path, "INTEGRATION_VERIFICATION_CHECKLIST.md"),
+                    )
+                ),
                 role_context=self.build_route_runtime_context("planner"),
                 is_long_term=self.is_long_track_job(job),
                 is_refinement_round=review_ready,
@@ -147,6 +205,15 @@ class PlannerRuntime:
             ),
             encoding="utf-8",
         )
+        if self.append_integration_usage_trail_event is not None:
+            self.append_integration_usage_trail_event(
+                job=job,
+                repository_path=repository_path,
+                paths=paths,
+                stage=JobStage.PLAN_WITH_GEMINI.value,
+                route="planner",
+                prompt_path=planner_prompt_path,
+            )
         result = self.command_templates.run_template(
             template_name=template_name,
             variables=self.build_template_variables(job, paths, planner_prompt_path),
@@ -176,6 +243,28 @@ class PlannerRuntime:
             else self.template_for_route("planner")
         )
         self.write_memory_retrieval_artifacts(job=job, repository_path=repository_path, paths=paths)
+        if self.write_integration_recommendation_artifact is not None:
+            self.write_integration_recommendation_artifact(
+                job=job,
+                repository_path=repository_path,
+                paths=paths,
+                log_path=log_path,
+            )
+        if self.write_integration_guide_summary_artifact is not None:
+            self.write_integration_guide_summary_artifact(
+                repository_path=repository_path,
+                paths=paths,
+            )
+        if self.write_integration_code_patterns_artifact is not None:
+            self.write_integration_code_patterns_artifact(
+                repository_path=repository_path,
+                paths=paths,
+            )
+        if self.write_integration_verification_checklist_artifact is not None:
+            self.write_integration_verification_checklist_artifact(
+                repository_path=repository_path,
+                paths=paths,
+            )
         review_ready = paths["review"].exists() and bool(paths["review"].read_text(encoding="utf-8", errors="replace").strip())
         base_prompt = build_planner_prompt(
             str(paths["spec"]),
@@ -196,6 +285,30 @@ class PlannerRuntime:
             memory_selection_path=str(paths.get("memory_selection", self.docs_file(repository_path, "MEMORY_SELECTION.json"))),
             memory_context_path=str(paths.get("memory_context", self.docs_file(repository_path, "MEMORY_CONTEXT.json"))),
             operator_inputs_path=str(paths.get("operator_inputs", self.docs_file(repository_path, "OPERATOR_INPUTS.json"))),
+            integration_recommendations_path=str(
+                paths.get(
+                    "integration_recommendations",
+                    self.docs_file(repository_path, "INTEGRATION_RECOMMENDATIONS.json"),
+                )
+            ),
+            integration_guide_summary_path=str(
+                paths.get(
+                    "integration_guide_summary",
+                    self.docs_file(repository_path, "INTEGRATION_GUIDE_SUMMARY.md"),
+                )
+            ),
+            integration_code_patterns_path=str(
+                paths.get(
+                    "integration_code_patterns",
+                    self.docs_file(repository_path, "INTEGRATION_CODE_PATTERNS.md"),
+                )
+            ),
+            integration_verification_checklist_path=str(
+                paths.get(
+                    "integration_verification_checklist",
+                    self.docs_file(repository_path, "INTEGRATION_VERIFICATION_CHECKLIST.md"),
+                )
+            ),
             role_context=self.build_route_runtime_context("planner"),
             is_long_term=self.is_long_track_job(job),
             is_refinement_round=review_ready,
@@ -219,6 +332,15 @@ class PlannerRuntime:
             max_tool_requests = 2
             while True:
                 prompt_path.write_text(prompt_text + tool_context_addendum, encoding="utf-8")
+                if self.append_integration_usage_trail_event is not None:
+                    self.append_integration_usage_trail_event(
+                        job=job,
+                        repository_path=repository_path,
+                        paths=paths,
+                        stage=JobStage.PLAN_WITH_GEMINI.value,
+                        route="planner",
+                        prompt_path=prompt_path,
+                    )
 
                 result = self.command_templates.run_template(
                     template_name=template_name,

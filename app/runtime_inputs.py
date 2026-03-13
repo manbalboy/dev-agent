@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, Iterable, List
 
-from app.models import RuntimeInputRecord
+from app.models import IntegrationRegistryRecord, RuntimeInputRecord
 
 
 _ENV_SEGMENT_PATTERN = re.compile(r"[^A-Z0-9_]+")
@@ -146,6 +146,157 @@ def normalize_env_var_name(value: str, *, fallback_key: str = "") -> str:
     return candidate
 
 
+def _normalize_integration_approval_status(value: str, *, approval_required: bool) -> str:
+    """Return one normalized integration approval state."""
+
+    normalized = str(value or "").strip().lower()
+    if normalized in {"approved", "rejected", "pending"}:
+        return normalized
+    return "pending" if approval_required else "not_required"
+
+
+def _build_integration_input_readiness(
+    *,
+    required_env_keys: List[str],
+    runtime_input_records: List[RuntimeInputRecord],
+    approval_required: bool,
+    approval_status: str,
+    approval_note: str,
+) -> Dict[str, str]:
+    """Return integration-level readiness for env bridge enforcement."""
+
+    provided = 0
+    requested = 0
+    missing = 0
+    for env_var_name in required_env_keys:
+        normalized_env = normalize_env_var_name(env_var_name, fallback_key="INTEGRATION_KEY")
+        matched_records = [
+            record
+            for record in runtime_input_records
+            if normalize_env_var_name(record.env_var_name, fallback_key=record.key) == normalized_env
+        ]
+        if any(normalize_runtime_input_status(record.status) == "provided" and str(record.value or "").strip() for record in matched_records):
+            provided += 1
+        elif matched_records:
+            requested += 1
+        else:
+            missing += 1
+
+    normalized_approval_status = _normalize_integration_approval_status(
+        approval_status,
+        approval_required=approval_required,
+    )
+    total = len(required_env_keys)
+    if normalized_approval_status == "rejected":
+        return {
+            "status": "approval_rejected",
+            "reason": str(approval_note or "").strip() or "운영자가 이 통합 도입을 보류했습니다.",
+        }
+    if total <= 0:
+        if approval_required and normalized_approval_status != "approved":
+            return {
+                "status": "approval_required",
+                "reason": "필수 env는 없지만 운영자 승인 후에만 사용할 수 있습니다.",
+            }
+        return {
+            "status": "ready",
+            "reason": "필수 env가 없어 env bridge 허용 상태입니다.",
+        }
+    if missing > 0:
+        return {
+            "status": "input_required",
+            "reason": f"필수 env {missing}건이 아직 제공되지 않아 env bridge를 허용할 수 없습니다.",
+        }
+    if requested > 0 and provided < total:
+        return {
+            "status": "input_requested",
+            "reason": f"필수 env {requested}건이 요청됨 상태라 값이 제공될 때까지 env bridge를 보류합니다.",
+        }
+    if approval_required and normalized_approval_status != "approved":
+        return {
+            "status": "approval_required",
+            "reason": "필수 env는 준비됐지만 운영자 승인 후에만 env bridge를 허용합니다.",
+        }
+    return {
+        "status": "ready",
+        "reason": "승인과 필수 env가 모두 준비돼 env bridge 허용 상태입니다.",
+    }
+
+
+def build_runtime_input_env_bridge_policy(
+    *,
+    runtime_input_records: List[RuntimeInputRecord],
+    integration_registry_entries: Iterable[IntegrationRegistryRecord],
+) -> Dict[str, Dict[str, object]]:
+    """Return env-bridge allow/block policy derived from integration registry."""
+
+    policy_by_env: Dict[str, Dict[str, object]] = {}
+    for record in integration_registry_entries:
+        if not bool(record.enabled):
+            continue
+        required_env_keys = [
+            normalize_env_var_name(item, fallback_key="INTEGRATION_KEY")
+            for item in list(record.required_env_keys or [])
+            if str(item).strip()
+        ]
+        if not required_env_keys:
+            continue
+        readiness = _build_integration_input_readiness(
+            required_env_keys=required_env_keys,
+            runtime_input_records=runtime_input_records,
+            approval_required=bool(record.approval_required),
+            approval_status=str(record.approval_status or ""),
+            approval_note=str(record.approval_note or ""),
+        )
+        normalized_approval_status = _normalize_integration_approval_status(
+            record.approval_status,
+            approval_required=bool(record.approval_required),
+        )
+        linked_payload = {
+            "integration_id": str(record.integration_id or "").strip(),
+            "display_name": str(record.display_name or record.integration_id or "").strip(),
+            "approval_status": normalized_approval_status,
+            "input_readiness_status": str(readiness.get("status", "")).strip(),
+            "input_readiness_reason": str(readiness.get("reason", "")).strip(),
+        }
+        for env_var_name in required_env_keys:
+            bucket = policy_by_env.setdefault(
+                env_var_name,
+                {
+                    "allowed": False,
+                    "reason": "",
+                    "linked_integrations": [],
+                },
+            )
+            linked_integrations = list(bucket.get("linked_integrations", []) or [])
+            linked_integrations.append(linked_payload)
+            bucket["linked_integrations"] = linked_integrations
+
+    for env_var_name, payload in policy_by_env.items():
+        linked_integrations = list(payload.get("linked_integrations", []) or [])
+        ready_candidates = [
+            item for item in linked_integrations if str(item.get("input_readiness_status", "")).strip() == "ready"
+        ]
+        if ready_candidates:
+            primary = ready_candidates[0]
+            payload["allowed"] = True
+            payload["reason"] = (
+                f"{primary.get('display_name') or primary.get('integration_id')}: "
+                f"{primary.get('input_readiness_reason') or 'env bridge 허용 상태입니다.'}"
+            )
+        elif linked_integrations:
+            primary = linked_integrations[0]
+            payload["allowed"] = False
+            payload["reason"] = (
+                f"{primary.get('display_name') or primary.get('integration_id')}: "
+                f"{primary.get('input_readiness_reason') or 'env bridge 허용 조건이 충족되지 않았습니다.'}"
+            )
+        else:
+            payload["allowed"] = True
+            payload["reason"] = "통합 레지스트리에 연결된 정책이 없어 기본 env bridge를 허용합니다."
+    return policy_by_env
+
+
 def mask_runtime_input_value(value: str, *, sensitive: bool) -> str:
     """Return one operator-safe display value."""
 
@@ -249,6 +400,7 @@ def resolve_runtime_inputs(
     repository: str,
     app_code: str,
     job_id: str,
+    integration_registry_entries: Iterable[IntegrationRegistryRecord] | None = None,
 ) -> Dict[str, object]:
     """Resolve scoped runtime inputs into prompt-safe and env-ready payloads."""
 
@@ -279,13 +431,25 @@ def resolve_runtime_inputs(
 
     resolved_inputs: List[Dict[str, object]] = []
     pending_inputs: List[Dict[str, object]] = []
+    blocked_inputs: List[Dict[str, object]] = []
     environment: Dict[str, str] = {}
+    env_bridge_policy = build_runtime_input_env_bridge_policy(
+        runtime_input_records=list(resolved_by_key.values()),
+        integration_registry_entries=list(integration_registry_entries or []),
+    )
 
     for key in sorted(resolved_by_key.keys()):
         record = resolved_by_key[key]
         is_sensitive = bool(record.sensitive or normalize_runtime_input_value_type(record.value_type) == "secret")
         normalized_status = normalize_runtime_input_status(record.status) or "requested"
         env_var_name = normalize_env_var_name(record.env_var_name, fallback_key=record.key)
+        bridge_policy = env_bridge_policy.get(env_var_name)
+        bridge_allowed = bool(bridge_policy.get("allowed")) if bridge_policy is not None else True
+        bridge_reason = (
+            str(bridge_policy.get("reason", "")).strip()
+            if bridge_policy is not None
+            else "통합 레지스트리 제한 없이 기본 env bridge가 허용됩니다."
+        )
         item = {
             "request_id": record.request_id,
             "scope": normalize_runtime_input_scope(record.scope) or "repository",
@@ -304,16 +468,24 @@ def resolve_runtime_inputs(
             "value": record.value if not is_sensitive else "",
             "display_value": mask_runtime_input_value(record.value, sensitive=is_sensitive),
             "available": normalized_status == "provided" and bool(str(record.value or "").strip()),
+            "bridge_allowed": bridge_allowed,
+            "bridge_reason": bridge_reason,
+            "linked_integrations": list(bridge_policy.get("linked_integrations", []) or []) if bridge_policy is not None else [],
         }
-        if item["available"]:
+        if item["available"] and bridge_allowed:
             resolved_inputs.append(item)
             if str(record.value or "").strip():
                 environment[env_var_name] = str(record.value)
+        elif item["available"] and not bridge_allowed:
+            blocked_inputs.append(item)
         else:
             pending_inputs.append(item)
 
     return {
         "resolved": resolved_inputs,
         "pending": pending_inputs,
+        "blocked": blocked_inputs,
         "environment": environment,
+        "blocked_environment": {str(item.get("env_var_name", "")).strip(): str(item.get("bridge_reason", "")).strip() for item in blocked_inputs if str(item.get("env_var_name", "")).strip()},
+        "env_bridge_policy": env_bridge_policy,
     }

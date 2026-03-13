@@ -183,3 +183,53 @@ def test_product_review_state_score_uses_boolean_ui_presence(app_components):
     assert payload["category_evidence"]["error_state_handling"]["doc_hits"] == 0
     assert payload["evidence_summary"]["state_signal_totals"]["error"] == 1
 
+
+def test_product_review_writes_self_growing_effectiveness_for_followup(app_components):
+    settings, store, _ = app_components
+    parent_job = _make_job("job-parent-followup-baseline")
+    child_job = _make_job("job-child-followup-baseline")
+    child_job.job_kind = "followup_backlog"
+    child_job.parent_job_id = parent_job.job_id
+    child_job.backlog_candidate_id = "next_improvement_task:job-parent-followup-baseline:1"
+    store.create_job(parent_job)
+    store.create_job(child_job)
+
+    repository_path = settings.repository_workspace_path(child_job.repository, child_job.app_code)
+    repository_path.mkdir(parents=True, exist_ok=True)
+    paths = _build_paths(repository_path)
+    _write_minimum_review_docs(paths, job=child_job)
+    (repository_path / "_docs" / "REVIEW_HISTORY.json").write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "generated_at": "2026-03-12T00:00:00+00:00",
+                        "job_id": parent_job.job_id,
+                        "overall": 3.0,
+                        "scores": {"code_quality": 3},
+                        "maturity_level": "mvp",
+                        "maturity_score": 60,
+                        "top_issue_ids": ["quality-1"],
+                    }
+                ]
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    log_path = settings.logs_debug_dir / child_job.log_file
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text("", encoding="utf-8")
+
+    orchestrator = Orchestrator(settings, store, DummyTemplateRunner())
+    orchestrator._stage_product_review(child_job, repository_path, paths, log_path)
+
+    effectiveness_path = repository_path / "_docs" / "SELF_GROWING_EFFECTIVENESS.json"
+    assert effectiveness_path.exists()
+    payload = json.loads(effectiveness_path.read_text(encoding="utf-8"))
+    assert payload["active"] is True
+    assert payload["parent_job_id"] == parent_job.job_id
+    assert payload["status"] in {"improved", "unchanged", "regressed"}

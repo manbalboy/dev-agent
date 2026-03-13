@@ -31,6 +31,8 @@ from app.assistant_runtime import (
 )
 from app.config import AppSettings
 from app.dashboard_admin_metrics_runtime import DashboardAdminMetricsRuntime
+from app.dashboard_integration_registry_runtime import DashboardIntegrationRegistryRuntime
+from app.dashboard_job_action_runtime import DashboardJobActionRuntime
 from app.dashboard_job_runtime import DashboardJobRuntime
 from app.dashboard_roles_runtime import DashboardRolesRuntime, normalize_role_code, read_roles_payload
 from app.dashboard_runtime_input_runtime import DashboardRuntimeInputRuntime
@@ -255,6 +257,31 @@ class RuntimeInputProvidePayload(BaseModel):
     note: str = Field(default="", max_length=300)
 
 
+class IntegrationRegistryRequestPayload(BaseModel):
+    """Payload for one third-party integration registry entry."""
+
+    integration_id: str = Field(min_length=1, max_length=64)
+    display_name: str = Field(min_length=1, max_length=120)
+    category: str = Field(default="", max_length=60)
+    supported_app_types: List[str] = Field(default_factory=list)
+    tags: List[str] = Field(default_factory=list)
+    required_env_keys: List[str] = Field(default_factory=list)
+    optional_env_keys: List[str] = Field(default_factory=list)
+    operator_guide_markdown: str = Field(default="", max_length=20000)
+    implementation_guide_markdown: str = Field(default="", max_length=20000)
+    verification_notes: str = Field(default="", max_length=4000)
+    approval_required: bool = Field(default=True)
+    enabled: bool = Field(default=True)
+
+
+class IntegrationApprovalActionPayload(BaseModel):
+    """Payload for one operator approval/reject/reset action."""
+
+    action: str = Field(min_length=1, max_length=20)
+    note: str = Field(default="", max_length=1000)
+    acted_by: str = Field(default="operator", max_length=80)
+
+
 def _read_dashboard_json(path: Path) -> Dict[str, Any]:
     """Read one dashboard-side JSON artifact safely."""
 
@@ -284,6 +311,14 @@ def _build_dashboard_runtime_input_runtime(
     return DashboardRuntimeInputRuntime(store=store, settings=settings)
 
 
+def _build_dashboard_integration_registry_runtime(
+    store: JobStore,
+) -> DashboardIntegrationRegistryRuntime:
+    """Build one integration-registry helper runtime while preserving dashboard routes."""
+
+    return DashboardIntegrationRegistryRuntime(store=store)
+
+
 def _build_dashboard_admin_metrics_runtime(
     store: JobStore,
     settings: AppSettings,
@@ -311,6 +346,23 @@ def _build_dashboard_admin_metrics_runtime(
         safe_average=_safe_average,
         latest_non_empty=_latest_non_empty,
         utc_now_iso=utc_now_iso,
+    )
+
+
+def _build_dashboard_job_action_runtime(
+    store: JobStore,
+    settings: AppSettings,
+) -> DashboardJobActionRuntime:
+    """Build one job-action runtime while preserving dashboard routes."""
+
+    return DashboardJobActionRuntime(
+        store=store,
+        settings=settings,
+        stop_signal_path=_stop_signal_path,
+        resolve_job_workflow_definition=_resolve_job_workflow_definition,
+        compute_job_resume_state=_compute_job_resume_state,
+        validate_manual_resume_target=validate_manual_resume_target,
+        append_runtime_recovery_trace_for_job=append_runtime_recovery_trace_for_job,
     )
 
 
@@ -699,6 +751,28 @@ def _build_job_lineage(
     return _build_dashboard_job_runtime(store, settings).build_job_lineage(job)
 
 
+def _build_job_self_growing_effectiveness(
+    job: JobRecord,
+    *,
+    store: JobStore,
+    settings: AppSettings,
+) -> Dict[str, Any]:
+    """Return follow-up effectiveness comparison payload for one job detail page."""
+
+    return _build_dashboard_job_runtime(store, settings).build_job_self_growing_effectiveness(job)
+
+
+def _build_job_mobile_e2e_result(
+    job: JobRecord,
+    *,
+    store: JobStore,
+    settings: AppSettings,
+) -> Dict[str, Any]:
+    """Return latest mobile E2E artifact payload for one job detail page."""
+
+    return _build_dashboard_job_runtime(store, settings).build_job_mobile_e2e_result(job)
+
+
 def _build_job_log_summary(
     job: JobRecord,
     *,
@@ -722,6 +796,49 @@ def _build_job_operator_inputs(
     """Return read-only operator runtime input state for one job detail page."""
 
     return _build_dashboard_job_runtime(store, settings).build_job_operator_inputs(job)
+
+
+def _build_job_integration_operator_boundary(
+    job: JobRecord,
+    *,
+    store: JobStore,
+    settings: AppSettings,
+) -> Dict[str, Any]:
+    """Return structured integration approval/input boundary for failed jobs."""
+
+    return _build_dashboard_job_runtime(store, settings).build_job_integration_operator_boundary(job)
+
+
+def _build_job_integration_usage_trail(
+    job: JobRecord,
+    *,
+    store: JobStore,
+    settings: AppSettings,
+) -> Dict[str, Any]:
+    """Return recent integration usage audit trail for one job detail page."""
+
+    return _build_dashboard_job_runtime(store, settings).build_job_integration_usage_trail(job)
+
+
+def _build_job_integration_health_facets(
+    job: JobRecord,
+    *,
+    store: JobStore,
+    settings: AppSettings,
+    integration_operator_boundary: Dict[str, Any],
+    integration_usage_trail: Dict[str, Any],
+    log_summary: Dict[str, Any],
+    failure_classification: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Return operator-facing integration blocker facets for one job detail page."""
+
+    return _build_dashboard_job_runtime(store, settings).build_job_integration_health_facets(
+        job=job,
+        integration_operator_boundary=integration_operator_boundary,
+        integration_usage_trail=integration_usage_trail,
+        log_summary=log_summary,
+        failure_classification=failure_classification,
+    )
 
 
 def _build_job_needs_human_summary(
@@ -1238,6 +1355,74 @@ def admin_runtime_inputs_provide_api(
             request_id=request_id,
             value=payload.value,
             note=payload.note,
+        )
+    )
+
+
+@router.get("/api/admin/integrations", response_class=JSONResponse)
+def admin_integrations_api(
+    q: str = Query(default="", max_length=200),
+    category: str = Query(default="", max_length=60),
+    app_type: str = Query(default="", max_length=20),
+    enabled: str = Query(default="", max_length=10),
+    limit: int = Query(default=20, ge=1, le=100),
+    store: JobStore = Depends(get_store),
+) -> JSONResponse:
+    """List third-party integration registry entries for dashboard admin."""
+
+    runtime = _build_dashboard_integration_registry_runtime(store)
+    return JSONResponse(
+        runtime.list_entries(
+            q=q,
+            category=category,
+            app_type=app_type,
+            enabled=enabled,
+            limit=limit,
+        )
+    )
+
+
+@router.post("/api/admin/integrations", response_class=JSONResponse)
+def admin_integrations_upsert_api(
+    payload: IntegrationRegistryRequestPayload,
+    store: JobStore = Depends(get_store),
+) -> JSONResponse:
+    """Create or update one third-party integration registry entry."""
+
+    runtime = _build_dashboard_integration_registry_runtime(store)
+    return JSONResponse(
+        runtime.save_entry(
+            integration_id=payload.integration_id,
+            display_name=payload.display_name,
+            category=payload.category,
+            supported_app_types=payload.supported_app_types,
+            tags=payload.tags,
+            required_env_keys=payload.required_env_keys,
+            optional_env_keys=payload.optional_env_keys,
+            operator_guide_markdown=payload.operator_guide_markdown,
+            implementation_guide_markdown=payload.implementation_guide_markdown,
+            verification_notes=payload.verification_notes,
+            approval_required=payload.approval_required,
+            enabled=payload.enabled,
+        )
+    )
+
+
+@router.post("/api/admin/integrations/{integration_id}/approval", response_class=JSONResponse)
+def admin_integrations_approval_action_api(
+    integration_id: str,
+    payload: IntegrationApprovalActionPayload,
+    store: JobStore = Depends(get_store),
+) -> JSONResponse:
+    """Apply one operator approval action to an integration registry entry."""
+
+    runtime = _build_dashboard_integration_registry_runtime(store)
+    return JSONResponse(
+        runtime.set_approval_action(
+            integration_id=integration_id,
+            action=payload.action,
+            note=payload.note,
+            acted_by=payload.acted_by,
         )
     )
 
@@ -2110,10 +2295,39 @@ def job_detail_api(
         settings=settings,
         runtime_recovery_trace=runtime_recovery_trace,
     )
+    self_growing_effectiveness = _build_job_self_growing_effectiveness(
+        job,
+        store=store,
+        settings=settings,
+    )
+    mobile_e2e_result = _build_job_mobile_e2e_result(
+        job,
+        store=store,
+        settings=settings,
+    )
     manual_retry_options = _build_manual_retry_options(job, settings=settings, node_runs=node_runs)
     job_lineage = _build_job_lineage(job, store=store, settings=settings)
     log_summary = _build_job_log_summary(job, settings=settings, events=events)
     operator_inputs = _build_job_operator_inputs(job, store=store, settings=settings)
+    integration_operator_boundary = _build_job_integration_operator_boundary(
+        job,
+        store=store,
+        settings=settings,
+    )
+    integration_usage_trail = _build_job_integration_usage_trail(
+        job,
+        store=store,
+        settings=settings,
+    )
+    integration_health_facets = _build_job_integration_health_facets(
+        job,
+        store=store,
+        settings=settings,
+        integration_operator_boundary=integration_operator_boundary,
+        integration_usage_trail=integration_usage_trail,
+        log_summary=log_summary,
+        failure_classification=failure_classification,
+    )
 
     return JSONResponse(
         {
@@ -2134,9 +2348,14 @@ def job_detail_api(
             "dead_letter_summary": dead_letter_summary,
             "dead_letter_action_trail": dead_letter_action_trail,
             "requeue_reason_summary": requeue_reason_summary,
+            "self_growing_effectiveness": self_growing_effectiveness,
+            "mobile_e2e_result": mobile_e2e_result,
             "job_lineage": job_lineage,
             "log_summary": log_summary,
             "operator_inputs": operator_inputs,
+            "integration_operator_boundary": integration_operator_boundary,
+            "integration_usage_trail": integration_usage_trail,
+            "integration_health_facets": integration_health_facets,
             "stop_requested": _stop_signal_path(settings.data_dir, job_id).exists(),
         }
     )
@@ -2494,49 +2713,20 @@ def request_job_stop(
 ) -> JSONResponse:
     """Request graceful stop for one running ultra job."""
 
-    job = store.get_job(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
-    if job.status not in {JobStatus.QUEUED.value, JobStatus.RUNNING.value}:
-        raise HTTPException(status_code=400, detail="실행 중 작업에서만 정지 요청할 수 있습니다.")
-
-    path = _stop_signal_path(settings.data_dir, job_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("stop\n", encoding="utf-8")
-    return JSONResponse({"requested": True, "job_id": job_id, "stop_file": str(path)})
+    payload = _build_dashboard_job_action_runtime(store, settings).request_job_stop(job_id)
+    return JSONResponse(payload)
 
 
 @router.post("/api/jobs/{job_id}/requeue", response_class=JSONResponse)
 def requeue_job(
     job_id: str,
     store: JobStore = Depends(get_store),
+    settings: AppSettings = Depends(get_settings),
 ) -> JSONResponse:
     """Requeue one failed job from dashboard."""
 
-    job = store.get_job(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
-    if job.status in {JobStatus.QUEUED.value, JobStatus.RUNNING.value}:
-        return JSONResponse({"requeued": False, "reason": "already_active", "job_id": job_id})
-    if job.status != JobStatus.FAILED.value:
-        raise HTTPException(status_code=400, detail="실패 상태 작업만 재큐잉할 수 있습니다.")
-
-    store.update_job(
-        job_id,
-        status=JobStatus.QUEUED.value,
-        stage=JobStage.QUEUED.value,
-        attempt=0,
-        error_message=None,
-        started_at=None,
-        finished_at=None,
-        heartbeat_at=None,
-        manual_resume_mode="",
-        manual_resume_node_id="",
-        manual_resume_requested_at=None,
-        manual_resume_note="",
-    )
-    store.enqueue_job(job_id)
-    return JSONResponse({"requeued": True, "job_id": job_id})
+    payload = _build_dashboard_job_action_runtime(store, settings).requeue_job(job_id)
+    return JSONResponse(payload)
 
 
 @router.post("/api/jobs/{job_id}/dead-letter/retry", response_class=JSONResponse)
@@ -2548,68 +2738,11 @@ def retry_dead_letter_job(
 ) -> JSONResponse:
     """Requeue one dead-lettered job with an explicit operator action trace."""
 
-    job = store.get_job(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
-    if job.status in {JobStatus.QUEUED.value, JobStatus.RUNNING.value}:
-        raise HTTPException(status_code=400, detail="대기 또는 실행 중 작업은 dead-letter 재시도를 할 수 없습니다.")
-    if job.status != JobStatus.FAILED.value or str(job.recovery_status or "").strip() != "dead_letter":
-        raise HTTPException(status_code=400, detail="dead-letter 상태의 실패 작업만 다시 큐에 넣을 수 있습니다.")
-
-    note = str(payload.note or "").strip() if payload else ""
-    previous_reason = str(job.recovery_reason or job.error_message or "").strip()
-    retry_reason = note or (
-        f"운영자가 dead-letter 작업을 다시 큐에 넣었습니다. 이전 사유: {previous_reason}"
-        if previous_reason
-        else "운영자가 dead-letter 작업을 다시 큐에 넣었습니다."
-    )
-
-    store.update_job(
+    response_payload = _build_dashboard_job_action_runtime(store, settings).retry_dead_letter_job(
         job_id,
-        status=JobStatus.QUEUED.value,
-        stage=JobStage.QUEUED.value,
-        attempt=0,
-        error_message=None,
-        started_at=None,
-        finished_at=None,
-        heartbeat_at=None,
-        recovery_status="dead_letter_requeued",
-        recovery_reason=retry_reason,
-        recovery_count=0,
-        last_recovered_at=utc_now_iso(),
-        manual_resume_mode="",
-        manual_resume_node_id="",
-        manual_resume_requested_at=None,
-        manual_resume_note="",
+        note=str(payload.note or "").strip() if payload else "",
     )
-    store.enqueue_job(job_id)
-
-    updated = store.get_job(job_id)
-    assert updated is not None
-    append_runtime_recovery_trace_for_job(
-        settings,
-        updated,
-        source="dashboard_dead_letter_retry",
-        reason_code="dead_letter_retry",
-        reason=retry_reason,
-        decision="retry_from_dead_letter",
-        recovery_status="dead_letter_requeued",
-        recovery_count=int(updated.recovery_count or 0),
-        details={
-            "previous_recovery_status": "dead_letter",
-            "previous_reason": previous_reason,
-            "operator_note": note,
-            "retry_from_scratch": True,
-        },
-    )
-    return JSONResponse(
-        {
-            "queued": True,
-            "job_id": job_id,
-            "recovery_status": "dead_letter_requeued",
-            "reason": retry_reason,
-        }
-    )
+    return JSONResponse(response_payload)
 
 
 @router.post("/api/jobs/{job_id}/workflow/manual-retry", response_class=JSONResponse)
@@ -2621,138 +2754,24 @@ def manual_retry_workflow_job(
 ) -> JSONResponse:
     """Queue one failed/completed job with an explicit manual rerun/resume policy."""
 
-    job = store.get_job(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
-    if job.status in {JobStatus.QUEUED.value, JobStatus.RUNNING.value}:
-        raise HTTPException(status_code=400, detail="대기 또는 실행 중 작업에는 수동 재개를 설정할 수 없습니다.")
-
-    requested_mode = str(payload.mode or "").strip().lower()
-    if requested_mode not in {"full_rerun", "resume_failed_node", "resume_from_node"}:
-        raise HTTPException(status_code=400, detail="지원하지 않는 수동 재개 모드입니다.")
-
-    workflow_id, _, ordered_nodes = _resolve_job_workflow_definition(job)
-    if not workflow_id or not ordered_nodes:
-        raise HTTPException(status_code=400, detail="워크플로우를 찾지 못해 수동 재개를 설정할 수 없습니다.")
-
-    selected_node_id = ""
-    selected_reason = ""
-    if requested_mode == "resume_failed_node":
-        current_resume_state = _compute_job_resume_state(job, store.list_node_runs(job_id), settings)
-        selected_node_id = str(current_resume_state.get("failed_node_id", "")).strip()
-        validation = validate_manual_resume_target(
-            ordered_nodes=ordered_nodes,
-            node_id=selected_node_id,
-        )
-        if not validation.get("valid"):
-            raise HTTPException(
-                status_code=400,
-                detail=str(validation.get("reason", "실패 노드에서 수동 재개할 수 없습니다.")),
-            )
-        selected_reason = str(current_resume_state.get("reason", "")).strip()
-    elif requested_mode == "resume_from_node":
-        selected_node_id = str(payload.node_id or "").strip()
-        validation = validate_manual_resume_target(
-            ordered_nodes=ordered_nodes,
-            node_id=selected_node_id,
-        )
-        if not validation.get("valid"):
-            raise HTTPException(
-                status_code=400,
-                detail=str(validation.get("reason", "선택한 노드에서 수동 재개할 수 없습니다.")),
-            )
-        selected_reason = str(validation.get("reason", "")).strip()
-    else:
-        selected_reason = "운영자가 전체 재실행을 지정했습니다."
-
-    next_attempt = max(1, int(job.attempt or 0) + 1)
-    next_max_attempts = max(int(job.max_attempts or 1), next_attempt)
-    note = str(payload.note or "").strip()
-    recovery_status = "manual_rerun_queued" if requested_mode == "full_rerun" else "manual_resume_queued"
-    recovery_reason = note or selected_reason or (
-        "운영자가 전체 재실행을 지정했습니다."
-        if requested_mode == "full_rerun"
-        else "운영자가 수동 재개를 지정했습니다."
-    )
-    store.update_job(
+    response_payload = _build_dashboard_job_action_runtime(store, settings).manual_retry_workflow_job(
         job_id,
-        status=JobStatus.QUEUED.value,
-        stage=JobStage.QUEUED.value,
-        max_attempts=next_max_attempts,
-        error_message=None,
-        started_at=None,
-        finished_at=None,
-        heartbeat_at=None,
-        recovery_status=recovery_status,
-        recovery_reason=recovery_reason,
-        manual_resume_mode=requested_mode,
-        manual_resume_node_id=selected_node_id,
-        manual_resume_requested_at=utc_now_iso(),
-        manual_resume_note=note,
+        mode=payload.mode,
+        node_id=payload.node_id,
+        note=payload.note,
     )
-    store.enqueue_job(job_id)
-
-    updated = store.get_job(job_id)
-    assert updated is not None
-    trace_decision = "manual_rerun_requeue" if requested_mode == "full_rerun" else "manual_resume_requeue"
-    trace_reason_code = "manual_rerun_requeue" if requested_mode == "full_rerun" else "manual_resume_requeue"
-    append_runtime_recovery_trace_for_job(
-        settings,
-        updated,
-        source="dashboard_manual_retry",
-        reason_code=trace_reason_code,
-        reason=recovery_reason,
-        decision=trace_decision,
-        recovery_status=recovery_status,
-        recovery_count=int(updated.recovery_count or 0),
-        details={
-            "previous_recovery_status": str(job.recovery_status or "").strip(),
-            "previous_reason": str(job.recovery_reason or job.error_message or "").strip(),
-            "operator_note": note,
-            "target_node_id": selected_node_id,
-            "retry_from_scratch": requested_mode == "full_rerun",
-        },
-    )
-    node_runs = store.list_node_runs(job_id)
-    resume_state = _compute_job_resume_state(updated, node_runs, settings)
-    return JSONResponse(
-        {
-            "queued": True,
-            "job_id": job_id,
-            "workflow_id": workflow_id,
-            "mode": requested_mode,
-            "target_node_id": selected_node_id,
-            "next_attempt": next_attempt,
-            "resume_state": resume_state,
-        }
-    )
+    return JSONResponse(response_payload)
 
 
 @router.post("/api/jobs/requeue-failed", response_class=JSONResponse)
 def requeue_failed_jobs(
     store: JobStore = Depends(get_store),
+    settings: AppSettings = Depends(get_settings),
 ) -> JSONResponse:
     """Requeue all failed jobs in one action."""
 
-    jobs = store.list_jobs()
-    failed_job_ids = [job.job_id for job in jobs if job.status == JobStatus.FAILED.value]
-    for job_id in failed_job_ids:
-        store.update_job(
-            job_id,
-            status=JobStatus.QUEUED.value,
-            stage=JobStage.QUEUED.value,
-            attempt=0,
-            error_message=None,
-            started_at=None,
-            finished_at=None,
-            heartbeat_at=None,
-            manual_resume_mode="",
-            manual_resume_node_id="",
-            manual_resume_requested_at=None,
-            manual_resume_note="",
-        )
-        store.enqueue_job(job_id)
-    return JSONResponse({"requeued": len(failed_job_ids)})
+    payload = _build_dashboard_job_action_runtime(store, settings).requeue_failed_jobs()
+    return JSONResponse(payload)
 
 
 @router.get("/logs/{file_name}", response_class=PlainTextResponse)

@@ -70,7 +70,10 @@ def _build_runtime(
     *,
     template_runner: _FakeTemplateRunner,
     actor_logs: list[tuple[str, str, str]],
+    shell_stdout_by_purpose: dict[str, str] | None = None,
 ) -> SummaryRuntime:
+    shell_outputs = shell_stdout_by_purpose or {}
+
     def append_log(log_path: Path, message: str) -> None:
         actor_logs.append((str(log_path), "LOG", message))
 
@@ -80,15 +83,19 @@ def _build_runtime(
     def actor_log_writer(log_path: Path, actor: str):
         return lambda message: actor_logs.append((str(log_path), actor, message))
 
-    return SummaryRuntime(
-        command_templates=template_runner,
-        run_shell=lambda **kwargs: CommandResult(
+    def run_shell(**kwargs):
+        purpose = kwargs["purpose"]
+        return CommandResult(
             command=kwargs["command"],
             exit_code=0,
-            stdout="",
+            stdout=shell_outputs.get(purpose, ""),
             stderr="",
             duration_seconds=0.0,
-        ),
+        )
+
+    return SummaryRuntime(
+        command_templates=template_runner,
+        run_shell=run_shell,
         append_log=append_log,
         append_actor_log=append_actor_log,
         docs_file=lambda repository_path, name: repository_path / "_docs" / name,
@@ -263,3 +270,45 @@ def test_prepare_commit_summary_with_ai_compresses_login_hint_in_fallback_log(tm
         actor == "TECH_WRITER" and "로그인/인증 상태 확인 필요" in message
         for _, actor, message in actor_logs
     )
+
+
+def test_stage_commit_uses_ai_summary_and_commits(tmp_path: Path) -> None:
+    repository_path = tmp_path / "repo"
+    (repository_path / "_docs").mkdir(parents=True)
+    actor_logs: list[tuple[str, str, str]] = []
+    runtime = _build_runtime(
+        template_runner=_FakeTemplateRunner(stdout_by_template={"codex_helper": "feat: 지도 화면 추가"}),
+        actor_logs=actor_logs,
+        shell_stdout_by_purpose={"git status": " M app/screens/Map.tsx\n?? app/lib/maps.ts"},
+    )
+
+    runtime.stage_commit(
+        job=_make_job(),
+        repository_path=repository_path,
+        stage=JobStage.COMMIT_IMPLEMENT,
+        log_path=tmp_path / "job.log",
+        commit_type="feat",
+    )
+
+    assert any(actor == "STAGE" and "commit_implement" in message for _, actor, message in actor_logs)
+
+
+def test_stage_commit_logs_when_no_changes_exist(tmp_path: Path) -> None:
+    repository_path = tmp_path / "repo"
+    (repository_path / "_docs").mkdir(parents=True)
+    actor_logs: list[tuple[str, str, str]] = []
+    runtime = _build_runtime(
+        template_runner=_FakeTemplateRunner(),
+        actor_logs=actor_logs,
+        shell_stdout_by_purpose={"git status": ""},
+    )
+
+    runtime.stage_commit(
+        job=_make_job(),
+        repository_path=repository_path,
+        stage=JobStage.COMMIT_FIX,
+        log_path=tmp_path / "job.log",
+        commit_type="fix",
+    )
+
+    assert any(actor == "LOG" and "No changes to commit at stage commit_fix" in message for _, actor, message in actor_logs)

@@ -34,28 +34,38 @@ AgentHub는 GitHub 이슈 라벨 이벤트(`agent:run`)를 받아, 고정된 오
   - `app/app_type_runtime.py`
   - `app/product_definition_runtime.py`
   - `app/improvement_runtime.py`
+  - `app/memory_retrieval_runtime.py`
+  - `app/memory_quality_runtime.py`
+  - `app/structured_memory_runtime.py`
+  - `app/integration_recommendation_runtime.py`
+  - `app/integration_guide_runtime.py`
   - `app/ux_review_runtime.py`
+  - `app/tool_support_runtime.py`
+  - `app/fixed_pipeline_runtime.py`
+  - `app/template_artifact_runtime.py`
   - `app/workspace_repository_runtime.py`
   - `app/workflow_resolution_runtime.py`
   - `app/docs_snapshot_runtime.py`
   - `app/dashboard_job_runtime.py`
   - `app/dashboard_roles_runtime.py`
   - `app/dashboard_runtime_input_runtime.py`
+  - `app/dashboard_integration_registry_runtime.py`
   - `app/dashboard_admin_metrics_runtime.py`
   - `app/runtime_recovery_trace.py`
   - `app/failure_classification.py`
   - `app/provider_failure_counter_runtime.py`
+  - `app/design_governance_runtime.py`
 - 저장소: `app/store.py` (`jobs.json`, `queue.json`)
 - 웹훅 처리: `app/github_webhook.py`
 - 대시보드/API: `app/dashboard.py`
 - 명령 템플릿 실행기: `app/command_runner.py`
 
 현재 대형 파일 상태:
-  - `app/dashboard.py`: `3637` lines
-  - `app/orchestrator.py`: `6068` lines
+  - `app/dashboard.py`: `3656` lines
+  - `app/orchestrator.py`: `2605` lines
 - 따라서 구조 개선은 진행 중이지만 아직 완료 단계는 아님
 
-운영 신뢰성 측면에서는 `failure classification`, `class-aware retry policy`, `needs_human structured handoff`, `provider failure counters`, `provider cooldown window`, `provider_quarantined` baseline, `provider_circuit_open` baseline, `planner/reviewer alternate route fallback` baseline, `worker startup sweep trace` baseline, `restart-safe requeue reason` baseline, `running node/job mismatch audit` baseline, `dead_letter` baseline, `dead-letter 재큐잉 액션`, `dead-letter operator note trail`, `dead-letter list / recovery history summary`, `provider outage history`, `startup sweep history`, `dead-letter / recovery action drilldown`, `recovery action groups`, `operator action trail`까지 들어갔습니다. 현재는 표준 재시도 루프와 `hard gate`가 workspace 단위 provider 카운터를 남기고, 반복 `provider_timeout/tool_failure`는 먼저 `cooldown_wait`, 더 심한 burst는 `provider_quarantined`, 더 길게 누적되면 `provider_circuit_open`으로 전이됩니다. planner/reviewer는 Gemini burst가 workspace 기준으로 격리되거나 circuit-open 상태면 Codex fallback 템플릿을 우선 선택합니다. worker 시작 시에는 orphan/running/queued 정리 결과와 running job/node_run mismatch audit 결과가 `worker_startup_sweep_trace.json`에 남고, stale auto-recovery / dead-letter retry / manual workflow retry는 공통 `requeue_reason_summary`로 남습니다. admin 운영 지표에서는 이제 dead-letter 목록, 최근 recovery trail, provider outage history, startup sweep history를 직접 확인하고 상태별로 필터링할 수 있으며, recovery action group과 operator action trail도 같이 봅니다. 구조 리팩터 쪽에서는 preview/deploy helper, app type 판별과 non-web UX skip helper, product-definition stage/fallback/contract helper, improvement stage/strategy helper, UX review/screenshot helper가 각각 `preview_runtime`, `app_type_runtime`, `product_definition_runtime`, `improvement_runtime`, `ux_review_runtime`으로 빠졌고, 다음 부족분은 memory helper 축소와 self-growing bridge 효과성 검증 쪽입니다.
+운영 신뢰성 측면에서는 `failure classification`, `class-aware retry policy`, `needs_human structured handoff`, `provider failure counters`, `provider cooldown window`, `provider_quarantined` baseline, `provider_circuit_open` baseline, `planner/reviewer alternate route fallback` baseline, `worker startup sweep trace` baseline, `restart-safe requeue reason` baseline, `running node/job mismatch audit` baseline, `dead_letter` baseline, `dead-letter 재큐잉 액션`, `dead-letter operator note trail`, `dead-letter list / recovery history summary`, `provider outage history`, `startup sweep history`, `dead-letter / recovery action drilldown`, `recovery action groups`, `operator action trail`까지 들어갔습니다. 현재는 표준 재시도 루프와 `hard gate`가 workspace 단위 provider 카운터를 남기고, 반복 `provider_timeout/tool_failure`는 먼저 `cooldown_wait`, 더 심한 burst는 `provider_quarantined`, 더 길게 누적되면 `provider_circuit_open`으로 전이됩니다. planner/reviewer는 Gemini burst가 workspace 기준으로 격리되거나 circuit-open 상태면 Codex fallback 템플릿을 우선 선택합니다. worker 시작 시에는 orphan/running/queued 정리 결과와 running job/node_run mismatch audit 결과가 `worker_startup_sweep_trace.json`에 남고, stale auto-recovery / dead-letter retry / manual workflow retry는 공통 `requeue_reason_summary`로 남습니다. admin 운영 지표에서는 이제 dead-letter 목록, 최근 recovery trail, provider outage history, startup sweep history를 직접 확인하고 상태별로 필터링할 수 있으며, recovery action group과 operator action trail도 같이 봅니다. 구조 리팩터 쪽에서는 preview/deploy helper, app type 판별과 non-web UX skip helper, issue/spec stage helper, product-definition stage/fallback/contract helper, product-review score/evidence/trend helper와 operating principle alignment helper, improvement stage/strategy helper, artifact I/O helper, design-system decision/stage-contract/pipeline-analysis helper, memory retrieval/context/shadow/ingest helper, memory quality/feedback/ranking helper, structured memory/convention helper, UX review/screenshot helper, log/heartbeat helper, stop-signal/agent-profile/job lookup helper, track/escalation/recovery toggle helper, template variable/fallback artifact helper, tool/search/evidence helper, commit stage/helper 본문, legacy fixed pipeline 본문, workflow binding/context helper, job dispatch/single-attempt helper, repository/stage support helper, orchestrator context/helper bridge, dashboard job action/service helper가 각각 `preview_runtime`, `app_type_runtime`, `issue_spec_runtime`, `product_definition_runtime`, `product_review_runtime`, `artifact_io_runtime`, `design_governance_runtime`, `improvement_runtime`, `memory_retrieval_runtime`, `memory_quality_runtime`, `structured_memory_runtime`, `ux_review_runtime`, `job_log_runtime`, `job_control_runtime`, `job_mode_runtime`, `template_artifact_runtime`, `tool_support_runtime`, `summary_runtime`, `fixed_pipeline_runtime`, `workflow_binding_runtime`, `job_execution_runtime`, `repository_stage_runtime`, `orchestrator_context_runtime`, `dashboard_job_action_runtime`으로 흡수됐고, Phase 6의 operator control plane / third-party integration registry도 `missing integration input reason surface`, `env bridge policy hardening`, `planner recommendation draft`, `operator approve/reject action`, `approval trail`, `prompt-safe guide summary`, `code pattern/snippet hint`, `verification checklist injection`, `failed job operator approval boundary`, `integration usage trail`, `missing-input / auth / quota facet`, `integration health summary`까지 들어갔습니다. 운영 화면은 이제 통합 항목별 required env가 `제공됨 / 요청됨 / 미연결` 중 무엇인지와 `준비 완료 / 승인 대기 / 입력 요청됨 / 운영자 입력 필요 / 보류됨` 상태를 바로 조회하고, admin metrics에서는 승인 상태/준비 상태/최근 사용 통합/차단 경계/자주 막히는 env/최근 막힌 작업까지 요약해서 봅니다. job detail에서는 `integration_operator_boundary`, `integration_usage_trail`, `integration_health_facets`를 함께 보게 됩니다. integration-linked env는 approval/input readiness가 맞지 않으면 runtime env bridge에 들어가지 않고 `blocked_inputs`로 남습니다. planner recommendation은 이제 `operator_rejected` 통합을 구현 후보에서 제외하고, planner/coder/reviewer는 승인된 통합만 `_docs/INTEGRATION_GUIDE_SUMMARY.md`, `_docs/INTEGRATION_CODE_PATTERNS.md`, `_docs/INTEGRATION_VERIFICATION_CHECKLIST.md`로 안전하게 주입받습니다. self-growing bridge 쪽도 이제 `_docs/SELF_GROWING_EFFECTIVENESS.json` artifact와 admin 운영 지표 집계가 들어가서, follow-up job이 부모 대비 `개선됨 / 변화 없음 / 회귀됨 / 비교 기준 부족` 중 무엇인지뿐 아니라 최근 7일 추세, 앱별 개선/회귀 분포, `failure_pattern_cluster` 기반 follow-up 효과, 재발 감소/유지/증가 집계, 회귀 원인 분포, 기준 부족 원인 분포, 최근 회귀/기준 부족 사례까지 한 화면에서 볼 수 있습니다. 다음 전략 단계는 `remaining runtime split`, `enterprise 운영 계층 보강`, `dashboard write action/service 잔여 축소`입니다.
 앱 분류 작업 기준도 강화됐습니다. 이제 planner/coder/reviewer prompt는 React Native/Expo 중심의 모바일 앱 규칙을 기본 반영하고, emulator target, RN 테스트 기준, mobile secret 처리 원칙은 [docs/MOBILE_APP_DEVELOPMENT_MODE_RULESET.md](./docs/MOBILE_APP_DEVELOPMENT_MODE_RULESET.md)를 따릅니다.
 
 데이터 저장 위치:
@@ -231,6 +241,14 @@ Job에 다음 메타가 저장됩니다.
   - mobile mode는 포트 대신 emulator/simulator 실행 명령과 상태를 관리
   - 앱 분류 저장소는 테스트 단계 후 `_docs/MOBILE_APP_CHECKLIST.md`에 마지막 mobile 검증 요약을 남김
   - admin 운영 지표에서 최근 앱 실행 모드, 상태, 명령을 읽을 수 있음
+- `scripts/mobile_e2e_runner.sh` (신규)
+  - Android emulator / iOS simulator를 재사용 또는 부팅
+  - mobile E2E 명령을 platform별로 선택
+  - 결과를 `_docs/MOBILE_E2E_RESULT.json`에 기록
+  - job detail workflow 탭과 admin 운영 지표에서도 마지막 모바일 E2E 결과를 직접 조회
+- `scripts/run_agenthub_tests.sh`
+  - `mobile-e2e-android`, `mobile-e2e-ios` 모드 지원
+  - `e2e` 모드에서 mobile E2E script가 있으면 Android 우선으로 자동 선택
 
 ---
 
@@ -276,9 +294,9 @@ Job에 다음 메타가 저장됩니다.
 - 방향은 맞지만 아직 `스스로 성장하는 24시간 개발 동료`라고 보기엔 이르다.
 - 가장 큰 부족분:
   - `app/orchestrator.py` 구조 리스크
-  - Phase 5 failure classification / retry policy / outage containment 미완
+  - enterprise 운영 계층과 durable backend 미완
   - shadow/opt-in 기능의 primary 전환 부족
-  - self-growing loop의 장기 효과 측정 부족
+  - dashboard write action/service 경계가 아직 두껍다
 
 ---
 

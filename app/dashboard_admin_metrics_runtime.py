@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from app.config import AppSettings
+from app.dashboard_integration_registry_runtime import DashboardIntegrationRegistryRuntime
+from app.dashboard_job_runtime import DashboardJobRuntime
 from app.memory import MemoryRuntimeStore
 from app.models import JobRecord
 from app.provider_failure_counter_runtime import read_provider_failure_counters
@@ -93,7 +95,9 @@ class DashboardAdminMetricsRuntime:
         meta_dir = self.settings.data_dir / "pids"
         mode_counter: Counter[str] = Counter()
         state_counter: Counter[str] = Counter()
+        mobile_e2e_status_counter: Counter[str] = Counter()
         recent_runs: List[Dict[str, Any]] = []
+        recent_mobile_e2e_runs: List[Dict[str, Any]] = []
         if not meta_dir.exists():
             return {
                 "active_count": 0,
@@ -102,6 +106,9 @@ class DashboardAdminMetricsRuntime:
                 "mode_counts": [],
                 "state_counts": [],
                 "recent_runs": [],
+                "mobile_e2e_count": 0,
+                "mobile_e2e_status_counts": [],
+                "recent_mobile_e2e_runs": [],
             }
 
         def _sort_key(path: Path) -> float:
@@ -124,6 +131,29 @@ class DashboardAdminMetricsRuntime:
             log_file = str(payload.get("log_file", "")).strip()
             is_mobile = mode != "web"
             state = "running" if self.is_pid_alive(pid) else "stopped"
+            mobile_e2e_result: Dict[str, Any] = {}
+            if repository and is_mobile:
+                workspace_path = self.settings.repository_workspace_path(repository, app_code)
+                mobile_e2e_result = self.read_dashboard_json(
+                    build_workflow_artifact_paths(workspace_path)["mobile_e2e_result"]
+                )
+                if isinstance(mobile_e2e_result, dict) and mobile_e2e_result:
+                    mobile_e2e_status = str(mobile_e2e_result.get("status", "")).strip() or "unknown"
+                    mobile_e2e_status_counter[mobile_e2e_status] += 1
+                    recent_mobile_e2e_runs.append(
+                        {
+                            "app_code": app_code,
+                            "repository": repository,
+                            "mode": mode,
+                            "generated_at": str(mobile_e2e_result.get("generated_at", "")).strip(),
+                            "platform": str(mobile_e2e_result.get("platform", "")).strip(),
+                            "status": mobile_e2e_status,
+                            "runner": str(mobile_e2e_result.get("runner", "")).strip(),
+                            "target_name": str(mobile_e2e_result.get("target_name", "")).strip(),
+                            "command": str(mobile_e2e_result.get("command", "")).strip(),
+                            "artifact_path": str(build_workflow_artifact_paths(workspace_path)["mobile_e2e_result"]),
+                        }
+                    )
             mode_counter[mode] += 1
             state_counter[state] += 1
             recent_runs.append(
@@ -138,6 +168,7 @@ class DashboardAdminMetricsRuntime:
                     "updated_at": updated_at,
                     "log_file": log_file,
                     "is_mobile": is_mobile,
+                    "mobile_e2e_result": mobile_e2e_result if isinstance(mobile_e2e_result, dict) else {},
                 }
             )
 
@@ -149,6 +180,9 @@ class DashboardAdminMetricsRuntime:
             "mode_counts": self.top_counter_items(mode_counter, limit=8),
             "state_counts": self.top_counter_items(state_counter, limit=8),
             "recent_runs": recent_runs[:8],
+            "mobile_e2e_count": len(recent_mobile_e2e_runs),
+            "mobile_e2e_status_counts": self.top_counter_items(mobile_e2e_status_counter, limit=8),
+            "recent_mobile_e2e_runs": recent_mobile_e2e_runs[:8],
         }
 
     def build_admin_assistant_diagnosis_metrics(self) -> Dict[str, Any]:
@@ -230,6 +264,378 @@ class DashboardAdminMetricsRuntime:
             "failed_tool_counts": self.top_counter_items(failed_tool_counter, limit=8),
             "recent_traces": recent_traces[:8],
         }
+
+    def build_admin_integration_health_summary(self, jobs: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Aggregate approval/readiness/usage/blocker state for integration ops."""
+
+        runtime_input_records = self.store.list_runtime_inputs()
+        integration_entries = list(self.store.list_integration_registry_entries())
+        approval_counter: Counter[str] = Counter()
+        readiness_counter: Counter[str] = Counter()
+        used_integration_counter: Counter[str] = Counter()
+        blocked_boundary_counter: Counter[str] = Counter()
+        blocked_env_counter: Counter[str] = Counter()
+        recent_blocked_jobs: List[Dict[str, Any]] = []
+
+        serialized_entries = [
+            DashboardIntegrationRegistryRuntime.serialize_entry(
+                record,
+                runtime_input_records=runtime_input_records,
+            )
+            for record in integration_entries
+        ]
+        for item in serialized_entries:
+            approval_counter[str(item.get("approval_status", "")).strip() or "unknown"] += 1
+            readiness_counter[str(item.get("input_readiness_status", "")).strip() or "unknown"] += 1
+
+        helper = DashboardJobRuntime(
+            store=self.store,
+            settings=self.settings,
+            get_memory_runtime_store=lambda: None,
+            compute_job_resume_state=lambda job, node_runs, runtime_settings: {},
+            resolve_channel_log_path=lambda runtime_settings, file_name, channel="debug": runtime_settings.logs_dir / channel / file_name,
+        )
+        job_summary_by_id = {
+            str(item.get("job_id", "")).strip(): item
+            for item in jobs
+            if isinstance(item, dict) and str(item.get("job_id", "")).strip()
+        }
+        ordered_jobs = sorted(
+            self.store.list_jobs(),
+            key=lambda item: str(item.updated_at or item.created_at or ""),
+            reverse=True,
+        )
+        auth_blocked_jobs = 0
+        quota_blocked_jobs = 0
+        for job in ordered_jobs[:30]:
+            usage = helper.build_job_integration_usage_trail(job)
+            for integration_id in usage.get("used_integration_ids", []) if isinstance(usage, dict) else []:
+                used_integration_counter[str(integration_id).strip()] += 1
+
+            boundary = helper.build_job_integration_operator_boundary(job)
+            if boundary.get("active"):
+                boundary_status = str(boundary.get("boundary_status", "")).strip() or "unknown"
+                blocked_boundary_counter[boundary_status] += 1
+                candidate_ids: List[str] = []
+                for candidate in boundary.get("candidates", []) if isinstance(boundary.get("candidates"), list) else []:
+                    if not isinstance(candidate, dict):
+                        continue
+                    integration_id = str(candidate.get("integration_id", "")).strip()
+                    if integration_id:
+                        candidate_ids.append(integration_id)
+                    for blocked in candidate.get("blocked_inputs", []) if isinstance(candidate.get("blocked_inputs"), list) else []:
+                        if not isinstance(blocked, dict):
+                            continue
+                        env_name = str(blocked.get("env_var_name", "")).strip()
+                        if env_name:
+                            blocked_env_counter[env_name] += 1
+                summary_item = job_summary_by_id.get(job.job_id, {})
+                failure_class = str(summary_item.get("failure_class", "")).strip()
+                if failure_class == "provider_auth":
+                    auth_blocked_jobs += 1
+                elif failure_class == "provider_quota":
+                    quota_blocked_jobs += 1
+                recent_blocked_jobs.append(
+                    {
+                        "job_id": job.job_id,
+                        "detail_url": f"/jobs/{job.job_id}",
+                        "issue_title": str(job.issue_title or "").strip(),
+                        "app_code": str(job.app_code or "").strip(),
+                        "boundary_status": boundary_status,
+                        "failure_class": failure_class,
+                        "failure_provider_hint": str(summary_item.get("failure_provider_hint", "")).strip(),
+                        "candidate_ids": candidate_ids[:5],
+                        "blocked_input_count": int(boundary.get("blocked_input_count", 0) or 0),
+                    }
+                )
+
+        return {
+            "active": bool(serialized_entries or recent_blocked_jobs or used_integration_counter),
+            "total_integrations": len(serialized_entries),
+            "enabled_integrations": sum(1 for item in serialized_entries if bool(item.get("enabled"))),
+            "approval_counts": self.top_counter_items(approval_counter, limit=8),
+            "readiness_counts": self.top_counter_items(readiness_counter, limit=8),
+            "used_integration_counts": self.top_counter_items(used_integration_counter, limit=8),
+            "blocked_boundary_counts": self.top_counter_items(blocked_boundary_counter, limit=8),
+            "blocked_env_counts": self.top_counter_items(blocked_env_counter, limit=8),
+            "auth_blocked_jobs": auth_blocked_jobs,
+            "quota_blocked_jobs": quota_blocked_jobs,
+            "recent_blocked_jobs": recent_blocked_jobs[:8],
+        }
+
+    def build_admin_self_growing_effectiveness_summary(self) -> Dict[str, Any]:
+        """Aggregate follow-up effectiveness artifacts for operator monitoring."""
+
+        runtime_store = self.get_memory_runtime_store(self.settings)
+        helper = DashboardJobRuntime(
+            store=self.store,
+            settings=self.settings,
+            get_memory_runtime_store=lambda: runtime_store,
+            compute_job_resume_state=lambda job, node_runs, runtime_settings: {},
+            resolve_channel_log_path=lambda runtime_settings, file_name, channel="debug": runtime_settings.logs_dir / channel / file_name,
+        )
+        status_counter: Counter[str] = Counter()
+        app_counter: Counter[str] = Counter()
+        app_status_counters: Dict[str, Counter[str]] = {}
+        timeline_counters: Dict[str, Counter[str]] = {}
+        cluster_status_counter: Counter[str] = Counter()
+        cluster_pattern_counter: Counter[str] = Counter()
+        cluster_recurrence_status_counter: Counter[str] = Counter()
+        regressed_reason_counter: Counter[str] = Counter()
+        insufficient_baseline_counter: Counter[str] = Counter()
+        cluster_reduced_occurrences_total = 0
+        cluster_added_occurrences_total = 0
+        recent_items: List[Dict[str, Any]] = []
+        cluster_recent_items: List[Dict[str, Any]] = []
+        cluster_recent_recurrence_items: List[Dict[str, Any]] = []
+        recent_regressed_items: List[Dict[str, Any]] = []
+        recent_insufficient_items: List[Dict[str, Any]] = []
+        followup_job_count = 0
+        missing_artifact_jobs = 0
+        mismatched_artifact_jobs = 0
+        latest_generated_date: date | None = None
+
+        ordered_jobs = sorted(
+            self.store.list_jobs(),
+            key=lambda item: str(item.updated_at or item.created_at or ""),
+            reverse=True,
+        )
+        for job in ordered_jobs:
+            is_followup = str(job.job_kind or "").strip().lower() == "followup_backlog" or bool(
+                str(job.parent_job_id or "").strip() or str(job.backlog_candidate_id or "").strip()
+            )
+            if not is_followup:
+                continue
+            followup_job_count += 1
+            payload = helper.build_job_self_growing_effectiveness(job)
+            if not payload:
+                continue
+            if not bool(payload.get("active")):
+                if bool(payload.get("expected")):
+                    missing_artifact_jobs += 1
+                if bool(payload.get("mismatched_job_artifact")):
+                    mismatched_artifact_jobs += 1
+                continue
+
+            status = str(payload.get("status", "")).strip() or "unknown"
+            status_counter[status] += 1
+            app_code = str(job.app_code or "").strip()
+            if app_code:
+                app_counter[app_code] += 1
+                app_status_counters.setdefault(app_code, Counter())[status] += 1
+            generated_at = str(payload.get("generated_at", "")).strip()
+            generated_day = self._parse_iso_date(generated_at)
+            status_reasons = [
+                str(item).strip()
+                for item in (payload.get("status_reasons", []) if isinstance(payload.get("status_reasons"), list) else [])
+                if str(item).strip()
+            ]
+            baseline_missing = [
+                str(item).strip()
+                for item in (payload.get("baseline_missing", []) if isinstance(payload.get("baseline_missing"), list) else [])
+                if str(item).strip()
+            ]
+            if generated_day is not None:
+                timeline_counters.setdefault(generated_day.isoformat(), Counter())[status] += 1
+                if latest_generated_date is None or generated_day > latest_generated_date:
+                    latest_generated_date = generated_day
+            backlog_candidate_id = str(payload.get("backlog_candidate_id", "")).strip()
+            backlog_candidate = runtime_store.get_backlog_candidate(backlog_candidate_id) if backlog_candidate_id else None
+            backlog_payload = backlog_candidate.get("payload", {}) if isinstance(backlog_candidate, dict) else {}
+            backlog_source_kind = str(backlog_payload.get("source_kind", "")).strip()
+            if backlog_source_kind == "failure_pattern_cluster":
+                cluster_status_counter[status] += 1
+                cluster_pattern_name = (
+                    str(backlog_payload.get("pattern_id", "")).strip()
+                    or str(backlog_candidate.get("title", "")).strip()
+                    or backlog_candidate_id
+                )
+                if cluster_pattern_name:
+                    cluster_pattern_counter[cluster_pattern_name] += 1
+                cluster_recent_items.append(
+                    {
+                        "job_id": job.job_id,
+                        "detail_url": f"/jobs/{job.job_id}",
+                        "issue_title": str(job.issue_title or "").strip(),
+                        "app_code": app_code,
+                        "status": status,
+                        "status_label": str(payload.get("status_label", "")).strip() or status,
+                        "candidate_id": backlog_candidate_id,
+                        "candidate_title": str(backlog_candidate.get("title", "")).strip() if isinstance(backlog_candidate, dict) else "",
+                        "pattern_id": str(backlog_payload.get("pattern_id", "")).strip(),
+                        "pattern_count": int(backlog_payload.get("count", 0) or 0),
+                        "generated_at": generated_at,
+                    }
+                )
+                cluster_recurrence = payload.get("cluster_recurrence", {}) if isinstance(payload.get("cluster_recurrence"), dict) else {}
+                if cluster_recurrence.get("active"):
+                    recurrence_status = str(cluster_recurrence.get("status", "")).strip() or "unknown"
+                    cluster_recurrence_status_counter[recurrence_status] += 1
+                    delta_count = cluster_recurrence.get("delta_count")
+                    if isinstance(delta_count, (int, float)):
+                        if delta_count < 0:
+                            cluster_reduced_occurrences_total += abs(int(delta_count))
+                        elif delta_count > 0:
+                            cluster_added_occurrences_total += int(delta_count)
+                    cluster_recent_recurrence_items.append(
+                        {
+                            "job_id": job.job_id,
+                            "detail_url": f"/jobs/{job.job_id}",
+                            "issue_title": str(job.issue_title or "").strip(),
+                            "app_code": app_code,
+                            "generated_at": generated_at,
+                            "pattern_id": str(cluster_recurrence.get("pattern_id", "")).strip(),
+                            "status": recurrence_status,
+                            "status_label": str(cluster_recurrence.get("status_label", "")).strip() or recurrence_status,
+                            "summary": str(cluster_recurrence.get("summary", "")).strip(),
+                            "baseline_count": cluster_recurrence.get("baseline_count"),
+                            "current_count": cluster_recurrence.get("current_count"),
+                            "delta_count": delta_count,
+                            "missing": list(cluster_recurrence.get("missing", []) or []),
+                        }
+                    )
+            deltas = payload.get("deltas", {}) if isinstance(payload.get("deltas"), dict) else {}
+            if status == "regressed":
+                for reason in status_reasons:
+                    regressed_reason_counter[reason] += 1
+                recent_regressed_items.append(
+                    {
+                        "job_id": job.job_id,
+                        "detail_url": f"/jobs/{job.job_id}",
+                        "issue_title": str(job.issue_title or "").strip(),
+                        "app_code": app_code,
+                        "status_label": str(payload.get("status_label", "")).strip() or status,
+                        "generated_at": generated_at,
+                        "summary": str(payload.get("summary", "")).strip(),
+                        "status_reasons": status_reasons,
+                        "review_delta": deltas.get("review_overall"),
+                        "maturity_delta": deltas.get("maturity_score"),
+                        "quality_gate_delta": deltas.get("quality_gate_passed"),
+                    }
+                )
+            if status == "insufficient_baseline":
+                for missing_key in baseline_missing:
+                    insufficient_baseline_counter[missing_key] += 1
+                recent_insufficient_items.append(
+                    {
+                        "job_id": job.job_id,
+                        "detail_url": f"/jobs/{job.job_id}",
+                        "issue_title": str(job.issue_title or "").strip(),
+                        "app_code": app_code,
+                        "status_label": str(payload.get("status_label", "")).strip() or status,
+                        "generated_at": generated_at,
+                        "summary": str(payload.get("summary", "")).strip(),
+                        "baseline_missing": baseline_missing,
+                    }
+                )
+            recent_items.append(
+                {
+                    "job_id": job.job_id,
+                    "detail_url": f"/jobs/{job.job_id}",
+                    "issue_title": str(job.issue_title or "").strip(),
+                    "app_code": app_code,
+                    "status": status,
+                    "status_label": str(payload.get("status_label", "")).strip() or status,
+                    "summary": str(payload.get("summary", "")).strip(),
+                    "parent_job_id": str(payload.get("parent_job_id", "")).strip(),
+                    "backlog_candidate_id": backlog_candidate_id,
+                    "backlog_source_kind": backlog_source_kind,
+                    "backlog_title": str(backlog_candidate.get("title", "")).strip() if isinstance(backlog_candidate, dict) else "",
+                    "generated_at": generated_at,
+                    "review_delta": deltas.get("review_overall"),
+                    "maturity_delta": deltas.get("maturity_score"),
+                    "quality_gate_delta": deltas.get("quality_gate_passed"),
+                    "status_reasons": status_reasons,
+                    "baseline_missing": baseline_missing,
+                    "artifact_path": str(payload.get("artifact_path", "")).strip(),
+                }
+            )
+
+        active_artifact_jobs = sum(status_counter.values())
+        improved_count = status_counter.get("improved", 0)
+        regressed_count = status_counter.get("regressed", 0)
+        unchanged_count = status_counter.get("unchanged", 0)
+        insufficient_count = status_counter.get("insufficient_baseline", 0)
+        cluster_linked_followup_count = sum(cluster_status_counter.values())
+        anchor_day = latest_generated_date or self._parse_iso_date(self.utc_now_iso()) or date.today()
+        recent_timeline: List[Dict[str, Any]] = []
+        for offset in range(6, -1, -1):
+            current_day = anchor_day - timedelta(days=offset)
+            counter = timeline_counters.get(current_day.isoformat(), Counter())
+            recent_timeline.append(
+                {
+                    "day": current_day.isoformat(),
+                    "total": int(sum(counter.values())),
+                    "improved_count": int(counter.get("improved", 0)),
+                    "regressed_count": int(counter.get("regressed", 0)),
+                    "unchanged_count": int(counter.get("unchanged", 0)),
+                    "insufficient_baseline_count": int(counter.get("insufficient_baseline", 0)),
+                }
+            )
+        app_status_breakdown = [
+            {
+                "app_code": app_code,
+                "total": int(sum(counter.values())),
+                "improved_count": int(counter.get("improved", 0)),
+                "regressed_count": int(counter.get("regressed", 0)),
+                "unchanged_count": int(counter.get("unchanged", 0)),
+                "insufficient_baseline_count": int(counter.get("insufficient_baseline", 0)),
+                "improved_share": round(counter.get("improved", 0) / sum(counter.values()), 3) if sum(counter.values()) else None,
+            }
+            for app_code, counter in sorted(
+                app_status_counters.items(),
+                key=lambda item: (-sum(item[1].values()), item[0]),
+            )
+        ][:8]
+        return {
+            "active": bool(active_artifact_jobs or missing_artifact_jobs or mismatched_artifact_jobs),
+            "followup_job_count": followup_job_count,
+            "active_artifact_jobs": active_artifact_jobs,
+            "missing_artifact_jobs": missing_artifact_jobs,
+            "mismatched_artifact_jobs": mismatched_artifact_jobs,
+            "improved_count": improved_count,
+            "regressed_count": regressed_count,
+            "unchanged_count": unchanged_count,
+            "insufficient_baseline_count": insufficient_count,
+            "improved_share": round(improved_count / active_artifact_jobs, 3) if active_artifact_jobs else None,
+            "status_counts": self.top_counter_items(status_counter, limit=8),
+            "app_counts": self.top_counter_items(app_counter, limit=8),
+            "latest_generated_day": anchor_day.isoformat() if anchor_day else "",
+            "recent_timeline": recent_timeline,
+            "app_status_breakdown": app_status_breakdown,
+            "cluster_linked_followup_count": cluster_linked_followup_count,
+            "cluster_improved_count": int(cluster_status_counter.get("improved", 0)),
+            "cluster_regressed_count": int(cluster_status_counter.get("regressed", 0)),
+            "cluster_unchanged_count": int(cluster_status_counter.get("unchanged", 0)),
+            "cluster_insufficient_baseline_count": int(cluster_status_counter.get("insufficient_baseline", 0)),
+            "cluster_recurrence_reduced_count": int(cluster_recurrence_status_counter.get("reduced", 0)),
+            "cluster_recurrence_unchanged_count": int(cluster_recurrence_status_counter.get("unchanged", 0)),
+            "cluster_recurrence_increased_count": int(cluster_recurrence_status_counter.get("increased", 0)),
+            "cluster_recurrence_insufficient_baseline_count": int(
+                cluster_recurrence_status_counter.get("insufficient_baseline", 0)
+            ),
+            "cluster_recurrence_status_counts": self.top_counter_items(cluster_recurrence_status_counter, limit=8),
+            "cluster_reduced_occurrences_total": cluster_reduced_occurrences_total,
+            "cluster_added_occurrences_total": cluster_added_occurrences_total,
+            "cluster_pattern_counts": self.top_counter_items(cluster_pattern_counter, limit=8),
+            "cluster_recent_items": cluster_recent_items[:6],
+            "cluster_recent_recurrence_items": cluster_recent_recurrence_items[:6],
+            "regressed_reason_counts": self.top_counter_items(regressed_reason_counter, limit=8),
+            "insufficient_baseline_reasons": self.top_counter_items(insufficient_baseline_counter, limit=8),
+            "recent_regressed_items": recent_regressed_items[:6],
+            "recent_insufficient_baseline_items": recent_insufficient_items[:6],
+            "recent_items": recent_items[:8],
+        }
+
+    @staticmethod
+    def _parse_iso_date(raw_value: str) -> date | None:
+        text = str(raw_value or "").strip()
+        if not text:
+            return None
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00")).date()
+        except ValueError:
+            return None
 
     def build_admin_dead_letter_jobs(self, jobs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Return recent dead-letter jobs for operator triage."""
@@ -892,6 +1298,8 @@ class DashboardAdminMetricsRuntime:
         recovery_action_groups = self.build_admin_recovery_action_groups(workspace_paths)
         operator_action_trail = self.build_admin_operator_action_trail(workspace_paths)
         app_runner_status = self.build_admin_app_runner_status()
+        integration_health_summary = self.build_admin_integration_health_summary(jobs)
+        self_growing_effectiveness_summary = self.build_admin_self_growing_effectiveness_summary()
         assistant_diagnosis_loop_enabled = bool(feature_flags.get("assistant_diagnosis_loop"))
         mcp_tools_shadow_enabled = bool(feature_flags.get("mcp_tools_shadow"))
         vector_memory_shadow_enabled = bool(feature_flags.get("vector_memory_shadow"))
@@ -1035,6 +1443,8 @@ class DashboardAdminMetricsRuntime:
                 "recovery_action_groups": recovery_action_groups,
                 "operator_action_trail": operator_action_trail,
                 "app_runner_status": app_runner_status,
+                "integration_health_summary": integration_health_summary,
+                "self_growing_effectiveness_summary": self_growing_effectiveness_summary,
                 "startup_sweep": {
                     "latest_generated_at": str(latest_startup_sweep.get("generated_at", "")).strip(),
                     "orphan_running_node_runs_interrupted": int(

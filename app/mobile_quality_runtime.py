@@ -34,6 +34,7 @@ class MobileQualityRuntime:
         paths = build_workflow_artifact_paths(repository_path)
         target_path = paths["mobile_app_checklist"]
         runner_meta = self._read_app_runner_meta(job.app_code)
+        mobile_e2e_result = self._read_mobile_e2e_result(paths)
         verification_target = self._verification_target_from_mode(str(runner_meta.get("mode", "")).strip())
         result_items = self._normalize_test_results(test_results)
         overall_pass = bool(result_items) and all(item["passed"] for item in result_items)
@@ -59,9 +60,32 @@ class MobileQualityRuntime:
             f"- Port: `{str(runner_meta.get('port', '')).strip() or '-'}`",
             f"- Updated At: `{str(runner_meta.get('updated_at', '')).strip() or '-'}`",
             "",
-            "## Test Evidence",
-            "",
         ]
+
+        if mobile_e2e_result:
+            lines.extend(
+                [
+                    "## Mobile E2E Result",
+                    "",
+                    f"- Platform: `{str(mobile_e2e_result.get('platform', '')).strip() or '-'}`",
+                    f"- Status: `{str(mobile_e2e_result.get('status', '')).strip() or '-'}`",
+                    f"- Runner: `{str(mobile_e2e_result.get('runner', '')).strip() or '-'}`",
+                    f"- Command: `{str(mobile_e2e_result.get('command', '')).strip() or '-'}`",
+                    f"- Target: `{str(mobile_e2e_result.get('target_name', '')).strip() or '-'}`",
+                    f"- Target ID: `{str(mobile_e2e_result.get('target_id', '')).strip() or '-'}`",
+                    f"- Notes: `{str(mobile_e2e_result.get('notes', '')).strip() or '-'}`",
+                    "",
+                    "## Test Evidence",
+                    "",
+                ]
+            )
+
+        lines.extend(
+            [
+                "## Test Evidence",
+                "",
+            ]
+        )
 
         if result_items:
             for item in result_items:
@@ -117,6 +141,17 @@ class MobileQualityRuntime:
         safe_app_code = re.sub(r"[^a-zA-Z0-9_-]+", "", str(app_code or "").strip()) or "default"
         path = self.settings.data_dir / "pids" / f"app_{safe_app_code}.json"
         if not path.exists():
+            return {}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def _read_mobile_e2e_result(paths: Dict[str, Path]) -> Dict[str, Any]:
+        path = paths.get("mobile_e2e_result")
+        if not isinstance(path, Path) or not path.exists():
             return {}
         try:
             payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))

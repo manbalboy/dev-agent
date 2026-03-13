@@ -30,10 +30,10 @@
 | Self-improvement loop | `PARTIAL` | 리뷰와 개선 산출물은 많지만, 품질 상승이 항상 보장되지는 않는다. | improvement 결과의 장기 효과 측정과 strategy 전환 기준이 약하다. |
 | Memory runtime | `PARTIAL` | DB-backed memory와 ranking/backlog까지 갔다. | planner/reviewer/coder 전반에 semantic retrieval이 넓게 퍼지지 않았다. |
 | Agentic runtime (tool/vector/graph) | `PARTIAL` | MCP/Qdrant/LangGraph가 이미 들어와 있고 방향은 맞다. | 아직 shadow/opt-in 비중이 높고, 운영자가 체감하는 primary 가치로 완전히 승격되지는 않았다. |
-| Self-growing bridge | `PARTIAL` | backlog -> follow-up job까지 연결됐다. | 아직 operator approval 의존이 크고, recurring failure의 장기 효과 검증이 약하다. |
-| Long-running operations | `PARTIAL` | heartbeat stale 구조 문제와 recovery trace artifact, normalized failure class baseline, stage/provider mapping, operator visibility, class-aware retry policy, structured `needs_human` handoff baseline, provider failure counters, provider cooldown window, provider quarantine baseline, provider circuit-breaker baseline, planner/reviewer alternate route fallback baseline, worker startup sweep trace baseline, restart-safe requeue reason baseline, running node/job mismatch audit baseline, dead-letter baseline, dead-letter 재큐잉 액션, operator note trail, dead-letter list, recovery history summary, provider outage history, startup sweep history, dead-letter/recovery action drilldown, recovery action groups, operator action trail까지는 올라왔다. | 남은 runtime 분리와 self-growing bridge 효과성 검증이 아직 약하다. |
+| Self-growing bridge | `PARTIAL` | backlog -> follow-up job까지 연결됐고, `SELF_GROWING_EFFECTIVENESS.json` baseline과 job detail/admin summary, 최근 7일 추세, 앱별 효과 분포, failure cluster 기반 follow-up 효과, 재발 감소/유지/증가 집계, regressed reason 분포, insufficient baseline reason 분포, 최근 회귀/기준 부족 사례까지 올라왔다. | 아직 operator approval 의존이 크고, 장기 기간에서 재발 감소가 안정적으로 유지되는지 증명하는 운영 지표는 더 필요하다. |
+| Long-running operations | `PARTIAL` | heartbeat stale 구조 문제와 recovery trace artifact, normalized failure class baseline, stage/provider mapping, operator visibility, class-aware retry policy, structured `needs_human` handoff baseline, provider failure counters, provider cooldown window, provider quarantine baseline, provider circuit-breaker baseline, planner/reviewer alternate route fallback baseline, worker startup sweep trace baseline, restart-safe requeue reason baseline, running node/job mismatch audit baseline, dead-letter baseline, dead-letter 재큐잉 액션, operator note trail, dead-letter list, recovery history summary, provider outage history, startup sweep history, dead-letter/recovery action drilldown, recovery action groups, operator action trail까지는 올라왔다. | 남은 runtime 분리와 durable/enterprise 운영 계층이 아직 약하다. |
 | Operator UX / dashboard | `PARTIAL` | 운영자 입력, diagnosis trace, 비교 뷰, structured `needs_human` handoff 보드까지 들어갔다. | 화면 복잡도와 정보 구조가 여전히 높고, 초심자 친화성은 개선 중이다. |
-| Maintainability | `WEAK` | 일부 모듈 분리는 꽤 진행됐고, failure transition/runtime surface도 분리됐다. | [app/orchestrator.py](../app/orchestrator.py) 가 아직 `6068`라인이고, [app/dashboard.py](../app/dashboard.py) 는 `3637`라인이다. 다만 핵심 구조 리스크는 여전히 orchestrator 쪽이 더 크다. |
+| Maintainability | `PARTIAL` | 일부 모듈 분리는 꽤 진행됐고, failure transition/runtime surface도 분리됐다. issue/spec stage helper, product review, artifact I/O, design governance, memory retrieval/context/shadow/ingest helper, memory quality/feedback/ranking helper, structured memory/convention helper, integration recommendation/helper/usage helper, log/heartbeat helper, stop-signal/agent-profile/job lookup helper, job dispatch/single-attempt helper, track/escalation/recovery toggle helper, template variable/fallback artifact helper, tool/search/evidence helper, workflow binding/context helper, commit stage/helper 본문, legacy fixed pipeline 본문, repository/stage support helper, orchestrator context/helper bridge, dashboard job action/service helper도 런타임 쪽으로 흡수됐다. product-review operating principle alignment도 runtime 쪽으로 흡수됐다. | [app/orchestrator.py](../app/orchestrator.py) 가 `2605`라인, [app/dashboard.py](../app/dashboard.py) 는 `3656`라인이다. 다만 핵심 구조 리스크는 여전히 orchestrator 쪽이 더 크다. |
 | Production-readiness baseline | `PARTIAL` | CI, SECURITY, CONTRIBUTING, hygiene 검사까지 들어갔다. | 실제 시크릿 로테이션, LICENSE 결정, durable backend는 아직 남아 있다. |
 
 ## 4. 지금 분명히 잘하고 있는 것
@@ -151,15 +151,14 @@
 
 ## 7. 추천 우선순위
 
-### Priority 1. Operator Ops Surface
+### Priority 1. remaining runtime split 잔여 정리
 
 - 목적:
-  - 운영자가 dead-letter / recovery trail / handoff 상태를 파일 로그 없이 판단하게 만들기
+- 다음 enterprise 운영 슬라이스를 안전하게 받기 전에 오케스트레이터 잔여 helper를 더 줄이기
 - 바로 다음 작은 슬라이스:
-  1. remaining runtime split
-     - 특히 memory helper 묶음 축소
-  2. self-growing bridge effectiveness verification
-  3. enterprise 운영 계층 보강
+  1. residual runtime/helper split
+  2. durable/enterprise 운영 계층 보강
+  3. dashboard write action/service 잔여 축소
 
 ### Priority 2. 구조 리스크 축소
 
@@ -168,18 +167,18 @@
 - 바로 필요한 것:
   1. [app/orchestrator.py](../app/orchestrator.py) 의 다음 구조 분리
   2. [app/dashboard.py](../app/dashboard.py) write action/service 축소
-  3. self-growing bridge 효과성 검증
+  3. self-growing bridge 장기 효과 집계
   4. dashboard/job detail에서 failure class UI 노출
   5. class-aware retry policy
 
-### Priority 3. self-growing loop의 효과성 검증
+### Priority 3. operator control 정교화
 
 - 목적:
-  - follow-up job과 diagnosis trace가 실제 품질 상승으로 이어지는지 증거를 남기기
+  - 운영자가 follow-up / recovery / integration 승인 흐름을 더 조밀하게 조작하게 만들기
 - 바로 필요한 것:
   1. backlog approval UX 보강
-  2. diagnosis trace 장기 효과성/빈도 상관관계
-  3. recurring failure cluster의 재발 감소 측정
+  2. integration health와 failure handoff의 교차 drilldown
+  3. dashboard write action/service 잔여 축소
 
 ### Priority 4. durable runtime 준비
 

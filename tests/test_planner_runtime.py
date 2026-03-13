@@ -88,6 +88,9 @@ def _build_runtime(
         execute_planner_tool_request=lambda **kwargs: {},
         feature_enabled=lambda name: False,
         planner_shadow_runner=None,
+        write_integration_guide_summary_artifact=None,
+        write_integration_code_patterns_artifact=None,
+        write_integration_verification_checklist_artifact=None,
     )
 
 
@@ -118,3 +121,140 @@ def test_run_planner_legacy_one_shot_uses_repository_aware_fallback_template(tmp
 
     assert [call[0] for call in runner.calls] == ["planner_fallback"]
     assert "fallback" in paths["plan"].read_text(encoding="utf-8")
+
+
+def test_run_planner_legacy_one_shot_embeds_integration_recommendations(tmp_path: Path) -> None:
+    repository_path = tmp_path / "repo"
+    docs_path = repository_path / "_docs"
+    docs_path.mkdir(parents=True)
+    actor_logs: list[tuple[str, str, str]] = []
+    runner = _FakeTemplateRunner(stdout_by_template={"planner": "# PLAN\n- recommendation\n"})
+    runtime = _build_runtime(template_runner=runner, actor_logs=actor_logs)
+    runtime.write_integration_recommendation_artifact = lambda **kwargs: (
+        kwargs["paths"]["integration_recommendations"].write_text(
+            '{"items":[{"integration_id":"google_maps","reason":"지도 기능 후보"}]}\n',
+            encoding="utf-8",
+        )
+        or {"count": 1}
+    )
+    paths = {
+        "spec": docs_path / "SPEC.md",
+        "plan": docs_path / "PLAN.md",
+        "review": docs_path / "REVIEW.md",
+        "integration_recommendations": docs_path / "INTEGRATION_RECOMMENDATIONS.json",
+    }
+    paths["spec"].write_text("# SPEC\n", encoding="utf-8")
+
+    runtime.run_planner_legacy_one_shot(
+        job=_make_job("job-planner-recommendation"),
+        repository_path=repository_path,
+        paths=paths,
+        log_path=tmp_path / "job.log",
+    )
+
+    prompt_text = (docs_path / "PLANNER_PROMPT.md").read_text(encoding="utf-8")
+    assert "Integration Recommendations" in prompt_text
+    assert "INTEGRATION_RECOMMENDATIONS.json" in prompt_text
+    assert "도입 검토 후보" in prompt_text
+    assert "google_maps" in prompt_text
+
+
+def test_run_planner_legacy_one_shot_embeds_integration_guide_summary(tmp_path: Path) -> None:
+    repository_path = tmp_path / "repo"
+    docs_path = repository_path / "_docs"
+    docs_path.mkdir(parents=True)
+    actor_logs: list[tuple[str, str, str]] = []
+    runner = _FakeTemplateRunner(stdout_by_template={"planner": "# PLAN\n- guide\n"})
+    runtime = _build_runtime(template_runner=runner, actor_logs=actor_logs)
+    runtime.write_integration_guide_summary_artifact = lambda **kwargs: (
+        kwargs["paths"]["integration_guide_summary"].write_text(
+            "# INTEGRATION_GUIDE_SUMMARY\n\n## Google Maps\n\n- required_env_keys: GOOGLE_MAPS_API_KEY\n",
+            encoding="utf-8",
+        )
+        or {"count": 1}
+    )
+    runtime.write_integration_code_patterns_artifact = lambda **kwargs: (
+        kwargs["paths"]["integration_code_patterns"].write_text(
+            "# INTEGRATION_CODE_PATTERNS\n\n## Google Maps\n\n- MapLoader 래퍼 사용\n",
+            encoding="utf-8",
+        )
+        or {"count": 1}
+    )
+    runtime.write_integration_verification_checklist_artifact = lambda **kwargs: (
+        kwargs["paths"]["integration_verification_checklist"].write_text(
+            "# INTEGRATION_VERIFICATION_CHECKLIST\n\n## Google Maps\n\n- [ ] 지도 로딩 검증\n",
+            encoding="utf-8",
+        )
+        or {"count": 1}
+    )
+    paths = {
+        "spec": docs_path / "SPEC.md",
+        "plan": docs_path / "PLAN.md",
+        "review": docs_path / "REVIEW.md",
+        "integration_guide_summary": docs_path / "INTEGRATION_GUIDE_SUMMARY.md",
+        "integration_code_patterns": docs_path / "INTEGRATION_CODE_PATTERNS.md",
+        "integration_verification_checklist": docs_path / "INTEGRATION_VERIFICATION_CHECKLIST.md",
+    }
+    paths["spec"].write_text("# SPEC\n", encoding="utf-8")
+
+    runtime.run_planner_legacy_one_shot(
+        job=_make_job("job-planner-guide-summary"),
+        repository_path=repository_path,
+        paths=paths,
+        log_path=tmp_path / "job.log",
+    )
+
+    prompt_text = (docs_path / "PLANNER_PROMPT.md").read_text(encoding="utf-8")
+    assert "Integration Guide Summary" in prompt_text
+    assert "INTEGRATION_GUIDE_SUMMARY.md" in prompt_text
+    assert "Integration Code Patterns" in prompt_text
+    assert "INTEGRATION_CODE_PATTERNS.md" in prompt_text
+    assert "Integration Verification Checklist" in prompt_text
+    assert "INTEGRATION_VERIFICATION_CHECKLIST.md" in prompt_text
+    assert "Google Maps" in prompt_text
+
+
+def test_run_planner_legacy_one_shot_appends_integration_usage_trail(tmp_path: Path) -> None:
+    repository_path = tmp_path / "repo"
+    docs_path = repository_path / "_docs"
+    docs_path.mkdir(parents=True)
+    actor_logs: list[tuple[str, str, str]] = []
+    runner = _FakeTemplateRunner(stdout_by_template={"planner": "# PLAN\n- guide\n"})
+    runtime = _build_runtime(template_runner=runner, actor_logs=actor_logs)
+    usage_events: list[dict[str, str]] = []
+    runtime.write_integration_guide_summary_artifact = lambda **kwargs: (
+        kwargs["paths"]["integration_guide_summary"].write_text(
+            "# INTEGRATION_GUIDE_SUMMARY\n\n## Google Maps\n",
+            encoding="utf-8",
+        )
+        or {"count": 1}
+    )
+    runtime.append_integration_usage_trail_event = lambda **kwargs: usage_events.append(
+        {
+            "stage": str(kwargs["stage"]),
+            "route": str(kwargs["route"]),
+            "prompt_path": str(kwargs["prompt_path"]),
+        }
+    ) or {"active": True}
+    paths = {
+        "spec": docs_path / "SPEC.md",
+        "plan": docs_path / "PLAN.md",
+        "review": docs_path / "REVIEW.md",
+        "integration_guide_summary": docs_path / "INTEGRATION_GUIDE_SUMMARY.md",
+    }
+    paths["spec"].write_text("# SPEC\n", encoding="utf-8")
+
+    runtime.run_planner_legacy_one_shot(
+        job=_make_job("job-planner-usage-trail"),
+        repository_path=repository_path,
+        paths=paths,
+        log_path=tmp_path / "job.log",
+    )
+
+    assert usage_events == [
+        {
+            "stage": "plan_with_gemini",
+            "route": "planner",
+            "prompt_path": str(docs_path / "PLANNER_PROMPT.md"),
+        }
+    ]

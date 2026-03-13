@@ -16,7 +16,13 @@ from typing import Dict, Iterator, List, Optional
 import fcntl
 
 from app.config import AppSettings
-from app.models import JobRecord, NodeRunRecord, RuntimeInputRecord, utc_now_iso
+from app.models import (
+    IntegrationRegistryRecord,
+    JobRecord,
+    NodeRunRecord,
+    RuntimeInputRecord,
+    utc_now_iso,
+)
 
 
 class JobStore(ABC):
@@ -70,6 +76,18 @@ class JobStore(ABC):
     def list_runtime_inputs(self) -> List[RuntimeInputRecord]:
         """Return runtime input records sorted by newest first."""
 
+    @abstractmethod
+    def upsert_integration_registry_entry(self, entry: IntegrationRegistryRecord) -> None:
+        """Insert or update one third-party integration registry entry."""
+
+    @abstractmethod
+    def get_integration_registry_entry(self, integration_id: str) -> Optional[IntegrationRegistryRecord]:
+        """Fetch one integration registry entry by ID."""
+
+    @abstractmethod
+    def list_integration_registry_entries(self) -> List[IntegrationRegistryRecord]:
+        """Return integration registry entries sorted by newest first."""
+
 
 class JsonJobStore(JobStore):
     """JSON-backed JobStore implementation with file locking.
@@ -84,16 +102,19 @@ class JsonJobStore(JobStore):
         queue_file: Path,
         node_runs_file: Path | None = None,
         runtime_inputs_file: Path | None = None,
+        integrations_file: Path | None = None,
     ) -> None:
         self.jobs_file = jobs_file
         self.queue_file = queue_file
         self.node_runs_file = node_runs_file or jobs_file.parent / "node_runs.json"
         self.runtime_inputs_file = runtime_inputs_file or jobs_file.parent / "runtime_inputs.json"
+        self.integrations_file = integrations_file or jobs_file.parent / "integrations.json"
 
         self.jobs_file.parent.mkdir(parents=True, exist_ok=True)
         self.queue_file.parent.mkdir(parents=True, exist_ok=True)
         self.node_runs_file.parent.mkdir(parents=True, exist_ok=True)
         self.runtime_inputs_file.parent.mkdir(parents=True, exist_ok=True)
+        self.integrations_file.parent.mkdir(parents=True, exist_ok=True)
 
         if not self.jobs_file.exists():
             self._write_json_atomic(self.jobs_file, {})
@@ -103,6 +124,8 @@ class JsonJobStore(JobStore):
             self._write_json_atomic(self.node_runs_file, {})
         if not self.runtime_inputs_file.exists():
             self._write_json_atomic(self.runtime_inputs_file, {})
+        if not self.integrations_file.exists():
+            self._write_json_atomic(self.integrations_file, {})
 
     def create_job(self, job: JobRecord) -> None:
         """Insert a new job record.
@@ -242,6 +265,39 @@ class JsonJobStore(JobStore):
         )
         return records
 
+    def upsert_integration_registry_entry(self, entry: IntegrationRegistryRecord) -> None:
+        """Insert or update one integration registry entry."""
+
+        with self._locked_json(self.integrations_file, default={}) as integrations_data:
+            integrations = self._ensure_integration_map(integrations_data)
+            integrations[entry.integration_id] = entry.to_dict()
+
+    def get_integration_registry_entry(self, integration_id: str) -> Optional[IntegrationRegistryRecord]:
+        """Return one integration registry entry by ID, or None if it does not exist."""
+
+        with self._locked_json(self.integrations_file, default={}) as integrations_data:
+            integrations = self._ensure_integration_map(integrations_data)
+            payload = integrations.get(integration_id)
+            if payload is None:
+                return None
+            return IntegrationRegistryRecord.from_dict(payload)
+
+    def list_integration_registry_entries(self) -> List[IntegrationRegistryRecord]:
+        """List integration registry entries sorted by newest first."""
+
+        with self._locked_json(self.integrations_file, default={}) as integrations_data:
+            integrations = self._ensure_integration_map(integrations_data)
+            records = [IntegrationRegistryRecord.from_dict(item) for item in integrations.values()]
+
+        records.sort(
+            key=lambda record: (
+                record.updated_at or record.created_at,
+                record.integration_id,
+            ),
+            reverse=True,
+        )
+        return records
+
     @contextmanager
     def _locked_json(self, file_path: Path, default: object) -> Iterator[object]:
         """Lock a JSON file, load data, then save data on exit.
@@ -327,6 +383,14 @@ class JsonJobStore(JobStore):
     @staticmethod
     def _ensure_runtime_input_map(raw_payload: object) -> Dict[str, Dict[str, object]]:
         """Validate that runtime-input file content is a dictionary."""
+
+        if isinstance(raw_payload, dict):
+            return raw_payload
+        return {}
+
+    @staticmethod
+    def _ensure_integration_map(raw_payload: object) -> Dict[str, Dict[str, object]]:
+        """Validate that integration-registry file content is a dictionary."""
 
         if isinstance(raw_payload, dict):
             return raw_payload
@@ -562,6 +626,79 @@ class SQLiteJobStore(JobStore):
             ).fetchall()
             return [self._row_to_runtime_input(row) for row in rows]
 
+    def upsert_integration_registry_entry(self, entry: IntegrationRegistryRecord) -> None:
+        payload = entry.to_dict()
+        payload["supported_app_types"] = json.dumps(entry.supported_app_types)
+        payload["tags"] = json.dumps(entry.tags)
+        payload["required_env_keys"] = json.dumps(entry.required_env_keys)
+        payload["optional_env_keys"] = json.dumps(entry.optional_env_keys)
+        payload["approval_required"] = int(bool(entry.approval_required))
+        payload["enabled"] = int(bool(entry.enabled))
+        payload["approval_status"] = str(entry.approval_status or "")
+        payload["approval_note"] = str(entry.approval_note or "")
+        payload["approval_updated_at"] = str(entry.approval_updated_at or "")
+        payload["approval_updated_by"] = str(entry.approval_updated_by or "operator")
+        payload["approval_trail_json"] = json.dumps(entry.approval_trail or [], ensure_ascii=False)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO integration_registry (
+                    integration_id, display_name, category, supported_app_types, tags,
+                    required_env_keys, optional_env_keys, operator_guide_markdown,
+                    implementation_guide_markdown, verification_notes,
+                    approval_required, enabled, created_at, updated_at,
+                    approval_status, approval_note, approval_updated_at, approval_updated_by, approval_trail_json
+                )
+                VALUES (
+                    :integration_id, :display_name, :category, :supported_app_types, :tags,
+                    :required_env_keys, :optional_env_keys, :operator_guide_markdown,
+                    :implementation_guide_markdown, :verification_notes,
+                    :approval_required, :enabled, :created_at, :updated_at,
+                    :approval_status, :approval_note, :approval_updated_at, :approval_updated_by, :approval_trail_json
+                )
+                ON CONFLICT(integration_id) DO UPDATE SET
+                    display_name=excluded.display_name,
+                    category=excluded.category,
+                    supported_app_types=excluded.supported_app_types,
+                    tags=excluded.tags,
+                    required_env_keys=excluded.required_env_keys,
+                    optional_env_keys=excluded.optional_env_keys,
+                    operator_guide_markdown=excluded.operator_guide_markdown,
+                    implementation_guide_markdown=excluded.implementation_guide_markdown,
+                    verification_notes=excluded.verification_notes,
+                    approval_required=excluded.approval_required,
+                    enabled=excluded.enabled,
+                    created_at=excluded.created_at,
+                    updated_at=excluded.updated_at,
+                    approval_status=excluded.approval_status,
+                    approval_note=excluded.approval_note,
+                    approval_updated_at=excluded.approval_updated_at,
+                    approval_updated_by=excluded.approval_updated_by,
+                    approval_trail_json=excluded.approval_trail_json
+                """,
+                payload,
+            )
+
+    def get_integration_registry_entry(self, integration_id: str) -> Optional[IntegrationRegistryRecord]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM integration_registry WHERE integration_id = ?",
+                (integration_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            return self._row_to_integration_registry_entry(row)
+
+    def list_integration_registry_entries(self) -> List[IntegrationRegistryRecord]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM integration_registry
+                ORDER BY updated_at DESC, integration_id DESC
+                """
+            ).fetchall()
+            return [self._row_to_integration_registry_entry(row) for row in rows]
+
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_file, timeout=30)
         conn.row_factory = sqlite3.Row
@@ -725,6 +862,48 @@ class SQLiteJobStore(JobStore):
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_runtime_inputs_scope ON runtime_inputs(repository, app_code, job_id, scope)"
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS integration_registry (
+                    integration_id TEXT PRIMARY KEY,
+                    display_name TEXT NOT NULL,
+                    category TEXT NOT NULL DEFAULT '',
+                    supported_app_types TEXT NOT NULL DEFAULT '[]',
+                    tags TEXT NOT NULL DEFAULT '[]',
+                    required_env_keys TEXT NOT NULL DEFAULT '[]',
+                    optional_env_keys TEXT NOT NULL DEFAULT '[]',
+                    operator_guide_markdown TEXT NOT NULL DEFAULT '',
+                    implementation_guide_markdown TEXT NOT NULL DEFAULT '',
+                    verification_notes TEXT NOT NULL DEFAULT '',
+                    approval_required INTEGER NOT NULL DEFAULT 1,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL DEFAULT '',
+                    approval_status TEXT NOT NULL DEFAULT '',
+                    approval_note TEXT NOT NULL DEFAULT '',
+                    approval_updated_at TEXT NOT NULL DEFAULT '',
+                    approval_updated_by TEXT NOT NULL DEFAULT 'operator',
+                    approval_trail_json TEXT NOT NULL DEFAULT '[]'
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_integration_registry_updated ON integration_registry(updated_at DESC)"
+            )
+            integration_columns = {
+                str(row["name"] or "")
+                for row in conn.execute("PRAGMA table_info(integration_registry)").fetchall()
+            }
+            if "approval_status" not in integration_columns:
+                conn.execute("ALTER TABLE integration_registry ADD COLUMN approval_status TEXT NOT NULL DEFAULT ''")
+            if "approval_note" not in integration_columns:
+                conn.execute("ALTER TABLE integration_registry ADD COLUMN approval_note TEXT NOT NULL DEFAULT ''")
+            if "approval_updated_at" not in integration_columns:
+                conn.execute("ALTER TABLE integration_registry ADD COLUMN approval_updated_at TEXT NOT NULL DEFAULT ''")
+            if "approval_updated_by" not in integration_columns:
+                conn.execute("ALTER TABLE integration_registry ADD COLUMN approval_updated_by TEXT NOT NULL DEFAULT 'operator'")
+            if "approval_trail_json" not in integration_columns:
+                conn.execute("ALTER TABLE integration_registry ADD COLUMN approval_trail_json TEXT NOT NULL DEFAULT '[]'")
 
     @staticmethod
     def _row_to_job(row: sqlite3.Row) -> JobRecord:
@@ -805,6 +984,53 @@ class SQLiteJobStore(JobStore):
             updated_at=str(row["updated_at"] or ""),
         )
 
+    @staticmethod
+    def _row_to_integration_registry_entry(row: sqlite3.Row) -> IntegrationRegistryRecord:
+        def _load_string_list(value: object) -> List[str]:
+            try:
+                payload = json.loads(str(value or "[]"))
+            except json.JSONDecodeError:
+                payload = []
+            if not isinstance(payload, list):
+                return []
+            return [str(item).strip() for item in payload if str(item).strip()]
+
+        def _load_trail(value: object) -> List[dict]:
+            try:
+                payload = json.loads(str(value or "[]"))
+            except json.JSONDecodeError:
+                payload = []
+            if not isinstance(payload, list):
+                return []
+            trail: List[dict] = []
+            for item in payload:
+                if not isinstance(item, dict):
+                    continue
+                trail.append({str(key): item[key] for key in item.keys()})
+            return trail
+
+        return IntegrationRegistryRecord(
+            integration_id=str(row["integration_id"]),
+            display_name=str(row["display_name"] or ""),
+            category=str(row["category"] or ""),
+            supported_app_types=_load_string_list(row["supported_app_types"]),
+            tags=_load_string_list(row["tags"]),
+            required_env_keys=_load_string_list(row["required_env_keys"]),
+            optional_env_keys=_load_string_list(row["optional_env_keys"]),
+            operator_guide_markdown=str(row["operator_guide_markdown"] or ""),
+            implementation_guide_markdown=str(row["implementation_guide_markdown"] or ""),
+            verification_notes=str(row["verification_notes"] or ""),
+            approval_required=bool(row["approval_required"]),
+            enabled=bool(row["enabled"]),
+            created_at=str(row["created_at"] or ""),
+            updated_at=str(row["updated_at"] or ""),
+            approval_status=str(row["approval_status"] or ""),
+            approval_note=str(row["approval_note"] or ""),
+            approval_updated_at=str(row["approval_updated_at"] or ""),
+            approval_updated_by=str(row["approval_updated_by"] or "operator"),
+            approval_trail=_load_trail(row["approval_trail_json"]),
+        )
+
 
 def create_job_store(settings: AppSettings) -> JobStore:
     """Create store backend based on environment settings."""
@@ -826,6 +1052,8 @@ def create_job_store(settings: AppSettings) -> JobStore:
                     sqlite_store.upsert_node_run(node_run)
             for runtime_input in json_store.list_runtime_inputs():
                 sqlite_store.upsert_runtime_input(runtime_input)
+            for entry in json_store.list_integration_registry_entries():
+                sqlite_store.upsert_integration_registry_entry(entry)
             queue_payload = JsonJobStore._read_json(settings.queue_file, default=[])
             for queued in JsonJobStore._ensure_queue_list(queue_payload):
                 sqlite_store.enqueue_job(queued)

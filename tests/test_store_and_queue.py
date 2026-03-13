@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from app.models import JobRecord, JobStage, JobStatus, RuntimeInputRecord, utc_now_iso
+from app.models import (
+    IntegrationRegistryRecord,
+    JobRecord,
+    JobStage,
+    JobStatus,
+    RuntimeInputRecord,
+    utc_now_iso,
+)
 from app.store import SQLiteJobStore
 
 
@@ -150,3 +157,54 @@ def test_store_persists_runtime_input_records(tmp_path):
 
     assert listed[0].status == "provided"
     assert listed[0].env_var_name == "GOOGLE_MAPS_API_KEY"
+
+
+def test_store_persists_integration_registry_records(tmp_path):
+    store = SQLiteJobStore(tmp_path / "jobs.db")
+    now = utc_now_iso()
+    record = IntegrationRegistryRecord(
+        integration_id="google_maps",
+        display_name="Google Maps",
+        category="mapping",
+        supported_app_types=["web", "app"],
+        tags=["maps", "places"],
+        required_env_keys=["GOOGLE_MAPS_API_KEY"],
+        optional_env_keys=["GOOGLE_MAPS_MAP_ID"],
+        operator_guide_markdown="운영자 가이드",
+        implementation_guide_markdown="구현 가이드",
+        verification_notes="지도 로딩 확인",
+        approval_required=True,
+        enabled=True,
+        created_at=now,
+        updated_at=now,
+        approval_status="approved",
+        approval_note="운영자 승인",
+        approval_updated_at=now,
+        approval_updated_by="operator",
+        approval_trail=[
+            {
+                "action": "approve",
+                "source": "dashboard",
+                "previous_status": "pending",
+                "current_status": "approved",
+                "note": "운영자 승인",
+                "acted_by": "operator",
+                "acted_at": now,
+            }
+        ],
+    )
+
+    store.upsert_integration_registry_entry(record)
+    loaded = store.get_integration_registry_entry("google_maps")
+
+    assert loaded is not None
+    assert loaded.display_name == "Google Maps"
+    assert loaded.required_env_keys == ["GOOGLE_MAPS_API_KEY"]
+    assert loaded.supported_app_types == ["web", "app"]
+    assert loaded.approval_status == "approved"
+    assert loaded.approval_note == "운영자 승인"
+    assert len(loaded.approval_trail) == 1
+    assert loaded.approval_trail[0]["action"] == "approve"
+
+    listed = store.list_integration_registry_entries()
+    assert listed[0].integration_id == "google_maps"

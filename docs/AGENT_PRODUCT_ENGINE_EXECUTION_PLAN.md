@@ -19,7 +19,7 @@
 3. Memory runtime / adaptive learning engine 확보
 4. Agentic runtime adoption (`MCP` / `Qdrant` / `LangGraph`) 확보
 5. Job recovery / long-running 운영성 확보
-6. Observability / operator tooling 확보
+6. Operator control plane / third-party integration registry 확보
 7. Durable backend / workspace hygiene 확보
 8. 무중단/HA 도입
 
@@ -94,6 +94,9 @@
   - `workspace_app.sh` 에 `expo-android`, `expo-ios`, `rn-android`, `rn-ios` 실행 프리셋이 추가됨
   - admin 운영 지표에 앱 실행 상태 카드가 추가되어 최근 mobile/web 실행 모드와 명령을 읽을 수 있음
   - 앱 분류 저장소는 테스트 단계 이후 `_docs/MOBILE_APP_CHECKLIST.md` baseline artifact를 자동 생성함
+  - `mobile_e2e_runner.sh` 로 Android/iOS emulator baseline E2E 실행 계약이 추가됨
+  - `_docs/MOBILE_E2E_RESULT.json` 이 마지막 platform/target/runner/command/status를 기록함
+  - job detail workflow 탭과 admin 운영 지표가 마지막 모바일 E2E 결과를 직접 surface함
   - 운영자 입력 관리에는 AI/템플릿 기반 request draft 추천과 승인 등록 경로가 추가됨
   - 상세 설계/도입 순서: [PHASE4_AGENTIC_RUNTIME_ADOPTION_PLAN.md](./PHASE4_AGENTIC_RUNTIME_ADOPTION_PLAN.md)
   - 단기 우선순위/작은 슬라이스 기준: [FUTURE_DIRECTION_PRIORITY_ROADMAP.md](./FUTURE_DIRECTION_PRIORITY_ROADMAP.md)
@@ -111,13 +114,19 @@
   - 상세 설계/확장 방향: [PHASE5_CONTINUOUS_JOB_OPERATIONS_EXPANSION_PLAN.md](./PHASE5_CONTINUOUS_JOB_OPERATIONS_EXPANSION_PLAN.md)
   - 첫 구현 권장 슬라이스: `5-A1 Runtime Recovery Trace`
 
-### Phase 6. Observability
-- 목적: 실패 원인과 품질 추세를 운영자가 즉시 파악할 수 있게 만든다.
+### Phase 6. Operator Control Plane And Integration Registry
+- 목적: 남아 있는 Phase 5 operator control 잔여 항목과 서드파티 통합 관리 계층을 하나의 control plane으로 올린다.
 - 핵심 작업:
-  - stage latency
-  - failure rate by stage/provider
-  - review score trend
-  - alert / dead-letter / recovery action
+  - third-party integration registry
+  - runtime input / env bridge upgrade
+  - AI recommendation -> operator approval -> implementation 연결
+  - failed job / provider fallback / restart-safe action drilldown 통합
+- 완료 조건:
+  - 운영자가 `Google Maps` 같은 통합 항목을 등록하고 승인/보류할 수 있다.
+  - AI는 승인된 통합의 가이드와 env 이름을 기준으로 구현한다.
+  - 상세 설계/도입 순서: [PHASE6_OPERATOR_CONTROL_AND_INTEGRATION_REGISTRY_PLAN.md](./PHASE6_OPERATOR_CONTROL_AND_INTEGRATION_REGISTRY_PLAN.md)
+  - 현재 상태: `6-C1 planner recommendation draft`, `6-C2 operator approve/reject action`, `6-C3 approval trail`, `6-B2 missing integration input reason surface`, `6-B3 env bridge policy hardening`, `6-D1 prompt-safe guide summary`, `6-D2 code pattern/snippet hint`, `6-D3 verification checklist injection`, `6-E1 failed job operator approval boundary`, `6-F1 integration usage trail`, `6-F2 missing-input / auth / quota facet`, `6-F3 integration health summary`까지 implemented
+  - 다음 우선순위: `remaining runtime split` 잔여 정리
 
 ### Phase 7. Durable Runtime
 - 목적: 365일 운영을 위한 저장소/워크스페이스/백업 기반을 강화한다.
@@ -213,6 +222,7 @@
   - 모바일 앱 개발 모드 규칙 문서 추가 및 planner/coder/reviewer prompt 반영
   - production-readiness 기본선 유지
   - 회귀 테스트 유지
+  - Phase 6 문서화: operator control plane / third-party integration registry
 - Out of scope:
   - 라이선스 정책 결정
   - 운영 시크릿 실제 로테이션
@@ -229,21 +239,21 @@
 - 하지만 아직 `스스로 성장하는 24시간 개발 동료`라고 부르기에는 이르다.
 - 가장 큰 실제 부족분은 아래다.
   - [app/orchestrator.py](../app/orchestrator.py) 중심의 구조 리스크
-  - Phase 5 operator ops surface / dead-letter list 미완
+  - Phase 5는 operator ops surface까지 왔지만 remaining runtime split과 enterprise 운영 계층이 아직 남음
   - Phase 4 기능의 shadow/opt-in 비중이 아직 높음
-  - self-growing bridge의 장기 효과 검증 부족
+  - self-growing bridge는 장기 추세 집계와 failure cluster 연결, regressed/insufficient baseline facet, recurring failure cluster 재발 감소 측정까지 올라왔지만 장기 운영 증명은 아직 더 필요함
 - 현재 기준 대형 파일 상태:
-  - [app/dashboard.py](../app/dashboard.py): `3637` lines
-  - [app/orchestrator.py](../app/orchestrator.py): `6068` lines
+  - [app/dashboard.py](../app/dashboard.py): `3656` lines
+  - [app/orchestrator.py](../app/orchestrator.py): `2605` lines
 - 즉, `dashboard.py`는 1차 전환 기준 아래로 내려왔고, `orchestrator.py`도 failure transition/runtime 분리와 worker restart safety baseline까지 올라왔다. 다만 핵심 구조 리스크는 여전히 orchestrator 쪽에 남아 있다.
 - 상세 판정은 [CURRENT_STATE_GAP_REPORT.md](./CURRENT_STATE_GAP_REPORT.md) 를 따른다.
 
 ## Next Priority Shift
 - 현재부터의 우선순위는 `새 기능 폭 확대`보다 아래 순서를 따른다.
-  1. Phase 5-G `Minimal Operator Ops Surface`
-  2. `orchestrator.py`의 남은 runtime 슬라이스 분리
-  3. self-growing bridge 효과성 검증
+  1. `orchestrator.py`의 남은 runtime 슬라이스 분리
+  2. enterprise 운영 계층 보강
+  3. dashboard write action/service 잔여 축소
 - 현재 가장 자연스러운 다음 후보:
-  - `remaining runtime split`
-  - 이후 `orchestrator` 남은 슬라이스 분리
-  - 현재 판단상 provider burst 계측, cooldown 전이, provider quarantine, provider circuit-breaker, planner/reviewer alternate route fallback, worker startup sweep trace, restart-safe requeue reason, running node/job mismatch audit, dead-letter 재큐잉 액션, operator note trail, dead-letter list / recovery history summary, provider outage history, startup sweep history, dead-letter / recovery action drilldown, recovery action groups, operator action trail까지는 올라왔다. `workspace_repository_runtime`, `preview_runtime`, `app_type_runtime`, `product_definition_runtime`, `improvement_runtime`, `ux_review_runtime`까지 분리됐고, 다음 조각은 memory helper 축소와 self-growing bridge 효과성 검증 쪽이다.
+  - `remaining runtime split` 잔여 정리
+  - 이후 enterprise 운영 계층 보강
+  - 현재 판단상 provider burst 계측, cooldown 전이, provider quarantine, provider circuit-breaker, planner/reviewer alternate route fallback, worker startup sweep trace, restart-safe requeue reason, running node/job mismatch audit, dead-letter 재큐잉 액션, operator note trail, dead-letter list / recovery history summary, provider outage history, startup sweep history, dead-letter / recovery action drilldown, recovery action groups, operator action trail까지는 올라왔다. `workspace_repository_runtime`, `preview_runtime`, `app_type_runtime`, `issue_spec_runtime`, `product_definition_runtime`, `product_review_runtime`, `artifact_io_runtime`, `design_governance_runtime`, `improvement_runtime`, `memory_retrieval_runtime`, `memory_quality_runtime`, `structured_memory_runtime`, `ux_review_runtime`, `template_artifact_runtime`, `tool_support_runtime`, `workflow_binding_runtime`, `job_execution_runtime`, `dashboard_job_action_runtime`까지 분리됐고, `summary_runtime`은 commit stage 본문을, `fixed_pipeline_runtime`은 legacy fixed pipeline 본문을 흡수했다. product-review operating principle alignment도 runtime 쪽으로 흡수됐다. self-growing bridge도 `_docs/SELF_GROWING_EFFECTIVENESS.json` baseline, 최근 7일 추세, 앱별 효과 분포, `failure_pattern_cluster` 기반 follow-up 효과, 재발 감소/유지/증가 집계, regressed reason 분포, insufficient baseline 원인 분포, 최근 회귀/기준 부족 사례까지 올라왔다. 다음 조각은 남은 runtime split 잔여 helper 축소와 enterprise 운영 계층 보강, dashboard write action/service 잔여 축소다.

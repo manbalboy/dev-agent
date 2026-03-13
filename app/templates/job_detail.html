@@ -133,6 +133,9 @@
           <div id="assistant-diagnosis-board" class="failure-summary"></div>
           <div id="failure-classification-board" class="failure-summary"></div>
           <div id="needs-human-board" class="failure-summary"></div>
+          <div id="integration-operator-boundary-board" class="failure-summary"></div>
+          <div id="integration-usage-trail-board" class="failure-summary"></div>
+          <div id="integration-health-facets-board" class="failure-summary"></div>
           <div id="dead-letter-board" class="failure-summary"></div>
           <div id="requeue-reason-board" class="failure-summary"></div>
           <div id="failure-summary" class="failure-summary"></div>
@@ -151,6 +154,8 @@
           <div id="workflow-config-board" class="failure-summary"></div>
           <div id="workflow-fallback-board" class="failure-summary"></div>
           <div id="workflow-lineage-board" class="failure-summary"></div>
+          <div id="workflow-self-growing-board" class="failure-summary"></div>
+          <div id="workflow-mobile-e2e-board" class="failure-summary"></div>
           <div id="workflow-operator-inputs-board" class="failure-summary"></div>
           <div id="workflow-resume-board" class="failure-summary"></div>
           <div id="workflow-memory-board" class="failure-summary"></div>
@@ -219,10 +224,15 @@
       let assistantDiagnosisTraceCache = null;
       let failureClassificationCache = null;
       let needsHumanSummaryCache = null;
+      let integrationOperatorBoundaryCache = null;
+      let integrationUsageTrailCache = null;
+      let integrationHealthFacetsCache = null;
       let deadLetterSummaryCache = null;
       let deadLetterActionTrailCache = [];
       let requeueReasonSummaryCache = null;
       let jobLineageCache = null;
+      let selfGrowingEffectivenessCache = null;
+      let mobileE2EResultCache = null;
       let logSummaryCache = null;
       let operatorInputsCache = null;
       let manualRetryOptionsCache = null;
@@ -459,6 +469,7 @@
         const userChannel = channels.user && typeof channels.user === "object" ? channels.user : {};
         const availableCount = Number(safeOperatorInputs.available_count || 0);
         const pendingCount = Number(safeOperatorInputs.pending_count || 0);
+        const blockedCount = Number(safeOperatorInputs.blocked_count || 0);
         const logStateSummary = `로그 ${debugChannel.exists ? "debug" : "-"} / ${userChannel.exists ? "user" : "-"}`;
 
         if (jobKindNode) {
@@ -475,16 +486,22 @@
             : "-";
         }
         if (operatorInputsNode) {
-          operatorInputsNode.innerHTML = `${availableCount ? `<span class="badge status-done">준비 ${esc(String(availableCount))}</span>` : `<span class="badge status-queued">준비 0</span>`} ${pendingCount ? `· <span class="badge status-running">대기 ${esc(String(pendingCount))}</span>` : ""}`;
+          operatorInputsNode.innerHTML = `${availableCount ? `<span class="badge status-done">준비 ${esc(String(availableCount))}</span>` : `<span class="badge status-queued">준비 0</span>`} ${pendingCount ? `· <span class="badge status-running">대기 ${esc(String(pendingCount))}</span>` : ""} ${blockedCount ? `· <span class="badge status-failed">차단 ${esc(String(blockedCount))}</span>` : ""}`;
           const summaryInputs = document.getElementById("job-summary-inputs");
           if (summaryInputs) {
-            summaryInputs.textContent = pendingCount ? `입력 대기 ${pendingCount}건` : `입력 준비 ${availableCount}건`;
+            summaryInputs.textContent = blockedCount
+              ? `입력 차단 ${blockedCount}건`
+              : pendingCount
+                ? `입력 대기 ${pendingCount}건`
+                : `입력 준비 ${availableCount}건`;
           }
           const summaryInputsNote = document.getElementById("job-summary-inputs-note");
           if (summaryInputsNote) {
-            summaryInputsNote.textContent = pendingCount
-              ? `준비됨 ${availableCount}건 · 아직 필요한 값 있음 · ${logStateSummary}`
-              : `준비됨 ${availableCount}건 · 바로 실행 가능 · ${logStateSummary}`;
+            summaryInputsNote.textContent = blockedCount
+              ? `준비됨 ${availableCount}건 · 정책상 차단 ${blockedCount}건 · ${logStateSummary}`
+              : pendingCount
+                ? `준비됨 ${availableCount}건 · 아직 필요한 값 있음 · ${logStateSummary}`
+                : `준비됨 ${availableCount}건 · 바로 실행 가능 · ${logStateSummary}`;
           }
         }
         if (logsNode) {
@@ -721,6 +738,194 @@
             </li>
             ${actionItems}
           </ul>
+        `;
+      }
+
+      function renderIntegrationOperatorBoundaryBoard(summary) {
+        const board = document.getElementById("integration-operator-boundary-board");
+        if (!board) return;
+        const item = summary && typeof summary === "object" ? summary : {};
+        if (!item.active) {
+          board.innerHTML = `<p class="failure-empty">현재 실패 작업에 연결된 통합 승인/입력 경계는 없습니다.</p>`;
+          return;
+        }
+        const candidates = Array.isArray(item.candidates) ? item.candidates : [];
+        const actions = Array.isArray(item.recommended_actions) ? item.recommended_actions : [];
+        const candidateHtml = candidates.length
+          ? candidates.map((candidate) => {
+              const blockedInputs = Array.isArray(candidate.blocked_inputs) ? candidate.blocked_inputs : [];
+              const blockedText = blockedInputs.length
+                ? blockedInputs.map((entry) => {
+                    const envVar = String(entry?.env_var_name || "-");
+                    const reason = String(entry?.bridge_reason || "").trim();
+                    return `${envVar}${reason ? ` · ${reason}` : ""}`;
+                  }).join("<br>")
+                : "직접 연결된 차단 입력 없음";
+              return `
+                <li class="failure-item">
+                  <span class="failure-type">${esc(String(candidate.display_name || candidate.integration_id || "-"))}</span>
+                  <span class="failure-text">
+                    <span class="badge status-running">${esc(String(candidate.input_readiness_status || candidate.recommendation_status || "operator"))}</span>
+                    · 승인 ${esc(String(candidate.approval_status || "-"))}
+                    · 필수 env ${esc((Array.isArray(candidate.required_env_keys) ? candidate.required_env_keys : []).join(", ") || "-")}
+                    ${candidate.reason ? `<br>${esc(String(candidate.reason || ""))}` : ""}
+                    ${candidate.input_readiness_reason ? `<br>${esc(String(candidate.input_readiness_reason || ""))}` : ""}
+                    <br><strong>차단 입력:</strong> ${blockedText}
+                  </span>
+                </li>
+              `;
+            }).join("")
+          : `<li class="failure-item"><span class="failure-type">candidate</span><span class="failure-text">연결된 통합 후보가 없습니다.</span></li>`;
+        const actionHtml = actions.length
+          ? actions.map((action) => `<li class="failure-item"><span class="failure-type">조치</span><span class="failure-text">${esc(String(action || ""))}</span></li>`).join("")
+          : `<li class="failure-item"><span class="failure-type">조치</span><span class="failure-text">운영자 판단이 필요합니다.</span></li>`;
+        board.innerHTML = `
+          <h3>통합 승인 경계</h3>
+          <ul class="failure-list">
+            <li class="failure-item type-warn">
+              <span class="failure-type">상태</span>
+              <span class="failure-text"><code>${esc(String(item.boundary_status || "-"))}</code> · ${esc(String(item.boundary_status_label || "-"))}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">요약</span>
+              <span class="failure-text">${esc(String(item.summary || "-"))}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">후보 수</span>
+              <span class="failure-text">${esc(String(item.candidate_count || 0))}개 · blocked ${esc(String(item.blocked_input_count || 0))}개 · pending ${esc(String(item.pending_input_count || 0))}개</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">artifact</span>
+              <span class="failure-text">${esc(String(item.artifact_path || "-"))}</span>
+            </li>
+            ${actionHtml}
+          </ul>
+          <section class="stage-snapshot">
+            <h4>연결된 통합 후보</h4>
+            <ul class="failure-list">${candidateHtml}</ul>
+          </section>
+        `;
+      }
+
+      function renderIntegrationUsageTrailBoard(summary) {
+        const board = document.getElementById("integration-usage-trail-board");
+        if (!board) return;
+        const item = summary && typeof summary === "object" ? summary : {};
+        if (!item.active) {
+          board.innerHTML = `<p class="failure-empty">현재 작업에 기록된 통합 사용 trail이 없습니다.</p>`;
+          return;
+        }
+        const recentEvents = Array.isArray(item.recent_events) ? item.recent_events : [];
+        const eventHtml = recentEvents.length
+          ? recentEvents.map((event) => {
+              const integrations = Array.isArray(event.items) ? event.items : [];
+              const integrationText = integrations.length
+                ? integrations.map((integration) => {
+                    const keywords = Array.isArray(integration.matched_keywords) ? integration.matched_keywords.filter(Boolean) : [];
+                    return `${String(integration.display_name || integration.integration_id || "-")} · ${String(integration.usage_status || "prompt_injected")} · env ${String(((integration.required_input_summary || {}).provided ?? 0))}/${String(((integration.required_input_summary || {}).total ?? 0))}${keywords.length ? ` · ${keywords.join(", ")}` : ""}`;
+                  }).join("<br>")
+                : "실제 주입된 통합이 없습니다.";
+              const blockedEnvVars = Array.isArray(event.blocked_env_vars) ? event.blocked_env_vars.filter(Boolean) : [];
+              return `
+                <li class="failure-item">
+                  <span class="failure-type">${esc(stageDisplayName(String(event.stage || "-")))} · ${esc(String(event.route || "-"))}</span>
+                  <span class="failure-text">
+                    ${esc(formatKstDateTime(String(event.generated_at || "")) || "-")}
+                    · 통합 ${esc(String(event.integration_count || 0))}개
+                    ${blockedEnvVars.length ? ` · blocked ${esc(blockedEnvVars.join(", "))}` : ""}
+                    ${event.prompt_path ? `<br><code>${esc(String(event.prompt_path || ""))}</code>` : ""}
+                    <br>${integrationText}
+                  </span>
+                </li>
+              `;
+            }).join("")
+          : `<li class="failure-item"><span class="failure-type">이력</span><span class="failure-text">최근 사용 기록이 없습니다.</span></li>`;
+        board.innerHTML = `
+          <h3>통합 사용 Trail</h3>
+          <ul class="failure-list">
+            <li class="failure-item type-info">
+              <span class="failure-type">요약</span>
+              <span class="failure-text">총 이벤트 ${esc(String(item.event_count || 0))}건 · 실제 사용 통합 ${esc(String(item.used_integration_count || 0))}개</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">통합 ID</span>
+              <span class="failure-text">${esc((Array.isArray(item.used_integration_ids) ? item.used_integration_ids : []).join(", ") || "-")}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">artifact</span>
+              <span class="failure-text">${esc(String(item.artifact_path || "-"))}</span>
+            </li>
+          </ul>
+          <section class="stage-snapshot">
+            <h4>최근 사용 이력</h4>
+            <ul class="failure-list">${eventHtml}</ul>
+          </section>
+        `;
+      }
+
+      function renderIntegrationHealthFacetsBoard(summary) {
+        const board = document.getElementById("integration-health-facets-board");
+        if (!board) return;
+        const item = summary && typeof summary === "object" ? summary : {};
+        if (!item.active) {
+          board.innerHTML = `<p class="failure-empty">현재 작업에서 통합 관련 health facet은 감지되지 않았습니다.</p>`;
+          return;
+        }
+        const missing = item.missing_input && typeof item.missing_input === "object" ? item.missing_input : {};
+        const auth = item.auth && typeof item.auth === "object" ? item.auth : {};
+        const quota = item.quota && typeof item.quota === "object" ? item.quota : {};
+        const missingCandidates = Array.isArray(missing.candidates) ? missing.candidates : [];
+        const missingHtml = missingCandidates.length
+          ? missingCandidates.map((candidate) => {
+              const blockedInputs = Array.isArray(candidate.blocked_inputs) ? candidate.blocked_inputs : [];
+              const blockedText = blockedInputs.length
+                ? blockedInputs.map((entry) => {
+                    const envVar = String(entry?.env_var_name || "-");
+                    const reason = String(entry?.bridge_reason || "").trim();
+                    return `${envVar}${reason ? ` · ${reason}` : ""}`;
+                  }).join("<br>")
+                : "직접 연결된 차단 입력 없음";
+              return `
+                <li class="failure-item">
+                  <span class="failure-type">${esc(String(candidate.display_name || candidate.integration_id || "-"))}</span>
+                  <span class="failure-text">
+                    ${esc(String(candidate.input_readiness_reason || candidate.input_readiness_status || "-"))}
+                    ${candidate.used_in_this_job ? `<br>최근 사용 이력 있음` : ""}
+                    <br><strong>차단 입력:</strong> ${blockedText}
+                  </span>
+                </li>
+              `;
+            }).join("")
+          : `<li class="failure-item"><span class="failure-type">입력</span><span class="failure-text">미연결 통합 후보가 없습니다.</span></li>`;
+        board.innerHTML = `
+          <h3>통합 Health Facet</h3>
+          <ul class="failure-list">
+            <li class="failure-item ${missing.active ? "type-warn" : ""}">
+              <span class="failure-type">Missing Input</span>
+              <span class="failure-text">
+                ${missing.active ? esc(String(missing.summary || "-")) : "없음"}
+                ${missing.active ? `<br>후보 ${esc(String(missing.candidate_count || 0))}개 · blocked ${esc((Array.isArray(missing.blocked_env_vars) ? missing.blocked_env_vars : []).join(", ") || "-")}` : ""}
+              </span>
+            </li>
+            <li class="failure-item ${auth.active ? "type-warn" : ""}">
+              <span class="failure-type">Auth</span>
+              <span class="failure-text">
+                ${auth.active ? esc(String(auth.summary || "-")) : "없음"}
+                ${auth.active ? `<br>provider ${esc(String(auth.provider_hint || "-"))} · stage ${esc(String(auth.stage_family || "-"))}` : ""}
+              </span>
+            </li>
+            <li class="failure-item ${quota.active ? "type-warn" : ""}">
+              <span class="failure-type">Quota</span>
+              <span class="failure-text">
+                ${quota.active ? esc(String(quota.summary || "-")) : "없음"}
+                ${quota.active ? `<br>provider ${esc(String(quota.provider_hint || "-"))} · stage ${esc(String(quota.stage_family || "-"))}` : ""}
+              </span>
+            </li>
+          </ul>
+          <section class="stage-snapshot">
+            <h4>미연결 / 대기 통합</h4>
+            <ul class="failure-list">${missingHtml}</ul>
+          </section>
         `;
       }
 
@@ -1807,6 +2012,216 @@
         `;
       }
 
+      function renderWorkflowSelfGrowingBoard(effectiveness) {
+        const board = document.getElementById("workflow-self-growing-board");
+        if (!board) return;
+
+        const item = effectiveness && typeof effectiveness === "object" ? effectiveness : {};
+        const expected = Boolean(item.expected);
+        const active = Boolean(item.active);
+        if (!expected && !active) {
+          board.innerHTML = `<p class="failure-empty">현재 작업은 후속 개선 효과 비교 대상이 아닙니다.</p>`;
+          return;
+        }
+        if (!active) {
+          board.innerHTML = `
+            <h3>후속 개선 효과</h3>
+            <ul class="failure-list">
+              <li class="failure-item type-warn">
+                <span class="failure-type">상태</span>
+                <span class="failure-text">artifact 대기 중</span>
+              </li>
+              <li class="failure-item">
+                <span class="failure-type">artifact</span>
+                <span class="failure-text">${esc(String(item.artifact_path || "-"))}</span>
+              </li>
+            </ul>
+          `;
+          return;
+        }
+
+        const current = item.current && typeof item.current === "object" ? item.current : {};
+        const parent = item.parent && typeof item.parent === "object" ? item.parent : {};
+        const deltas = item.deltas && typeof item.deltas === "object" ? item.deltas : {};
+        const reasons = Array.isArray(item.status_reasons) ? item.status_reasons : [];
+        const missing = Array.isArray(item.baseline_missing) ? item.baseline_missing : [];
+        const clusterRecurrence = item.cluster_recurrence && typeof item.cluster_recurrence === "object"
+          ? item.cluster_recurrence
+          : {};
+        const status = String(item.status || "").trim();
+        const statusClass = status === "improved" ? "done" : status === "regressed" ? "failed" : status === "unchanged" ? "running" : "queued";
+        const reviewDelta = deltas.review_overall;
+        const maturityDelta = deltas.maturity_score;
+        const gateDelta = Number(deltas.quality_gate_passed || 0);
+        const reasonsHtml = reasons.length
+          ? reasons.map((reason) => `<li class="failure-item"><span class="failure-type">근거</span><span class="failure-text">${esc(String(reason || ""))}</span></li>`).join("")
+          : `<li class="failure-item"><span class="failure-type">근거</span><span class="failure-text">상세 근거가 없습니다.</span></li>`;
+        const baselineHtml = missing.length
+          ? `<li class="failure-item type-warn"><span class="failure-type">기준 부족</span><span class="failure-text">${esc(missing.join(", "))}</span></li>`
+          : "";
+        const clusterRecurrenceHtml = clusterRecurrence.active
+          ? `
+            <section class="stage-snapshot">
+              <h4>실패 클러스터 재발 감소</h4>
+              <ul class="failure-list">
+                <li class="failure-item">
+                  <span class="failure-type">패턴</span>
+                  <span class="failure-text">${esc(String(clusterRecurrence.pattern_id || "-"))}</span>
+                </li>
+                <li class="failure-item">
+                  <span class="failure-type">상태</span>
+                  <span class="failure-text"><span class="badge status-${String(clusterRecurrence.status || "").trim() === "reduced" ? "done" : String(clusterRecurrence.status || "").trim() === "increased" ? "failed" : String(clusterRecurrence.status || "").trim() === "unchanged" ? "running" : "queued"}">${esc(String(clusterRecurrence.status_label || clusterRecurrence.status || "-"))}</span></span>
+                </li>
+                <li class="failure-item">
+                  <span class="failure-type">기준/현재</span>
+                  <span class="failure-text">${esc(String(clusterRecurrence.baseline_count ?? "-"))} → ${esc(String(clusterRecurrence.current_count ?? "-"))}</span>
+                </li>
+                <li class="failure-item">
+                  <span class="failure-type">변화량</span>
+                  <span class="failure-text">${clusterRecurrence.delta_count === null || clusterRecurrence.delta_count === undefined ? "-" : esc(String(clusterRecurrence.delta_count > 0 ? "+" : "") + clusterRecurrence.delta_count)}</span>
+                </li>
+                <li class="failure-item">
+                  <span class="failure-type">요약</span>
+                  <span class="failure-text">${esc(String(clusterRecurrence.summary || "-"))}</span>
+                </li>
+                ${Array.isArray(clusterRecurrence.missing) && clusterRecurrence.missing.length ? `<li class="failure-item type-warn"><span class="failure-type">기준 부족</span><span class="failure-text">${esc(clusterRecurrence.missing.join(", "))}</span></li>` : ""}
+              </ul>
+            </section>
+          `
+          : "";
+
+        board.innerHTML = `
+          <h3>후속 개선 효과</h3>
+          <ul class="failure-list">
+            <li class="failure-item type-${statusClass === "failed" ? "error" : statusClass === "queued" ? "warn" : "info"}">
+              <span class="failure-type">상태</span>
+              <span class="failure-text"><span class="badge status-${statusClass}">${esc(String(item.status_label || status || "-"))}</span> · <code>${esc(status || "-")}</code></span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">요약</span>
+              <span class="failure-text">${esc(String(item.summary || "-"))}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">부모 작업</span>
+              <span class="failure-text">${esc(String(item.parent_job_id || "-"))}${item.parent_job_title ? ` · ${esc(String(item.parent_job_title || ""))}` : ""}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">Backlog</span>
+              <span class="failure-text">${esc(String(item.backlog_candidate_id || "-"))}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">리뷰 점수 변화</span>
+              <span class="failure-text">${reviewDelta === null || reviewDelta === undefined ? "-" : esc(String(reviewDelta > 0 ? "+" : "") + reviewDelta)}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">성숙도 변화</span>
+              <span class="failure-text">${maturityDelta === null || maturityDelta === undefined ? "-" : esc(String(maturityDelta > 0 ? "+" : "") + maturityDelta)}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">품질 게이트</span>
+              <span class="failure-text">${gateDelta > 0 ? "통과로 개선" : gateDelta < 0 ? "통과 상태 상실" : "변화 없음"}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">artifact</span>
+              <span class="failure-text">${esc(String(item.artifact_path || "-"))}</span>
+            </li>
+            ${baselineHtml}
+          </ul>
+          <section class="stage-snapshot">
+            <h4>현재 vs 부모</h4>
+            <ul class="failure-list">
+              <li class="failure-item">
+                <span class="failure-type">현재</span>
+                <span class="failure-text">review ${esc(String(current.review_overall ?? "-"))} / maturity ${esc(String(current.maturity_level || "-"))} (${esc(String(current.maturity_score ?? "-"))}) / trend ${esc(String(current.quality_trend_direction || "-"))}</span>
+              </li>
+              <li class="failure-item">
+                <span class="failure-type">부모</span>
+                <span class="failure-text">review ${esc(String(parent.review_overall ?? "-"))} / maturity ${esc(String(parent.maturity_level || "-"))} (${esc(String(parent.maturity_score ?? "-"))})</span>
+              </li>
+            </ul>
+          </section>
+          <section class="stage-snapshot">
+            <h4>판정 근거</h4>
+            <ul class="failure-list">${reasonsHtml}</ul>
+          </section>
+          ${clusterRecurrenceHtml}
+        `;
+      }
+
+      function mobileE2EStatusBadgeClass(status) {
+        const value = String(status || "").trim();
+        if (value === "passed") return "done";
+        if (value === "failed") return "failed";
+        if (value === "blocked") return "queued";
+        return "running";
+      }
+
+      function mobileE2EStatusLabel(status) {
+        const value = String(status || "").trim();
+        switch (value) {
+          case "passed":
+            return "통과";
+          case "failed":
+            return "실패";
+          case "blocked":
+            return "차단";
+          default:
+            return value || "미기록";
+        }
+      }
+
+      function renderWorkflowMobileE2EBoard(result) {
+        const board = document.getElementById("workflow-mobile-e2e-board");
+        if (!board) return;
+
+        const item = result && typeof result === "object" ? result : {};
+        const active = Boolean(item.active);
+        if (!active) {
+          board.innerHTML = `<p class="failure-empty">모바일 E2E 결과가 아직 기록되지 않았습니다.</p>`;
+          return;
+        }
+
+        const badgeClass = mobileE2EStatusBadgeClass(item.status);
+        const bootedLabel = item.booted ? "에뮬레이터 준비 완료" : "에뮬레이터 재사용/확인 필요";
+        board.innerHTML = `
+          <h3>모바일 E2E 결과</h3>
+          <ul class="failure-list">
+            <li class="failure-item type-${badgeClass === "failed" ? "error" : badgeClass === "queued" ? "warn" : "info"}">
+              <span class="failure-type">상태</span>
+              <span class="failure-text"><span class="badge status-${badgeClass}">${esc(mobileE2EStatusLabel(item.status))}</span> · ${esc(String(item.platform || "-"))}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">대상</span>
+              <span class="failure-text">${esc(String(item.target_name || "-"))} · <code>${esc(String(item.target_id || "-"))}</code></span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">러너</span>
+              <span class="failure-text">${esc(String(item.runner || "-"))}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">실행 명령</span>
+              <span class="failure-text"><code>${esc(String(item.command || "-"))}</code></span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">실행 시각</span>
+              <span class="failure-text">${esc(formatKstDateTime(String(item.generated_at || "")))}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">에뮬레이터</span>
+              <span class="failure-text">${esc(bootedLabel)}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">메모</span>
+              <span class="failure-text">${esc(String(item.notes || "-"))}</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">artifact</span>
+              <span class="failure-text">${esc(String(item.artifact_path || "-"))}</span>
+            </li>
+          </ul>
+        `;
+      }
+
       function renderWorkflowOperatorInputsBoard(operatorInputs) {
         const board = document.getElementById("workflow-operator-inputs-board");
         if (!board) return;
@@ -1814,7 +2229,9 @@
         const payload = operatorInputs && typeof operatorInputs === "object" ? operatorInputs : {};
         const resolvedInputs = Array.isArray(payload.resolved_inputs) ? payload.resolved_inputs : [];
         const pendingInputs = Array.isArray(payload.pending_inputs) ? payload.pending_inputs : [];
+        const blockedInputs = Array.isArray(payload.blocked_inputs) ? payload.blocked_inputs : [];
         const availableEnvVars = Array.isArray(payload.available_env_vars) ? payload.available_env_vars : [];
+        const blockedEnvVars = Array.isArray(payload.blocked_env_vars) ? payload.blocked_env_vars : [];
 
         const resolvedHtml = resolvedInputs.length
           ? resolvedInputs.map((item) => `
@@ -1842,6 +2259,19 @@
             `).join("")
           : `<li class="failure-item"><span class="failure-type">pending</span><span class="failure-text">대기 중 입력 없음</span></li>`;
 
+        const blockedHtml = blockedInputs.length
+          ? blockedInputs.map((item) => `
+              <li class="failure-item type-warn">
+                <span class="failure-type">${esc(String(item?.label || item?.key || "-"))}</span>
+                <span class="failure-text">
+                  <span class="badge status-failed">blocked</span>
+                  · ${esc(String(item?.env_var_name || "-"))}
+                  ${item?.bridge_reason ? ` · ${esc(String(item?.bridge_reason || ""))}` : ""}
+                </span>
+              </li>
+            `).join("")
+          : `<li class="failure-item"><span class="failure-type">blocked</span><span class="failure-text">정책상 차단된 입력 없음</span></li>`;
+
         board.innerHTML = `
           <h3>Operator Inputs</h3>
           <ul class="failure-list">
@@ -1852,6 +2282,10 @@
             <li class="failure-item">
               <span class="failure-type">pending</span>
               <span class="failure-text">${esc(String(payload.pending_count || 0))}개</span>
+            </li>
+            <li class="failure-item">
+              <span class="failure-type">blocked</span>
+              <span class="failure-text">${esc(String(payload.blocked_count || 0))}개 · ${esc(blockedEnvVars.join(", ") || "-")}</span>
             </li>
             <li class="failure-item">
               <span class="failure-type">artifact</span>
@@ -1865,6 +2299,10 @@
           <section class="stage-snapshot">
             <h4>대기 중 입력</h4>
             <ul class="failure-list">${pendingHtml}</ul>
+          </section>
+          <section class="stage-snapshot">
+            <h4>정책상 차단된 입력</h4>
+            <ul class="failure-list">${blockedHtml}</ul>
           </section>
         `;
       }
@@ -3125,6 +3563,15 @@
           needsHumanSummaryCache = payload.needs_human_summary && typeof payload.needs_human_summary === "object"
             ? payload.needs_human_summary
             : null;
+          integrationOperatorBoundaryCache = payload.integration_operator_boundary && typeof payload.integration_operator_boundary === "object"
+            ? payload.integration_operator_boundary
+            : null;
+          integrationUsageTrailCache = payload.integration_usage_trail && typeof payload.integration_usage_trail === "object"
+            ? payload.integration_usage_trail
+            : null;
+          integrationHealthFacetsCache = payload.integration_health_facets && typeof payload.integration_health_facets === "object"
+            ? payload.integration_health_facets
+            : null;
           deadLetterSummaryCache = payload.dead_letter_summary && typeof payload.dead_letter_summary === "object"
             ? payload.dead_letter_summary
             : null;
@@ -3133,6 +3580,12 @@
             : [];
           requeueReasonSummaryCache = payload.requeue_reason_summary && typeof payload.requeue_reason_summary === "object"
             ? payload.requeue_reason_summary
+            : null;
+          selfGrowingEffectivenessCache = payload.self_growing_effectiveness && typeof payload.self_growing_effectiveness === "object"
+            ? payload.self_growing_effectiveness
+            : null;
+          mobileE2EResultCache = payload.mobile_e2e_result && typeof payload.mobile_e2e_result === "object"
+            ? payload.mobile_e2e_result
             : null;
           jobLineageCache = payload.job_lineage && typeof payload.job_lineage === "object"
             ? payload.job_lineage
@@ -3155,10 +3608,15 @@
           renderAssistantDiagnosisBoard(assistantDiagnosisTraceCache);
           renderFailureClassificationBoard(failureClassificationCache, payload.runtime_recovery_trace);
           renderNeedsHumanBoard(needsHumanSummaryCache);
+          renderIntegrationOperatorBoundaryBoard(integrationOperatorBoundaryCache);
+          renderIntegrationUsageTrailBoard(integrationUsageTrailCache);
+          renderIntegrationHealthFacetsBoard(integrationHealthFacetsCache);
           renderDeadLetterBoard(deadLetterSummaryCache, deadLetterActionTrailCache);
           renderRequeueReasonBoard(requeueReasonSummaryCache);
           renderWorkflowLane(debugEntriesCache, currentStageCode);
           renderWorkflowManualPanel(manualRetryOptionsCache, resumeStateCache);
+          renderWorkflowSelfGrowingBoard(selfGrowingEffectivenessCache);
+          renderWorkflowMobileE2EBoard(mobileE2EResultCache);
           if (docsChanged && firstUserLogLoaded && lastUserLogText) {
             renderUserLog(lastUserLogText);
           }
