@@ -88,6 +88,7 @@ def default_roles_payload() -> Dict[str, Any]:
     ]
     tool_defaults = {
         "ai-helper": ["log_lookup", "repo_search", "memory_search"],
+        "architect": ["research_search", "repo_search", "memory_search"],
         "data-ai-engineer": ["log_lookup", "repo_search", "memory_search"],
         "incident-analyst": ["log_lookup", "repo_search", "memory_search"],
         "orchestration-helper": ["log_lookup", "repo_search", "memory_search"],

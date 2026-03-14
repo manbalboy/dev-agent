@@ -7,6 +7,30 @@
 
 ## 1. 이번 턴까지 완료한 것
 
+### Phase 8-A planner evidence tool loop expansion baseline
+
+- planner role이 이제 `research_search`만이 아니라 `repo_search`, `memory_search`도 요청할 수 있게 열렸다.
+  - [config/roles.json](../config/roles.json)
+  - [app/dashboard_roles_runtime.py](../app/dashboard_roles_runtime.py)
+- [app/prompt_builder.py](../app/prompt_builder.py) 의 planner `TOOL_REQUEST` 규칙도 현재 계약에 맞게 확장했다.
+  - `research_search`: 외부 최신 정보/문서 근거
+  - `repo_search`: 현재 저장소 코드/파일/심볼 근거
+  - `memory_search`: 과거 decision/failure/convention memory 근거
+- 현재 상태:
+  - planner는 이제 외부 검색만 보지 않고 저장소 내부 evidence와 memory evidence도 능동적으로 끌어올 수 있다.
+  - 아직 `log_lookup`까지 planner에 열지는 않았다. 이번 슬라이스는 planning 품질에 직접 필요한 `repo/memory` 경계까지만 연다.
+- 다음 우선순위 1~3:
+  1. `8-A. graph/subgraph primary-candidate 승격`
+  2. `8-C. self-growing signal -> next strategy 입력 강제`
+  3. `8-D. graph/subgraph visualization baseline`
+- 리스크 / 가정:
+  - tool을 더 열었지만 planner prompt가 실제로 어떤 tool을 고를지는 모델 판단에 따른다.
+  - 이번 슬라이스는 permission/contract 확장이고, route selection 품질 최적화는 이후 과제다.
+- 검증 결과:
+  - `.venv/bin/python -m py_compile app/prompt_builder.py app/dashboard_roles_runtime.py tests/test_ai_role_routing.py tests/test_jobs_dashboard_api.py` -> `ok`
+  - `.venv/bin/python -m pytest -q tests/test_ai_role_routing.py tests/test_jobs_dashboard_api.py -k "route_runtime_context_with_skills_and_tools or default_catalog_hides_legacy_provider_roles"` -> `2 passed, 38 deselected`
+  - `.venv/bin/python -m pytest -q tests/test_dashboard_roles_runtime.py` -> `3 passed`
+
 ### Phase 8-B first slice: vector retrieval prompt-input rollout baseline
 
 - [app/memory_retrieval_runtime.py](../app/memory_retrieval_runtime.py) 가 이제 `vector_memory_retrieval` 활성 시 `memory_search` tool 뿐 아니라 planner / reviewer / coder용 `MEMORY_CONTEXT.json` 생성에도 Qdrant vector 후보를 섞는다.

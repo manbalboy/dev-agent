@@ -37,6 +37,7 @@
 - `loop_until_pass`
 - `node_runs`
 - failed-safe resume / manual resume
+- planner TOOL_REQUEST가 `research_search` 뿐 아니라 `repo_search`, `memory_search`까지 요청 가능한 baseline
 
 즉, 선형만 있는 상태는 이미 아니다. 남은 일은 graph/subgraph를 더 명시적이고 reusable하게 승격하는 것이다.
 

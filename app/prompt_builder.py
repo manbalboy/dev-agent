@@ -740,11 +740,13 @@ def build_planner_prompt(
         - 최신 정보/외부 근거가 없어 계획 품질이 떨어질 때만 TOOL_REQUEST를 출력.
         - TOOL_REQUEST를 출력할 때는 PLAN 본문을 쓰지 말고 아래 포맷만 출력.
         [TOOL_REQUEST]
-        tool: research_search
+        tool: <research_search|repo_search|memory_search>
         query: <한 줄 검색 질의>
         reason: <왜 필요한지 한 줄>
         [/TOOL_REQUEST]
-        - tool 값은 반드시 research_search만 허용.
+        - research_search: 최신 외부 정보/문서 근거가 필요할 때 사용.
+        - repo_search: 현재 저장소의 코드/파일/심볼 근거가 더 필요할 때 사용.
+        - memory_search: 과거 decision/failure/convention memory 근거가 더 필요할 때 사용.
         """
     ).strip()
     if role_context.strip():

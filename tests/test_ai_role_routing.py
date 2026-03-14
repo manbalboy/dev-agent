@@ -22,7 +22,7 @@ def _write_roles(path: Path) -> None:
                         "cli": "gemini",
                         "template_key": "planner",
                         "skills": ["repo-reading", "mvp-planning"],
-                        "allowed_tools": ["research_search"],
+                        "allowed_tools": ["research_search", "repo_search", "memory_search"],
                         "enabled": True,
                     },
                     {
@@ -83,7 +83,7 @@ def test_default_ai_role_router_matches_primary_strategy(tmp_path: Path) -> None
     assert planner.cli == "gemini"
     assert planner.template_keys == ("planner",)
     assert planner.skills == ("repo-reading", "mvp-planning")
-    assert planner.allowed_tools == ("research_search",)
+    assert planner.allowed_tools == ("research_search", "repo_search", "memory_search")
 
     assert reviewer.role_code == "reviewer"
     assert reviewer.cli == "gemini"
@@ -266,6 +266,8 @@ def test_orchestrator_builds_route_runtime_context_with_skills_and_tools(app_com
     planner_context = orchestrator._build_route_runtime_context("planner")
 
     assert "attached_skills: repo-reading, mvp-planning" in planner_context
-    assert "allowed_tools: research_search" in planner_context
+    assert "allowed_tools: research_search, repo_search, memory_search" in planner_context
     assert orchestrator._route_allows_tool("planner", "research_search") is True
+    assert orchestrator._route_allows_tool("planner", "repo_search") is True
+    assert orchestrator._route_allows_tool("planner", "memory_search") is True
     assert orchestrator._route_allows_tool("planner", "unknown_tool") is False

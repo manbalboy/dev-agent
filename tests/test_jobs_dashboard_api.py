@@ -2528,6 +2528,8 @@ def test_roles_api_default_catalog_hides_legacy_provider_roles(app_components, m
     assert helper_templates["data-ai-engineer"] == "codex_helper"
     assert helper_templates["summary-reviewer"] == "reviewer"
     assert helper_templates["test-reviewer"] == "reviewer"
+    assert helper_templates["architect"] == "planner"
+    assert helper_tools["architect"] == ["research_search", "repo_search", "memory_search"]
     assert helper_tools["ai-helper"] == ["log_lookup", "repo_search", "memory_search"]
     assert helper_tools["incident-analyst"] == ["log_lookup", "repo_search", "memory_search"]
     assert helper_tools["orchestration-helper"] == ["log_lookup", "repo_search", "memory_search"]
