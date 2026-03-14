@@ -42,6 +42,14 @@ def test_repo_hygiene_detects_tracked_secret_and_unsafe_examples(tmp_path: Path)
     assert "forbidden tracked file present: .webhook_secret.txt" in errors
     assert ".env.example must not enable allow-all CORS by default" in errors
     assert ".env.example must not use wildcard CORS origins by default" in errors
+    assert ".env.example must declare AGENTHUB_PUBLIC_BASE_URL" in errors
+    assert ".env.example must declare AGENTHUB_ENFORCE_HTTPS" in errors
+    assert ".env.example must declare AGENTHUB_TRUST_X_FORWARDED_PROTO" in errors
+    assert ".env.example must declare AGENTHUB_SELF_CHECK_ALERT_WEBHOOK_URL" in errors
+    assert ".env.example must declare AGENTHUB_SELF_CHECK_ALERT_CRITICAL_WEBHOOK_URL" in errors
+    assert ".env.example must declare AGENTHUB_SELF_CHECK_ALERT_WEBHOOK_TIMEOUT_SECONDS" in errors
+    assert ".env.example must declare AGENTHUB_SELF_CHECK_ALERT_REPEAT_MINUTES" in errors
+    assert ".env.example must declare AGENTHUB_SELF_CHECK_ALERT_FAILURE_BACKOFF_MAX_MINUTES" in errors
     assert "config/ai_commands.example.json must keep dangerous codex flags opt-in" in errors
     assert "required production-readiness file missing: SECURITY.md" in errors
     assert "required production-readiness file missing: CONTRIBUTING.md" in errors

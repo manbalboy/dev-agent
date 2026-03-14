@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, List
 from app.config import AppSettings
 from app.dead_letter_policy import build_dead_letter_summary
 from app.dashboard_integration_registry_runtime import DashboardIntegrationRegistryRuntime
+from app.failure_classification import build_failure_evidence_summary, classify_runtime_recovery_event
 from app.log_signal_utils import classify_cli_health_hint, is_optional_helper_actor
 from app.models import JobRecord
 from app.needs_human_policy import build_needs_human_summary
@@ -51,6 +52,53 @@ class DashboardJobRuntime:
         except json.JSONDecodeError:
             return {}
         return payload if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def read_dashboard_jsonl(path: Path) -> List[Dict[str, Any]]:
+        """Read one JSONL dashboard artifact into dict entries."""
+
+        if not path.exists():
+            return []
+        entries: List[Dict[str, Any]] = []
+        for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                entries.append(payload)
+        return entries
+
+    @staticmethod
+    def top_counter_items(counter: Counter[str], *, limit: int = 5) -> List[Dict[str, Any]]:
+        """Convert counter into stable top-N payload for dashboard rendering."""
+
+        return [
+            {"name": name, "count": count}
+            for name, count in sorted(counter.items(), key=lambda item: (-item[1], item[0]))[:limit]
+            if str(name).strip()
+        ]
+
+    @staticmethod
+    def safe_average(values: List[float]) -> float | None:
+        """Return rounded average or None when list is empty."""
+
+        cleaned = [float(value) for value in values if value is not None]
+        if not cleaned:
+            return None
+        return round(sum(cleaned) / len(cleaned), 2)
+
+    @staticmethod
+    def latest_non_empty(values: List[str]) -> str:
+        """Return latest non-empty ISO-like string using lexical max."""
+
+        normalized = [str(value).strip() for value in values if str(value).strip()]
+        if not normalized:
+            return ""
+        return max(normalized)
 
     @staticmethod
     def job_execution_repository(job: JobRecord) -> str:
@@ -150,6 +198,61 @@ class DashboardJobRuntime:
             "trace_path": str(paths["assistant_diagnosis_trace"]),
             "combined_context_length": int(trace_payload.get("combined_context_length", 0) or 0),
             "tool_runs": tool_runs if isinstance(tool_runs, list) else [],
+        }
+
+    def read_job_runtime_recovery_trace(self, job: JobRecord) -> Dict[str, Any]:
+        """Read one job's structured runtime recovery trace artifact."""
+
+        workspace_path = self.job_workspace_path(job)
+        paths = build_workflow_artifact_paths(workspace_path)
+        trace_payload = self.read_dashboard_json(paths["runtime_recovery_trace"])
+        if not isinstance(trace_payload, dict):
+            return {}
+
+        raw_events = trace_payload.get("events", [])
+        events: List[Dict[str, Any]] = []
+        if isinstance(raw_events, list):
+            for item in raw_events:
+                if not isinstance(item, dict):
+                    continue
+                enriched = dict(item)
+                evidence = build_failure_evidence_summary(
+                    reason_code=str(enriched.get("reason_code", "")),
+                    reason=str(enriched.get("reason", "")),
+                    stage=str(enriched.get("stage", "")),
+                    source=str(enriched.get("source", "")),
+                    generated_at=str(enriched.get("generated_at", "")),
+                    details=enriched.get("details") if isinstance(enriched.get("details"), dict) else None,
+                    failure_class=str(enriched.get("failure_class", "")) or classify_runtime_recovery_event(enriched),
+                )
+                enriched["failure_class"] = evidence["failure_class"]
+                enriched["provider_hint"] = evidence["provider_hint"]
+                enriched["stage_family"] = evidence["stage_family"]
+                events.append(enriched)
+
+        latest_failure_class = ""
+        latest_provider_hint = ""
+        latest_stage_family = ""
+        latest_needs_human_summary: Dict[str, Any] = {}
+        if events:
+            latest_failure_class = str(events[-1].get("failure_class", "")).strip()
+            latest_provider_hint = str(events[-1].get("provider_hint", "")).strip()
+            latest_stage_family = str(events[-1].get("stage_family", "")).strip()
+            for event in reversed(events):
+                summary = event.get("needs_human_summary")
+                if isinstance(summary, dict) and summary.get("active"):
+                    latest_needs_human_summary = dict(summary)
+                    break
+        return {
+            "trace_path": str(paths["runtime_recovery_trace"]),
+            "generated_at": str(trace_payload.get("generated_at", "")).strip(),
+            "latest_event_at": str(trace_payload.get("latest_event_at", "")).strip(),
+            "event_count": int(trace_payload.get("event_count", 0) or 0),
+            "latest_failure_class": latest_failure_class,
+            "latest_provider_hint": latest_provider_hint,
+            "latest_stage_family": latest_stage_family,
+            "latest_needs_human_summary": latest_needs_human_summary,
+            "events": events,
         }
 
     @staticmethod

@@ -7,6 +7,7 @@ from app.models import (
     JobRecord,
     JobStage,
     JobStatus,
+    PatchRunRecord,
     RuntimeInputRecord,
     utc_now_iso,
 )
@@ -208,3 +209,41 @@ def test_store_persists_integration_registry_records(tmp_path):
 
     listed = store.list_integration_registry_entries()
     assert listed[0].integration_id == "google_maps"
+
+
+def test_store_persists_patch_run_records(tmp_path):
+    store = SQLiteJobStore(tmp_path / "jobs.db")
+    now = utc_now_iso()
+    record = PatchRunRecord(
+        patch_run_id="patch-1",
+        status="waiting_updater",
+        repo_root="/srv/agenthub",
+        branch="master",
+        upstream_ref="origin/master",
+        source_commit="aaaabbbbccccdddd",
+        target_commit="eeeeffff00001111",
+        current_step_key="waiting_updater",
+        current_step_label="업데이트 대기",
+        current_step_index=2,
+        total_steps=6,
+        progress_percent=20,
+        message="패치 실행이 등록됐습니다. updater service를 기다리는 중입니다.",
+        requested_by="operator",
+        requested_at=now,
+        updated_at=now,
+        refresh_used=True,
+        note="야간 점검 후 진행",
+        details={"patch_status": {"update_available": True}},
+    )
+
+    store.upsert_patch_run(record)
+    loaded = store.get_patch_run("patch-1")
+
+    assert loaded is not None
+    assert loaded.status == "waiting_updater"
+    assert loaded.current_step_key == "waiting_updater"
+    assert loaded.progress_percent == 20
+    assert loaded.details["patch_status"]["update_available"] is True
+
+    listed = store.list_patch_runs()
+    assert listed[0].patch_run_id == "patch-1"

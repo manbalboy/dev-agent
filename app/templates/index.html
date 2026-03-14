@@ -1042,6 +1042,116 @@
           <section class="quick-panel admin-panel">
             <div class="quick-panel-head">
               <div>
+                <h2>패치 상태</h2>
+                <p class="hint">현재 서버 코드와 원격 Git 브랜치를 비교해 업데이트 가능 여부를 수동으로 확인합니다.</p>
+              </div>
+              <div class="issue-form-actions">
+                <button id="admin-patch-create-run" class="secondary-button" type="button">패치 준비</button>
+                <button id="admin-patch-refresh" class="action-button" type="button">패치 확인</button>
+              </div>
+            </div>
+            <div class="admin-grid admin-grid-lists">
+              <article class="admin-list-card">
+                <h3>패치 요약</h3>
+                <div class="admin-kv">
+                  <div><span>상태</span><strong id="admin-patch-status-state">-</strong></div>
+                  <div><span>브랜치</span><strong id="admin-patch-status-branch">-</strong></div>
+                  <div><span>원격 기준</span><strong id="admin-patch-status-upstream">-</strong></div>
+                  <div><span>뒤처짐</span><strong id="admin-patch-status-behind">0</strong></div>
+                  <div><span>앞선 커밋</span><strong id="admin-patch-status-ahead">0</strong></div>
+                  <div><span>로컬 변경</span><strong id="admin-patch-status-dirty">-</strong></div>
+                </div>
+                <p id="admin-patch-status-message" class="hint">패치 상태를 아직 확인하지 않았습니다.</p>
+                <div id="admin-patch-status-detail" class="admin-list-body">패치 확인 버튼을 누르면 현재 배포 코드와 원격 브랜치를 비교합니다.</div>
+              </article>
+              <article class="admin-list-card">
+                <h3>패치 실행 진행률</h3>
+                <div class="admin-kv">
+                  <div><span>상태</span><strong id="admin-patch-run-status">-</strong></div>
+                  <div><span>현재 단계</span><strong id="admin-patch-run-step">-</strong></div>
+                  <div><span>진행률</span><strong id="admin-patch-run-progress">0%</strong></div>
+                  <div><span>요청 시각</span><strong id="admin-patch-run-requested-at">-</strong></div>
+                </div>
+                <div class="admin-progress">
+                  <div class="admin-progress-bar">
+                    <span id="admin-patch-run-progress-bar" class="admin-progress-fill" style="width: 0%;"></span>
+                  </div>
+                </div>
+                <label class="issue-form-grid">
+                  <span>운영자 메모</span>
+                  <input id="admin-patch-run-note" type="text" maxlength="300" placeholder="예: 오늘 18시에 패치, worker drain 먼저 확인" />
+                </label>
+                <div class="issue-form-actions">
+                  <button id="admin-patch-run-rollback" class="secondary-button" type="button" style="display:none;">실패 시 롤백</button>
+                  <button id="admin-patch-run-restore" class="secondary-button" type="button" style="display:none;">백업 복원</button>
+                </div>
+                <p id="admin-patch-run-message" class="hint">패치 실행 기록이 아직 없습니다.</p>
+                <div id="admin-patch-run-detail" class="admin-list-body">패치 준비를 누르면 실행 단계와 진행률이 기록됩니다.</div>
+              </article>
+              <article class="admin-list-card">
+                <h3>Updater 서비스</h3>
+                <div class="admin-kv">
+                  <div><span>상태</span><strong id="admin-patch-updater-status">-</strong></div>
+                  <div><span>서비스</span><strong id="admin-patch-updater-name">-</strong></div>
+                  <div><span>활성 Patch Run</span><strong id="admin-patch-updater-run">-</strong></div>
+                  <div><span>하트비트</span><strong id="admin-patch-updater-heartbeat">-</strong></div>
+                </div>
+                <p id="admin-patch-updater-message" class="hint">Updater 서비스 상태를 아직 확인하지 않았습니다.</p>
+                <div id="admin-patch-updater-detail" class="admin-list-body">별도 updater service가 실행되면 patch run 감지 상태를 표시합니다.</div>
+              </article>
+              <article class="admin-list-card">
+                <h3>Durable Runtime Hygiene</h3>
+                <div class="admin-kv">
+                  <div><span>보존 일수</span><strong id="admin-hygiene-retention">0일</strong></div>
+                  <div><span>정리 후보</span><strong id="admin-hygiene-candidates">0</strong></div>
+                  <div><span>큐 정리</span><strong id="admin-hygiene-queue">0</strong></div>
+                  <div><span>워크스페이스 경고</span><strong id="admin-hygiene-workspaces">0</strong></div>
+                </div>
+                <div class="issue-form-actions">
+                  <button id="admin-hygiene-cleanup" class="secondary-button" type="button">안전 정리 실행</button>
+                  <button id="admin-hygiene-refresh" class="action-button" type="button">위생 점검</button>
+                </div>
+                <p id="admin-hygiene-message" class="hint">durable runtime hygiene 점검 결과가 아직 없습니다.</p>
+                <div id="admin-hygiene-detail" class="admin-list-body">오래된 patch backup, invalid workspace backup, queue orphan/duplicate, stale patch lock 후보를 점검합니다.</div>
+              </article>
+              <article class="admin-list-card">
+                <h3>Security / TLS Governance</h3>
+                <div class="admin-kv">
+                  <div><span>상태</span><strong id="admin-security-status">-</strong></div>
+                  <div><span>공개 URL</span><strong id="admin-security-public-url">-</strong></div>
+                  <div><span>HTTPS 강제</span><strong id="admin-security-https-enforced">-</strong></div>
+                  <div><span>경고 수</span><strong id="admin-security-warning-count">0</strong></div>
+                </div>
+                <div class="issue-form-actions">
+                  <button id="admin-security-refresh" class="action-button" type="button">거버넌스 점검</button>
+                </div>
+                <p id="admin-security-message" class="hint">security / TLS posture를 아직 확인하지 않았습니다.</p>
+                <div id="admin-security-detail" class="admin-list-body">TLS, CORS, webhook secret posture를 읽어 운영 경고와 다음 액션을 표면화합니다.</div>
+              </article>
+              <article class="admin-list-card">
+                <h3>Periodic Self-Check</h3>
+                <div class="admin-kv">
+                  <div><span>상태</span><strong id="admin-self-check-status">-</strong></div>
+                  <div><span>Alert</span><strong id="admin-self-check-alert-state">-</strong></div>
+                  <div><span>Delivery</span><strong id="admin-self-check-delivery-status">-</strong></div>
+                  <div><span>최근 실행</span><strong id="admin-self-check-generated-at">-</strong></div>
+                  <div><span>Failed checks</span><strong id="admin-self-check-failed-checks">0</strong></div>
+                  <div><span>경고 수</span><strong id="admin-self-check-warning-count">0</strong></div>
+                </div>
+                <div class="issue-form-actions">
+                  <button id="admin-self-check-acknowledge" class="secondary-button" type="button">경고 확인</button>
+                  <button id="admin-self-check-run" class="secondary-button" type="button">즉시 실행</button>
+                  <button id="admin-self-check-refresh" class="action-button" type="button">보고서 새로고침</button>
+                </div>
+                <p id="admin-self-check-message" class="hint">periodic self-check 보고서가 아직 없습니다.</p>
+                <div id="admin-self-check-detail" class="admin-list-body">patch health, updater, hygiene, security governance 상태를 한 번에 묶어 latest report를 표시합니다.</div>
+              </article>
+            </div>
+          </section>
+
+          <section class="quick-panel admin-panel">
+            <div class="quick-panel-head">
+              <div>
                 <h2>앱 실행 상태</h2>
                 <p class="hint">`workspace_app.sh`가 남긴 최근 실행 메타를 읽어 웹/모바일 앱 실행 상태를 확인합니다.</p>
               </div>
@@ -2128,6 +2238,443 @@
         const lastUpdated = document.getElementById("admin-last-updated");
         if (lastUpdated) {
           lastUpdated.textContent = `어드민 지표 갱신: ${formatKstDateTime(payload?.generated_at || new Date().toISOString())}`;
+        }
+      }
+
+      function renderAdminPatchStatus(payload) {
+        window.__agenthubLastPatchStatus = payload || {};
+        const assign = (id, value) => {
+          const node = document.getElementById(id);
+          if (node) node.textContent = String(value);
+        };
+        const status = String(payload?.status || "").trim();
+        const statusLabel =
+          status === "update_available" ? "패치 가능"
+            : status === "up_to_date" ? "최신"
+            : status === "unavailable" ? "확인 불가"
+            : status === "error" ? "오류"
+            : "-";
+        assign("admin-patch-status-state", statusLabel);
+        assign("admin-patch-status-branch", payload?.current_branch || "-");
+        assign("admin-patch-status-upstream", payload?.upstream_ref || "-");
+        assign("admin-patch-status-behind", payload?.behind_count ?? 0);
+        assign("admin-patch-status-ahead", payload?.ahead_count ?? 0);
+        assign("admin-patch-status-dirty", payload?.working_tree_dirty ? "있음" : "없음");
+        const messageNode = document.getElementById("admin-patch-status-message");
+        if (messageNode) {
+          const checkedAt = formatKstDateTime(payload?.checked_at || "");
+          const baseMessage = String(payload?.message || "패치 상태를 아직 확인하지 않았습니다.").trim();
+          messageNode.textContent = checkedAt ? `${baseMessage} (${checkedAt})` : baseMessage;
+          messageNode.classList.toggle("text-error", status === "error");
+        }
+        const detailNode = document.getElementById("admin-patch-status-detail");
+        if (detailNode) {
+          const refreshBadge = payload?.refresh_attempted
+            ? `<span class="badge status-running">새로 확인함</span>`
+            : "";
+          const fetchError = String(payload?.fetch_error || "").trim();
+          detailNode.innerHTML = `
+            <div class="admin-list-item">
+              <div class="admin-list-head">
+                <strong>현재 배포</strong>
+                ${refreshBadge}
+              </div>
+              <p><code>${esc(String(payload?.current_short_commit || "-"))}</code> · ${esc(String(payload?.current_subject || "-"))}</p>
+              <p><strong>원격 기준:</strong> <code>${esc(String(payload?.upstream_short_commit || "-"))}</code> · ${esc(String(payload?.upstream_subject || "-"))}</p>
+              <p><strong>패치 안내:</strong> ${payload?.update_available ? "패치가 있습니다. 진행하시겠습니까?" : "현재 최신 상태입니다."}</p>
+              ${fetchError ? `<p class="text-error"><strong>fetch 경고:</strong> ${esc(fetchError)}</p>` : ""}
+            </div>
+          `;
+        }
+      }
+
+      function renderAdminPatchRun(payload) {
+        window.__agenthubLastPatchRun = payload || {};
+        const assign = (id, value) => {
+          const node = document.getElementById(id);
+          if (node) node.textContent = String(value);
+        };
+        const status = String(payload?.status || "").trim();
+        const statusLabel =
+          status === "waiting_updater" ? "업데이트 대기"
+            : status === "queued" ? "등록됨"
+            : status === "preparing" ? "준비 중"
+            : status === "draining" ? "서비스 정리"
+            : status === "updating" ? "업데이트 중"
+            : status === "restarting" ? "재기동 중"
+            : status === "verifying" ? "검증 중"
+            : status === "rollback_requested" ? "롤백 대기"
+            : status === "rolling_back" ? "롤백 중"
+            : status === "rollback_verifying" ? "롤백 검증 중"
+            : status === "rolled_back" ? "롤백 완료"
+            : status === "rollback_failed" ? "롤백 실패"
+            : status === "restore_requested" ? "복원 대기"
+            : status === "restoring" ? "복원 중"
+            : status === "restore_verifying" ? "복원 검증 중"
+            : status === "restored" ? "복원 완료"
+            : status === "restore_failed" ? "복원 실패"
+            : status === "done" ? "완료"
+            : status === "failed" ? "실패"
+            : status === "idle" ? "없음"
+            : "-";
+        assign("admin-patch-run-status", statusLabel);
+        assign("admin-patch-run-step", payload?.current_step_label || "-");
+        assign("admin-patch-run-progress", `${payload?.progress_percent ?? 0}%`);
+        assign("admin-patch-run-requested-at", formatKstDateTime(payload?.requested_at || "") || "-");
+
+        const fill = document.getElementById("admin-patch-run-progress-bar");
+        if (fill) {
+          const percent = Math.max(0, Math.min(100, Number(payload?.progress_percent ?? 0) || 0));
+          fill.style.width = `${percent}%`;
+        }
+
+        const messageNode = document.getElementById("admin-patch-run-message");
+        if (messageNode) {
+          const updatedAt = formatKstDateTime(payload?.updated_at || "");
+          const baseMessage = String(payload?.message || "패치 실행 기록이 아직 없습니다.").trim();
+          messageNode.textContent = updatedAt ? `${baseMessage} (${updatedAt})` : baseMessage;
+          messageNode.classList.toggle("text-error", ["failed", "rollback_failed", "restore_failed"].includes(status));
+        }
+
+        const detailNode = document.getElementById("admin-patch-run-detail");
+        const rollbackButton = document.getElementById("admin-patch-run-rollback");
+        const restoreButton = document.getElementById("admin-patch-run-restore");
+        const backupAvailable = Boolean(payload?.details && typeof payload.details === "object" && payload.details.backup_manifest && payload.details.backup_manifest.backup_id);
+        if (rollbackButton) {
+          rollbackButton.style.display = ["failed", "rollback_failed"].includes(status) ? "" : "none";
+        }
+        if (restoreButton) {
+          restoreButton.style.display = (backupAvailable && ["failed", "rollback_failed", "rolled_back", "restore_failed"].includes(status)) ? "" : "none";
+        }
+        if (detailNode) {
+          const details = payload?.details && typeof payload.details === "object" ? payload.details : {};
+          const patchStatus = details?.patch_status && typeof details.patch_status === "object" ? details.patch_status : {};
+          const backup = details?.backup_manifest && typeof details.backup_manifest === "object" ? details.backup_manifest : {};
+          const restoreVerification = details?.restore_verification && typeof details.restore_verification === "object" ? details.restore_verification : {};
+          const restorePayload = details?.restore_payload && typeof details.restore_payload === "object" ? details.restore_payload : {};
+          const note = String(payload?.note || details?.operator_note || "").trim();
+          const nextAction = String(details?.next_action || "").trim();
+          detailNode.innerHTML = payload?.patch_run_id ? `
+            <div class="admin-list-item">
+              <div class="admin-list-head">
+                <strong>Patch Run</strong>
+                ${payload?.active ? '<span class="badge status-running">진행 중</span>' : ''}
+              </div>
+              <p><strong>실행 ID:</strong> <code>${esc(String(payload?.patch_run_id || "-"))}</code></p>
+              <p><strong>대상 브랜치:</strong> <code>${esc(String(payload?.branch || "-"))}</code> → <code>${esc(String(payload?.upstream_ref || "-"))}</code></p>
+              <p><strong>커밋 차이:</strong> <code>${esc(String(payload?.source_commit || "-").slice(0, 8) || "-")}</code> → <code>${esc(String(payload?.target_commit || "-").slice(0, 8) || "-")}</code></p>
+              <p><strong>패치 기준:</strong> ${esc(String(patchStatus?.message || "-"))}</p>
+              ${backup?.backup_id ? `<p><strong>백업:</strong> <code>${esc(String(backup.backup_id || "-"))}</code> (${esc(String(backup.file_count ?? 0))}개 파일)</p>` : ""}
+              ${backup?.backup_dir ? `<p><strong>백업 경로:</strong> <code>${esc(String(backup.backup_dir || "-"))}</code></p>` : ""}
+              ${backup?.created_at ? `<p><strong>백업 시각:</strong> ${esc(formatKstDateTime(String(backup.created_at || "")) || String(backup.created_at || "-"))}</p>` : ""}
+              ${restoreVerification?.summary ? `<p><strong>복원 검증:</strong> ${esc(String(restoreVerification.summary || "-"))}</p>` : ""}
+              ${restorePayload?.restored_file_count != null ? `<p><strong>복원 결과:</strong> ${esc(String(restorePayload.restored_file_count ?? 0))}개 파일 복원</p>` : ""}
+              ${details?.restore_note ? `<p><strong>복원 메모:</strong> ${esc(String(details.restore_note || ""))}</p>` : ""}
+              ${note ? `<p><strong>운영자 메모:</strong> ${esc(note)}</p>` : ""}
+              ${nextAction ? `<p><strong>다음 액션:</strong> ${esc(nextAction)}</p>` : ""}
+            </div>
+          ` : `<p class="hint">패치 준비를 누르면 실행 단계와 진행률이 기록됩니다.</p>`;
+        }
+      }
+
+      function renderAdminPatchUpdaterStatus(payload) {
+        const assign = (id, value) => {
+          const node = document.getElementById(id);
+          if (node) node.textContent = String(value);
+        };
+        const status = String(payload?.status || "").trim();
+        const statusLabel =
+          status === "tracking" ? "Patch Run 추적 중"
+            : status === "idle" ? "대기 중"
+            : status === "offline" ? "미시작"
+            : status === "error" ? "오류"
+            : status === "connected" ? "연결됨"
+            : "-";
+        assign("admin-patch-updater-status", statusLabel);
+        assign("admin-patch-updater-name", payload?.service_name || "-");
+        assign("admin-patch-updater-run", payload?.active_patch_run_id || "-");
+        assign(
+          "admin-patch-updater-heartbeat",
+          formatKstDateTime(payload?.last_heartbeat_at || "") || "-",
+        );
+
+        const messageNode = document.getElementById("admin-patch-updater-message");
+        if (messageNode) {
+          const updatedAt = formatKstDateTime(payload?.updated_at || "");
+          const baseMessage = String(payload?.message || "Updater 서비스 상태를 아직 확인하지 않았습니다.").trim();
+          messageNode.textContent = updatedAt ? `${baseMessage} (${updatedAt})` : baseMessage;
+          messageNode.classList.toggle("text-error", status === "error");
+        }
+
+        const detailNode = document.getElementById("admin-patch-updater-detail");
+        if (detailNode) {
+          const details = payload?.details && typeof payload.details === "object" ? payload.details : {};
+          const branch = String(details?.branch || "").trim();
+          const upstreamRef = String(details?.upstream_ref || "").trim();
+          const nextAction = String(details?.next_action || "").trim();
+          detailNode.innerHTML = `
+            <div class="admin-list-item">
+              <div class="admin-list-head">
+                <strong>Updater heartbeat</strong>
+                ${status === "tracking" ? '<span class="badge status-running">활성</span>' : ""}
+              </div>
+              <p><strong>PID:</strong> <code>${esc(String(payload?.pid || "-"))}</code></p>
+              ${branch ? `<p><strong>브랜치:</strong> <code>${esc(branch)}</code></p>` : ""}
+              ${upstreamRef ? `<p><strong>원격 기준:</strong> <code>${esc(upstreamRef)}</code></p>` : ""}
+              ${nextAction ? `<p><strong>다음 액션:</strong> ${esc(nextAction)}</p>` : ""}
+            </div>
+          `;
+        }
+      }
+
+      function renderDurableRuntimeHygiene(payload) {
+        window.__agenthubLastDurableRuntimeHygiene = payload || {};
+        const assign = (id, value) => {
+          const node = document.getElementById(id);
+          if (node) node.textContent = String(value);
+        };
+        const summary = payload?.summary && typeof payload.summary === "object" ? payload.summary : {};
+        const queue = payload?.queue && typeof payload.queue === "object" ? payload.queue : {};
+        const workspaces = payload?.workspaces && typeof payload.workspaces === "object" ? payload.workspaces : {};
+        const patchBackups = payload?.patch_backups && typeof payload.patch_backups === "object" ? payload.patch_backups : {};
+        const patchLock = payload?.patch_lock && typeof payload.patch_lock === "object" ? payload.patch_lock : {};
+        const cleanup = payload?.cleanup && typeof payload.cleanup === "object" ? payload.cleanup : {};
+        const lastCleanup = payload?.last_cleanup && typeof payload.last_cleanup === "object" ? payload.last_cleanup : {};
+
+        assign("admin-hygiene-retention", `${payload?.retention_days ?? 0}일`);
+        assign("admin-hygiene-candidates", summary?.cleanup_candidate_count ?? 0);
+        assign("admin-hygiene-queue", summary?.queue_cleanup_candidate_count ?? 0);
+        assign("admin-hygiene-workspaces", summary?.workspace_warning_count ?? 0);
+
+        const messageNode = document.getElementById("admin-hygiene-message");
+        if (messageNode) {
+          const generatedAt = formatKstDateTime(payload?.generated_at || "");
+          const baseMessage = String(payload?.message || "durable runtime hygiene 점검 결과가 아직 없습니다.").trim();
+          messageNode.textContent = generatedAt ? `${baseMessage} (${generatedAt})` : baseMessage;
+          messageNode.classList.toggle("text-error", Boolean(patchLock?.stale_active_lock));
+        }
+
+        const detailNode = document.getElementById("admin-hygiene-detail");
+        if (detailNode) {
+          const queueCandidates = Array.isArray(queue?.cleanup_candidates) ? queue.cleanup_candidates.slice(0, 6) : [];
+          const invalidBackups = Array.isArray(workspaces?.invalid_workspace_cleanup_candidates)
+            ? workspaces.invalid_workspace_cleanup_candidates.slice(0, 4)
+            : [];
+          const unmanagedWorkspaces = Array.isArray(workspaces?.unmanaged_workspaces)
+            ? workspaces.unmanaged_workspaces.slice(0, 4)
+            : [];
+          const backupCandidates = Array.isArray(patchBackups?.cleanup_candidates)
+            ? patchBackups.cleanup_candidates.slice(0, 4)
+            : [];
+          const removedCount =
+            (Array.isArray(cleanup?.removed_patch_backups) ? cleanup.removed_patch_backups.length : 0)
+            + (Array.isArray(cleanup?.removed_invalid_workspaces) ? cleanup.removed_invalid_workspaces.length : 0)
+            + (Array.isArray(cleanup?.queue_pruned_entries) ? cleanup.queue_pruned_entries.length : 0)
+            + (cleanup?.patch_lock_cleared ? 1 : 0);
+          detailNode.innerHTML = `
+            <div class="admin-list-item">
+              <div class="admin-list-head">
+                <strong>정리 후보 요약</strong>
+                ${payload?.cleanup_applied ? '<span class="badge status-running">정리 실행됨</span>' : ""}
+              </div>
+              <p><strong>큐 후보:</strong> ${esc(String(queueCandidates.length ? queue.cleanup_candidates.length : 0))}건 / 총 ${esc(String(queue?.total_entries ?? 0))}건</p>
+              <p><strong>Patch backup 후보:</strong> ${esc(String(backupCandidates.length ? patchBackups.cleanup_candidates.length : 0))}건</p>
+              <p><strong>Invalid workspace 후보:</strong> ${esc(String(invalidBackups.length ? workspaces.invalid_workspace_cleanup_candidates.length : 0))}건</p>
+              <p><strong>Unmanaged workspace:</strong> ${esc(String(unmanagedWorkspaces.length ? workspaces.unmanaged_workspaces.length : 0))}건</p>
+              ${patchLock?.stale_active_lock ? `<p class="text-error"><strong>Stale patch lock:</strong> <code>${esc(String(patchLock.patch_run_id || "-"))}</code></p>` : ""}
+              ${removedCount ? `<p><strong>이번 실행 결과:</strong> ${esc(String(removedCount))}건 정리</p>` : ""}
+              ${lastCleanup?.generated_at ? `<p><strong>최근 정리:</strong> ${esc(formatKstDateTime(String(lastCleanup.generated_at || "")) || String(lastCleanup.generated_at || ""))}</p>` : ""}
+              ${lastCleanup?.message ? `<p><strong>최근 메시지:</strong> ${esc(String(lastCleanup.message || ""))}</p>` : ""}
+              ${queueCandidates.length ? `<p><strong>큐 후보 예시:</strong> ${queueCandidates.map((item) => `${esc(String(item.job_id || "-"))}(${esc(String(item.reason || "-"))})`).join(", ")}</p>` : ""}
+              ${backupCandidates.length ? `<p><strong>Patch backup 예시:</strong> ${backupCandidates.map((item) => `${esc(String(item.backup_id || "-"))}(${esc(String(item.cleanup_reason || "-"))})`).join(", ")}</p>` : ""}
+              ${invalidBackups.length ? `<p><strong>Invalid workspace 예시:</strong> ${invalidBackups.map((item) => esc(String(item.name || item.path || "-"))).join(", ")}</p>` : ""}
+              ${unmanagedWorkspaces.length ? `<p><strong>Unmanaged workspace 예시:</strong> ${unmanagedWorkspaces.map((item) => esc(String(item.name || item.path || "-"))).join(", ")}</p>` : ""}
+            </div>
+          `;
+        }
+      }
+
+      function renderSecurityGovernance(payload) {
+        window.__agenthubLastSecurityGovernance = payload || {};
+        const assign = (id, value) => {
+          const node = document.getElementById(id);
+          if (node) node.textContent = String(value);
+        };
+        const transport = payload?.transport && typeof payload.transport === "object" ? payload.transport : {};
+        const cors = payload?.cors && typeof payload.cors === "object" ? payload.cors : {};
+        const webhookSecret = payload?.webhook_secret && typeof payload.webhook_secret === "object" ? payload.webhook_secret : {};
+        const operatorChecklist = payload?.operator_checklist && typeof payload.operator_checklist === "object"
+          ? payload.operator_checklist
+          : {};
+        const recommendedEnv = payload?.recommended_env && typeof payload.recommended_env === "object"
+          ? payload.recommended_env
+          : {};
+        const docs = payload?.docs && typeof payload.docs === "object" ? payload.docs : {};
+        const warnings = Array.isArray(payload?.warnings) ? payload.warnings : [];
+        const nextActions = Array.isArray(payload?.next_actions) ? payload.next_actions : [];
+        const status = String(payload?.overall_status || "").trim();
+        const statusLabel =
+          status === "ready" ? "준비됨"
+            : status === "warning" ? "주의"
+            : status === "critical" ? "경고"
+            : "-";
+
+        assign("admin-security-status", statusLabel);
+        assign("admin-security-public-url", transport?.public_base_url || "-");
+        assign("admin-security-https-enforced", transport?.https_enforced ? "켜짐" : "꺼짐");
+        assign("admin-security-warning-count", warnings.length);
+
+        const messageNode = document.getElementById("admin-security-message");
+        if (messageNode) {
+          const generatedAt = formatKstDateTime(payload?.generated_at || "");
+          const baseMessage =
+            warnings.length > 0
+              ? `운영 경고 ${warnings.length}건을 찾았습니다.`
+              : "security / TLS posture가 기준을 충족합니다.";
+          messageNode.textContent = generatedAt ? `${baseMessage} (${generatedAt})` : baseMessage;
+          messageNode.classList.toggle("text-error", status === "critical");
+        }
+
+        const detailNode = document.getElementById("admin-security-detail");
+        if (detailNode) {
+          const checklistItems = Array.isArray(operatorChecklist?.items) ? operatorChecklist.items : [];
+          const checklistSummary = checklistItems.length
+            ? checklistItems.map((item) => `${item?.ok ? "OK" : "TODO"} ${esc(String(item?.label || "-"))}`).join(" / ")
+            : "";
+          detailNode.innerHTML = `
+            <div class="admin-list-item">
+              <div class="admin-list-head">
+                <strong>Transport / Secret Posture</strong>
+                ${status === "ready" ? '<span class="badge status-done">정상</span>' : ''}
+              </div>
+              <p><strong>공개 URL:</strong> <code>${esc(String(transport?.public_base_url || "-"))}</code></p>
+              <p><strong>Forwarded Proto 신뢰:</strong> ${transport?.trust_x_forwarded_proto ? "켜짐" : "꺼짐"}</p>
+              <p><strong>CORS:</strong> ${cors?.allow_all ? "allow-all" : "restricted"} / origin ${esc(String(cors?.origin_count ?? 0))}개</p>
+              <p><strong>Webhook Secret:</strong> ${esc(String(webhookSecret?.status || "-"))} / length ${esc(String(webhookSecret?.length ?? 0))}</p>
+              ${checklistSummary ? `<p><strong>운영 체크리스트:</strong> ${checklistSummary}</p>` : ""}
+              <p><strong>권장 ENV:</strong> <code>AGENTHUB_PUBLIC_BASE_URL=${esc(String(recommendedEnv?.AGENTHUB_PUBLIC_BASE_URL || "-"))}</code>, <code>AGENTHUB_ENFORCE_HTTPS=${esc(String(recommendedEnv?.AGENTHUB_ENFORCE_HTTPS || "-"))}</code>, <code>AGENTHUB_TRUST_X_FORWARDED_PROTO=${esc(String(recommendedEnv?.AGENTHUB_TRUST_X_FORWARDED_PROTO || "-"))}</code></p>
+              <p><strong>Runbook:</strong> <code>${esc(String(docs?.rotation_runbook || "-"))}</code> / <code>${esc(String(docs?.tls_runbook || "-"))}</code></p>
+              ${warnings.length ? `<p><strong>경고:</strong> ${warnings.slice(0, 4).map((item) => esc(String(item?.message || "-"))).join(" / ")}</p>` : ""}
+              ${nextActions.length ? `<p><strong>다음 액션:</strong> ${nextActions.slice(0, 3).map((item) => esc(String(item || "-"))).join(" / ")}</p>` : ""}
+            </div>
+          `;
+        }
+      }
+
+      function renderDurableRuntimeSelfCheck(payload) {
+        window.__agenthubLastDurableRuntimeSelfCheck = payload || {};
+        const assign = (id, value) => {
+          const node = document.getElementById(id);
+          if (node) node.textContent = String(value);
+        };
+        const summary = payload?.summary && typeof payload.summary === "object" ? payload.summary : {};
+        const reportMeta = payload?.report_meta && typeof payload.report_meta === "object" ? payload.report_meta : {};
+        const patchStatus = payload?.patch_status && typeof payload.patch_status === "object" ? payload.patch_status : {};
+        const patchRun = payload?.patch_run && typeof payload.patch_run === "object" ? payload.patch_run : {};
+        const patchUpdater = payload?.patch_updater && typeof payload.patch_updater === "object" ? payload.patch_updater : {};
+        const patchHealth = payload?.patch_health && typeof payload.patch_health === "object" ? payload.patch_health : {};
+        const alert = payload?.alert && typeof payload.alert === "object" ? payload.alert : {};
+        const delivery = payload?.delivery && typeof payload.delivery === "object" ? payload.delivery : {};
+        const deliveryRoutes = Array.isArray(delivery?.routes) ? delivery.routes : [];
+        const docs = payload?.docs && typeof payload.docs === "object" ? payload.docs : {};
+        const warnings = Array.isArray(payload?.warnings) ? payload.warnings : [];
+        const nextActions = Array.isArray(payload?.next_actions) ? payload.next_actions : [];
+        const failedChecks = Array.isArray(patchHealth?.failed_checks) ? patchHealth.failed_checks : [];
+        const status = String(payload?.overall_status || "").trim();
+        const alertState = String(alert?.state || "").trim();
+        const deliveryStatus = String(delivery?.status || "").trim();
+        const statusLabel =
+          status === "ready" ? "정상"
+            : status === "warning" ? "주의"
+            : status === "critical" ? "경고"
+            : "-";
+        const alertStateLabel =
+          alertState === "open" ? "미확인"
+            : alertState === "acknowledged" ? "확인됨"
+            : alertState === "resolved" ? "해소"
+            : alertState === "idle" ? "없음"
+            : "-";
+        const deliveryStatusLabel =
+          deliveryStatus === "sent" ? "전송됨"
+            : deliveryStatus === "failed" ? "전송 실패"
+            : deliveryStatus === "partial_failed" ? "일부 실패"
+            : deliveryStatus === "cooldown" ? "재전송 대기"
+            : deliveryStatus === "pending" ? "전송 예정"
+            : deliveryStatus === "disabled" ? "미설정"
+            : deliveryStatus === "idle" ? "대기 없음"
+            : "-";
+        const deliveryRouteSummary = deliveryRoutes.length
+          ? deliveryRoutes
+              .filter((item) => item && typeof item === "object" && (item.configured || item.active))
+              .map((item) => {
+                const label = String(item?.label || item?.route_key || "-").trim();
+                const routeStatus = String(item?.status || "-").trim();
+                const target = String(item?.webhook_target || "").trim();
+                return target ? `${label}(${routeStatus}) ${target}` : `${label}(${routeStatus})`;
+              })
+              .join(" / ")
+          : "";
+
+        assign("admin-self-check-status", statusLabel);
+        assign("admin-self-check-alert-state", alertStateLabel);
+        assign("admin-self-check-delivery-status", deliveryStatusLabel);
+        assign("admin-self-check-generated-at", formatKstDateTime(payload?.generated_at || "") || "-");
+        assign("admin-self-check-failed-checks", summary?.patch_health_failed_check_count ?? failedChecks.length);
+        assign("admin-self-check-warning-count", warnings.length);
+
+        const acknowledgeButton = document.getElementById("admin-self-check-acknowledge");
+        if (acknowledgeButton) {
+          acknowledgeButton.disabled = !(alert?.active && alertState === "open");
+          acknowledgeButton.textContent = alertState === "acknowledged" ? "확인됨" : "경고 확인";
+        }
+
+        const messageNode = document.getElementById("admin-self-check-message");
+        if (messageNode) {
+          const generatedAt = formatKstDateTime(payload?.generated_at || "");
+          const baseMessage = String(payload?.message || "periodic self-check 보고서가 아직 없습니다.").trim();
+          const ageSuffix = Number.isFinite(reportMeta?.age_minutes)
+            ? ` / age ${reportMeta.age_minutes}m`
+            : "";
+          messageNode.textContent = generatedAt ? `${baseMessage} (${generatedAt}${ageSuffix})` : baseMessage;
+          messageNode.classList.toggle("text-error", status === "critical");
+        }
+
+        const detailNode = document.getElementById("admin-self-check-detail");
+        if (detailNode) {
+          detailNode.innerHTML = `
+            <div class="admin-list-item">
+              <div class="admin-list-head">
+                <strong>Latest periodic self-check</strong>
+                ${status === "ready" ? '<span class="badge status-done">정상</span>' : ""}
+                ${reportMeta?.stale ? '<span class="badge status-running">stale</span>' : ""}
+                ${alertState === "open" ? '<span class="badge status-running">alert open</span>' : ""}
+                ${alertState === "acknowledged" ? '<span class="badge status-done">alert acknowledged</span>' : ""}
+                ${alertState === "resolved" ? '<span class="badge status-done">alert resolved</span>' : ""}
+              </div>
+              <p><strong>Trigger:</strong> ${esc(String(payload?.trigger || "-"))}</p>
+              <p><strong>Report file:</strong> <code>${esc(String(reportMeta?.path || "-"))}</code></p>
+              <p><strong>Alert file:</strong> <code>${esc(String(docs?.alert_file || "-"))}</code></p>
+              <p><strong>Alert delivery file:</strong> <code>${esc(String(docs?.alert_delivery_file || delivery?.delivery_file || "-"))}</code></p>
+              <p><strong>Alert state:</strong> ${esc(alertStateLabel)} / active ${alert?.active ? "yes" : "no"} / count ${esc(String(alert?.occurrence_count ?? 0))}</p>
+              <p><strong>Alert delivery:</strong> ${esc(deliveryStatusLabel)} / active routes ${esc(String(delivery?.active_route_count ?? 0))} / total routes ${esc(String(delivery?.route_count ?? 0))}</p>
+              <p><strong>Delivery retry policy:</strong> base ${esc(String(delivery?.repeat_minutes ?? 0))}m / current ${esc(String(delivery?.effective_repeat_minutes ?? 0))}m / max failure backoff ${esc(String(delivery?.failure_backoff_max_minutes ?? 0))}m / consecutive failures ${esc(String(delivery?.consecutive_failure_count ?? 0))}</p>
+              ${deliveryRouteSummary ? `<p><strong>Delivery routes:</strong> ${esc(deliveryRouteSummary)}</p>` : ""}
+              ${delivery?.message ? `<p><strong>Delivery message:</strong> ${esc(String(delivery?.message || "-"))}</p>` : ""}
+              ${delivery?.last_attempt_at ? `<p><strong>Last delivery attempt:</strong> ${esc(formatKstDateTime(delivery?.last_attempt_at || "") || String(delivery?.last_attempt_at || "-"))}${delivery?.last_response_code ? ` / HTTP ${esc(String(delivery?.last_response_code || "-"))}` : ""}</p>` : ""}
+              ${delivery?.next_delivery_due_at ? `<p><strong>Next delivery due:</strong> ${esc(formatKstDateTime(delivery?.next_delivery_due_at || "") || String(delivery?.next_delivery_due_at || "-"))}</p>` : ""}
+              ${delivery?.last_error ? `<p><strong>Delivery error:</strong> ${esc(String(delivery?.last_error || "-"))}</p>` : ""}
+              ${alert?.acknowledged_at ? `<p><strong>Acknowledged:</strong> ${esc(String(alert?.acknowledged_by || "-"))} at ${esc(formatKstDateTime(alert?.acknowledged_at || "") || String(alert?.acknowledged_at || "-"))}</p>` : ""}
+              ${alert?.resolved_at ? `<p><strong>Resolved:</strong> ${esc(formatKstDateTime(alert?.resolved_at || "") || String(alert?.resolved_at || "-"))}</p>` : ""}
+              ${alert?.note ? `<p><strong>Alert note:</strong> ${esc(String(alert?.note || "-"))}</p>` : ""}
+              <p><strong>Patch updater:</strong> ${esc(String(summary?.patch_updater_status || patchUpdater?.status || "-"))}</p>
+              <p><strong>Patch status:</strong> ${esc(String(patchStatus?.status || "-"))} / update ${patchStatus?.update_available ? "yes" : "no"}</p>
+              <p><strong>Patch run:</strong> ${patchRun?.active ? esc(String(patchRun?.patch_run_id || "-")) : "none"} ${patchRun?.status ? `(${esc(String(patchRun.status || "-"))})` : ""}</p>
+              <p><strong>Cleanup candidates:</strong> ${esc(String(summary?.cleanup_candidate_count ?? 0))} / security warnings ${esc(String(summary?.security_warning_count ?? 0))}</p>
+              ${failedChecks.length ? `<p><strong>Failed checks:</strong> ${failedChecks.map((item) => esc(String(item || "-"))).join(", ")}</p>` : ""}
+              ${warnings.length ? `<p><strong>Warnings:</strong> ${warnings.slice(0, 4).map((item) => esc(String(item?.message || "-"))).join(" / ")}</p>` : ""}
+              ${nextActions.length ? `<p><strong>Next actions:</strong> ${nextActions.slice(0, 3).map((item) => esc(String(item || "-"))).join(" / ")}</p>` : ""}
+            </div>
+          `;
         }
       }
 
@@ -3321,6 +3868,12 @@
 
       async function loadAdminPanel() {
         await loadAdminMetrics();
+        await loadPatchStatus(false);
+        await loadPatchRun();
+        await loadPatchUpdaterStatus();
+        await loadSecurityGovernance();
+        await loadDurableRuntimeHygiene();
+        await loadDurableRuntimeSelfCheck();
         await loadAdminRuntimeInputs({ preserveSelection: true });
         await loadAdminIntegrations({ preserveSelection: true });
         await loadAdminMemorySearch({ preserveSelection: true });
@@ -5031,10 +5584,330 @@
         }
       }
 
+      async function loadPatchStatus(refresh = false) {
+        try {
+          const response = await fetch(`/api/admin/patch-status${refresh ? "?refresh=1" : ""}`, { cache: "no-store" });
+          const payload = await response.json();
+          if (!response.ok) {
+            renderAdminPatchStatus({
+              status: "error",
+              message: payload?.detail || "패치 상태를 불러오지 못했습니다.",
+            });
+            return;
+          }
+          renderAdminPatchStatus(payload);
+        } catch {
+          renderAdminPatchStatus({
+            status: "error",
+            message: "네트워크 오류로 패치 상태를 불러오지 못했습니다.",
+          });
+        }
+      }
+
+      async function loadPatchRun() {
+        try {
+          const response = await fetch("/api/admin/patch-runs/latest", { cache: "no-store" });
+          const payload = await response.json();
+          if (!response.ok) {
+            renderAdminPatchRun({
+              status: "failed",
+              message: payload?.detail || "패치 실행 상태를 불러오지 못했습니다.",
+            });
+            return;
+          }
+          renderAdminPatchRun(payload);
+        } catch {
+          renderAdminPatchRun({
+            status: "failed",
+            message: "네트워크 오류로 패치 실행 상태를 불러오지 못했습니다.",
+          });
+        }
+      }
+
+      async function loadPatchUpdaterStatus() {
+        try {
+          const response = await fetch("/api/admin/patch-updater-status", { cache: "no-store" });
+          const payload = await response.json();
+          if (!response.ok) {
+            renderAdminPatchUpdaterStatus({
+              status: "error",
+              message: payload?.detail || "Updater 서비스 상태를 불러오지 못했습니다.",
+            });
+            return;
+          }
+          renderAdminPatchUpdaterStatus(payload);
+        } catch {
+          renderAdminPatchUpdaterStatus({
+            status: "error",
+            message: "네트워크 오류로 updater 서비스 상태를 불러오지 못했습니다.",
+          });
+        }
+      }
+
+      async function loadSecurityGovernance() {
+        try {
+          const response = await fetch("/api/admin/security-governance", { cache: "no-store" });
+          const payload = await response.json();
+          if (!response.ok) {
+            renderSecurityGovernance({
+              overall_status: "critical",
+              warnings: [{ message: payload?.detail || "security / TLS governance 상태를 불러오지 못했습니다." }],
+            });
+            return;
+          }
+          renderSecurityGovernance(payload);
+        } catch {
+          renderSecurityGovernance({
+            overall_status: "critical",
+            warnings: [{ message: "네트워크 오류로 security / TLS governance 상태를 불러오지 못했습니다." }],
+          });
+        }
+      }
+
+      async function loadDurableRuntimeHygiene() {
+        try {
+          const response = await fetch("/api/admin/durable-runtime-hygiene", { cache: "no-store" });
+          const payload = await response.json();
+          if (!response.ok) {
+            renderDurableRuntimeHygiene({
+              message: payload?.detail || "durable runtime hygiene 상태를 불러오지 못했습니다.",
+              patch_lock: { stale_active_lock: false },
+              summary: {},
+            });
+            return;
+          }
+          renderDurableRuntimeHygiene(payload);
+        } catch {
+          renderDurableRuntimeHygiene({
+            message: "네트워크 오류로 durable runtime hygiene 상태를 불러오지 못했습니다.",
+            patch_lock: { stale_active_lock: false },
+            summary: {},
+          });
+        }
+      }
+
+      async function cleanupDurableRuntimeHygiene() {
+        try {
+          const response = await fetch("/api/admin/durable-runtime-hygiene/cleanup", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: "{}",
+          });
+          const payload = await response.json();
+          if (!response.ok) {
+            renderDurableRuntimeHygiene({
+              message: payload?.detail || "durable runtime hygiene 정리에 실패했습니다.",
+              patch_lock: { stale_active_lock: false },
+              summary: {},
+            });
+            return;
+          }
+          renderDurableRuntimeHygiene(payload);
+        } catch {
+          renderDurableRuntimeHygiene({
+            message: "네트워크 오류로 durable runtime hygiene 정리에 실패했습니다.",
+            patch_lock: { stale_active_lock: false },
+            summary: {},
+          });
+        }
+      }
+
+      async function loadDurableRuntimeSelfCheck() {
+        try {
+          const response = await fetch("/api/admin/durable-runtime-self-check", { cache: "no-store" });
+          const payload = await response.json();
+          if (!response.ok) {
+            renderDurableRuntimeSelfCheck({
+              overall_status: "critical",
+              message: payload?.detail || "periodic self-check 보고서를 불러오지 못했습니다.",
+              summary: {},
+              report_meta: {},
+              patch_health: { failed_checks: [] },
+            });
+            return;
+          }
+          renderDurableRuntimeSelfCheck(payload);
+        } catch {
+          renderDurableRuntimeSelfCheck({
+            overall_status: "critical",
+            message: "네트워크 오류로 periodic self-check 보고서를 불러오지 못했습니다.",
+            summary: {},
+            report_meta: {},
+            patch_health: { failed_checks: [] },
+          });
+        }
+      }
+
+      async function runDurableRuntimeSelfCheck() {
+        try {
+          const response = await fetch("/api/admin/durable-runtime-self-check/run", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: "{}",
+          });
+          const payload = await response.json();
+          if (!response.ok) {
+            renderDurableRuntimeSelfCheck({
+              overall_status: "critical",
+              message: payload?.detail || "periodic self-check 실행에 실패했습니다.",
+              summary: {},
+              report_meta: {},
+              patch_health: { failed_checks: [] },
+            });
+            return;
+          }
+          renderDurableRuntimeSelfCheck(payload);
+        } catch {
+          renderDurableRuntimeSelfCheck({
+            overall_status: "critical",
+            message: "네트워크 오류로 periodic self-check 실행에 실패했습니다.",
+            summary: {},
+            report_meta: {},
+            patch_health: { failed_checks: [] },
+          });
+        }
+      }
+
+      async function acknowledgeDurableRuntimeSelfCheckAlert() {
+        const currentPayload = window.__agenthubLastDurableRuntimeSelfCheck && typeof window.__agenthubLastDurableRuntimeSelfCheck === "object"
+          ? window.__agenthubLastDurableRuntimeSelfCheck
+          : {};
+        try {
+          const response = await fetch("/api/admin/durable-runtime-self-check/alert/acknowledge", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ acted_by: "dashboard" }),
+          });
+          const payload = await response.json();
+          if (!response.ok) {
+            renderDurableRuntimeSelfCheck({
+              ...currentPayload,
+              overall_status: "critical",
+              message: payload?.detail || "periodic self-check alert 확인 처리에 실패했습니다.",
+            });
+            return;
+          }
+          renderDurableRuntimeSelfCheck(payload);
+        } catch {
+          renderDurableRuntimeSelfCheck({
+            ...currentPayload,
+            overall_status: "critical",
+            message: "네트워크 오류로 periodic self-check alert 확인 처리에 실패했습니다.",
+          });
+        }
+      }
+
+      async function createPatchRun() {
+        const noteNode = document.getElementById("admin-patch-run-note");
+        const payload = {
+          refresh: true,
+          note: String(noteNode?.value || "").trim(),
+        };
+        try {
+          const response = await fetch("/api/admin/patch-runs", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          const responsePayload = await response.json();
+          if (!response.ok) {
+            renderAdminPatchRun({
+              status: "failed",
+              message: responsePayload?.detail || "패치 실행 기록 생성에 실패했습니다.",
+            });
+            return;
+          }
+          renderAdminPatchRun(responsePayload?.patch_run || {});
+          await loadPatchStatus(false);
+          await loadPatchUpdaterStatus();
+        } catch {
+          renderAdminPatchRun({
+            status: "failed",
+            message: "네트워크 오류로 패치 실행 기록 생성에 실패했습니다.",
+          });
+        }
+      }
+
+      async function requestPatchRollback() {
+        const patchRun = window.__agenthubLastPatchRun || {};
+        const patchRunId = String(patchRun?.patch_run_id || "").trim();
+        if (!patchRunId) {
+          renderAdminPatchRun({
+            status: "failed",
+            message: "롤백할 patch run이 없습니다.",
+          });
+          return;
+        }
+        const noteNode = document.getElementById("admin-patch-run-note");
+        const payload = {
+          note: String(noteNode?.value || "").trim(),
+        };
+        try {
+          const response = await fetch(`/api/admin/patch-runs/${encodeURIComponent(patchRunId)}/rollback`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          const responsePayload = await response.json();
+          if (!response.ok) {
+            renderAdminPatchRun({
+              status: "failed",
+              message: responsePayload?.detail || "롤백 요청 등록에 실패했습니다.",
+            });
+            return;
+          }
+          renderAdminPatchRun(responsePayload?.patch_run || {});
+          await loadPatchUpdaterStatus();
+        } catch {
+          renderAdminPatchRun({
+            status: "failed",
+            message: "네트워크 오류로 롤백 요청 등록에 실패했습니다.",
+          });
+        }
+      }
+
+      async function requestPatchRestore() {
+        const patchRun = window.__agenthubLastPatchRun || {};
+        const patchRunId = String(patchRun?.patch_run_id || "").trim();
+        if (!patchRunId) {
+          renderAdminPatchRun({
+            status: "failed",
+            message: "복원할 patch run이 없습니다.",
+          });
+          return;
+        }
+        const noteNode = document.getElementById("admin-patch-run-note");
+        const payload = {
+          note: String(noteNode?.value || "").trim(),
+        };
+        try {
+          const response = await fetch(`/api/admin/patch-runs/${encodeURIComponent(patchRunId)}/restore`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          const responsePayload = await response.json();
+          if (!response.ok) {
+            renderAdminPatchRun({
+              status: "failed",
+              message: responsePayload?.detail || "복원 요청 등록에 실패했습니다.",
+            });
+            return;
+          }
+          renderAdminPatchRun(responsePayload?.patch_run || {});
+          await loadPatchUpdaterStatus();
+        } catch {
+          renderAdminPatchRun({
+            status: "failed",
+            message: "네트워크 오류로 복원 요청 등록에 실패했습니다.",
+          });
+        }
+      }
+
       function renderCliCheckResult(payload) {
         const box = document.getElementById("agent-cli-check-result");
         if (!box) return;
-        const order = ["gemini", "codex"];
+        const order = ["gemini", "codex", "git", "gh"];
         box.innerHTML = order
           .map((name) => {
             const item = payload?.[name] || {};
@@ -5981,6 +6854,16 @@
 
       function bindAdminControls() {
         const refreshButton = document.getElementById("admin-refresh");
+        const patchRefreshButton = document.getElementById("admin-patch-refresh");
+        const patchCreateButton = document.getElementById("admin-patch-create-run");
+        const patchRollbackButton = document.getElementById("admin-patch-run-rollback");
+        const patchRestoreButton = document.getElementById("admin-patch-run-restore");
+        const securityRefreshButton = document.getElementById("admin-security-refresh");
+        const hygieneRefreshButton = document.getElementById("admin-hygiene-refresh");
+        const hygieneCleanupButton = document.getElementById("admin-hygiene-cleanup");
+        const selfCheckRefreshButton = document.getElementById("admin-self-check-refresh");
+        const selfCheckAcknowledgeButton = document.getElementById("admin-self-check-acknowledge");
+        const selfCheckRunButton = document.getElementById("admin-self-check-run");
         const panel = document.getElementById("panel-admin");
         const runtimeInputForm = document.getElementById("admin-runtime-input-request-form");
         const runtimeInputDraftForm = document.getElementById("admin-runtime-input-draft-form");
@@ -5993,6 +6876,87 @@
             await loadAdminPanel();
           } finally {
             refreshButton.disabled = false;
+          }
+        });
+        patchRefreshButton?.addEventListener("click", async () => {
+          patchRefreshButton.disabled = true;
+          try {
+            await loadPatchStatus(true);
+            await loadPatchUpdaterStatus();
+          } finally {
+            patchRefreshButton.disabled = false;
+          }
+        });
+        patchCreateButton?.addEventListener("click", async () => {
+          patchCreateButton.disabled = true;
+          try {
+            await createPatchRun();
+          } finally {
+            patchCreateButton.disabled = false;
+          }
+        });
+        patchRollbackButton?.addEventListener("click", async () => {
+          patchRollbackButton.disabled = true;
+          try {
+            await requestPatchRollback();
+          } finally {
+            patchRollbackButton.disabled = false;
+          }
+        });
+        patchRestoreButton?.addEventListener("click", async () => {
+          patchRestoreButton.disabled = true;
+          try {
+            await requestPatchRestore();
+          } finally {
+            patchRestoreButton.disabled = false;
+          }
+        });
+        securityRefreshButton?.addEventListener("click", async () => {
+          securityRefreshButton.disabled = true;
+          try {
+            await loadSecurityGovernance();
+          } finally {
+            securityRefreshButton.disabled = false;
+          }
+        });
+        hygieneRefreshButton?.addEventListener("click", async () => {
+          hygieneRefreshButton.disabled = true;
+          try {
+            await loadDurableRuntimeHygiene();
+          } finally {
+            hygieneRefreshButton.disabled = false;
+          }
+        });
+        hygieneCleanupButton?.addEventListener("click", async () => {
+          hygieneCleanupButton.disabled = true;
+          try {
+            await cleanupDurableRuntimeHygiene();
+          } finally {
+            hygieneCleanupButton.disabled = false;
+          }
+        });
+        selfCheckRefreshButton?.addEventListener("click", async () => {
+          selfCheckRefreshButton.disabled = true;
+          try {
+            await loadDurableRuntimeSelfCheck();
+          } finally {
+            selfCheckRefreshButton.disabled = false;
+          }
+        });
+        selfCheckAcknowledgeButton?.addEventListener("click", async () => {
+          selfCheckAcknowledgeButton.disabled = true;
+          try {
+            await acknowledgeDurableRuntimeSelfCheckAlert();
+          } finally {
+            renderDurableRuntimeSelfCheck(window.__agenthubLastDurableRuntimeSelfCheck || {});
+          }
+        });
+        selfCheckRunButton?.addEventListener("click", async () => {
+          selfCheckRunButton.disabled = true;
+          try {
+            await runDurableRuntimeSelfCheck();
+          } finally {
+            selfCheckRunButton.disabled = false;
           }
         });
         runtimeInputForm?.addEventListener("submit", saveAdminRuntimeInputRequest);

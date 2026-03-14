@@ -47,6 +47,22 @@ def run_checks(root: Path) -> list[str]:
         errors.append(".env.example must not enable allow-all CORS by default")
     if "AGENTHUB_CORS_ORIGINS=*" in env_example:
         errors.append(".env.example must not use wildcard CORS origins by default")
+    if "AGENTHUB_PUBLIC_BASE_URL=" not in env_example:
+        errors.append(".env.example must declare AGENTHUB_PUBLIC_BASE_URL")
+    if "AGENTHUB_ENFORCE_HTTPS=" not in env_example:
+        errors.append(".env.example must declare AGENTHUB_ENFORCE_HTTPS")
+    if "AGENTHUB_TRUST_X_FORWARDED_PROTO=" not in env_example:
+        errors.append(".env.example must declare AGENTHUB_TRUST_X_FORWARDED_PROTO")
+    if "AGENTHUB_SELF_CHECK_ALERT_WEBHOOK_URL=" not in env_example:
+        errors.append(".env.example must declare AGENTHUB_SELF_CHECK_ALERT_WEBHOOK_URL")
+    if "AGENTHUB_SELF_CHECK_ALERT_CRITICAL_WEBHOOK_URL=" not in env_example:
+        errors.append(".env.example must declare AGENTHUB_SELF_CHECK_ALERT_CRITICAL_WEBHOOK_URL")
+    if "AGENTHUB_SELF_CHECK_ALERT_WEBHOOK_TIMEOUT_SECONDS=" not in env_example:
+        errors.append(".env.example must declare AGENTHUB_SELF_CHECK_ALERT_WEBHOOK_TIMEOUT_SECONDS")
+    if "AGENTHUB_SELF_CHECK_ALERT_REPEAT_MINUTES=" not in env_example:
+        errors.append(".env.example must declare AGENTHUB_SELF_CHECK_ALERT_REPEAT_MINUTES")
+    if "AGENTHUB_SELF_CHECK_ALERT_FAILURE_BACKOFF_MAX_MINUTES=" not in env_example:
+        errors.append(".env.example must declare AGENTHUB_SELF_CHECK_ALERT_FAILURE_BACKOFF_MAX_MINUTES")
 
     ai_commands_example = _read_text(root / "config" / "ai_commands.example.json")
     if "--dangerously-bypass-approvals-and-sandbox" in ai_commands_example:

@@ -20,6 +20,7 @@ from app.models import (
     IntegrationRegistryRecord,
     JobRecord,
     NodeRunRecord,
+    PatchRunRecord,
     RuntimeInputRecord,
     utc_now_iso,
 )
@@ -88,6 +89,18 @@ class JobStore(ABC):
     def list_integration_registry_entries(self) -> List[IntegrationRegistryRecord]:
         """Return integration registry entries sorted by newest first."""
 
+    @abstractmethod
+    def upsert_patch_run(self, patch_run: PatchRunRecord) -> None:
+        """Insert or update one patch/update run state."""
+
+    @abstractmethod
+    def get_patch_run(self, patch_run_id: str) -> Optional[PatchRunRecord]:
+        """Fetch one patch run record by ID."""
+
+    @abstractmethod
+    def list_patch_runs(self) -> List[PatchRunRecord]:
+        """Return patch runs sorted by newest first."""
+
 
 class JsonJobStore(JobStore):
     """JSON-backed JobStore implementation with file locking.
@@ -103,18 +116,21 @@ class JsonJobStore(JobStore):
         node_runs_file: Path | None = None,
         runtime_inputs_file: Path | None = None,
         integrations_file: Path | None = None,
+        patch_runs_file: Path | None = None,
     ) -> None:
         self.jobs_file = jobs_file
         self.queue_file = queue_file
         self.node_runs_file = node_runs_file or jobs_file.parent / "node_runs.json"
         self.runtime_inputs_file = runtime_inputs_file or jobs_file.parent / "runtime_inputs.json"
         self.integrations_file = integrations_file or jobs_file.parent / "integrations.json"
+        self.patch_runs_file = patch_runs_file or jobs_file.parent / "patch_runs.json"
 
         self.jobs_file.parent.mkdir(parents=True, exist_ok=True)
         self.queue_file.parent.mkdir(parents=True, exist_ok=True)
         self.node_runs_file.parent.mkdir(parents=True, exist_ok=True)
         self.runtime_inputs_file.parent.mkdir(parents=True, exist_ok=True)
         self.integrations_file.parent.mkdir(parents=True, exist_ok=True)
+        self.patch_runs_file.parent.mkdir(parents=True, exist_ok=True)
 
         if not self.jobs_file.exists():
             self._write_json_atomic(self.jobs_file, {})
@@ -126,6 +142,8 @@ class JsonJobStore(JobStore):
             self._write_json_atomic(self.runtime_inputs_file, {})
         if not self.integrations_file.exists():
             self._write_json_atomic(self.integrations_file, {})
+        if not self.patch_runs_file.exists():
+            self._write_json_atomic(self.patch_runs_file, {})
 
     def create_job(self, job: JobRecord) -> None:
         """Insert a new job record.
@@ -298,6 +316,39 @@ class JsonJobStore(JobStore):
         )
         return records
 
+    def upsert_patch_run(self, patch_run: PatchRunRecord) -> None:
+        """Insert or update one patch run record."""
+
+        with self._locked_json(self.patch_runs_file, default={}) as patch_runs_data:
+            patch_runs = self._ensure_patch_run_map(patch_runs_data)
+            patch_runs[patch_run.patch_run_id] = patch_run.to_dict()
+
+    def get_patch_run(self, patch_run_id: str) -> Optional[PatchRunRecord]:
+        """Return one patch run by ID, or None if it does not exist."""
+
+        with self._locked_json(self.patch_runs_file, default={}) as patch_runs_data:
+            patch_runs = self._ensure_patch_run_map(patch_runs_data)
+            payload = patch_runs.get(patch_run_id)
+            if payload is None:
+                return None
+            return PatchRunRecord.from_dict(payload)
+
+    def list_patch_runs(self) -> List[PatchRunRecord]:
+        """List patch runs sorted by newest first."""
+
+        with self._locked_json(self.patch_runs_file, default={}) as patch_runs_data:
+            patch_runs = self._ensure_patch_run_map(patch_runs_data)
+            records = [PatchRunRecord.from_dict(item) for item in patch_runs.values()]
+
+        records.sort(
+            key=lambda record: (
+                record.updated_at or record.requested_at,
+                record.patch_run_id,
+            ),
+            reverse=True,
+        )
+        return records
+
     @contextmanager
     def _locked_json(self, file_path: Path, default: object) -> Iterator[object]:
         """Lock a JSON file, load data, then save data on exit.
@@ -391,6 +442,14 @@ class JsonJobStore(JobStore):
     @staticmethod
     def _ensure_integration_map(raw_payload: object) -> Dict[str, Dict[str, object]]:
         """Validate that integration-registry file content is a dictionary."""
+
+        if isinstance(raw_payload, dict):
+            return raw_payload
+        return {}
+
+    @staticmethod
+    def _ensure_patch_run_map(raw_payload: object) -> Dict[str, Dict[str, object]]:
+        """Validate that patch-runs file content is a dictionary."""
 
         if isinstance(raw_payload, dict):
             return raw_payload
@@ -699,6 +758,68 @@ class SQLiteJobStore(JobStore):
             ).fetchall()
             return [self._row_to_integration_registry_entry(row) for row in rows]
 
+    def upsert_patch_run(self, patch_run: PatchRunRecord) -> None:
+        payload = patch_run.to_dict()
+        payload["details_json"] = json.dumps(patch_run.details or {}, ensure_ascii=False)
+        payload["refresh_used"] = int(bool(patch_run.refresh_used))
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO patch_runs (
+                    patch_run_id, status, repo_root, branch, upstream_ref,
+                    source_commit, target_commit, current_step_key, current_step_label,
+                    current_step_index, total_steps, progress_percent, message,
+                    requested_by, requested_at, updated_at, refresh_used, note, details_json
+                )
+                VALUES (
+                    :patch_run_id, :status, :repo_root, :branch, :upstream_ref,
+                    :source_commit, :target_commit, :current_step_key, :current_step_label,
+                    :current_step_index, :total_steps, :progress_percent, :message,
+                    :requested_by, :requested_at, :updated_at, :refresh_used, :note, :details_json
+                )
+                ON CONFLICT(patch_run_id) DO UPDATE SET
+                    status=excluded.status,
+                    repo_root=excluded.repo_root,
+                    branch=excluded.branch,
+                    upstream_ref=excluded.upstream_ref,
+                    source_commit=excluded.source_commit,
+                    target_commit=excluded.target_commit,
+                    current_step_key=excluded.current_step_key,
+                    current_step_label=excluded.current_step_label,
+                    current_step_index=excluded.current_step_index,
+                    total_steps=excluded.total_steps,
+                    progress_percent=excluded.progress_percent,
+                    message=excluded.message,
+                    requested_by=excluded.requested_by,
+                    requested_at=excluded.requested_at,
+                    updated_at=excluded.updated_at,
+                    refresh_used=excluded.refresh_used,
+                    note=excluded.note,
+                    details_json=excluded.details_json
+                """,
+                payload,
+            )
+
+    def get_patch_run(self, patch_run_id: str) -> Optional[PatchRunRecord]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM patch_runs WHERE patch_run_id = ?",
+                (patch_run_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            return self._row_to_patch_run(row)
+
+    def list_patch_runs(self) -> List[PatchRunRecord]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM patch_runs
+                ORDER BY updated_at DESC, patch_run_id DESC
+                """
+            ).fetchall()
+            return [self._row_to_patch_run(row) for row in rows]
+
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_file, timeout=30)
         conn.row_factory = sqlite3.Row
@@ -904,6 +1025,34 @@ class SQLiteJobStore(JobStore):
                 conn.execute("ALTER TABLE integration_registry ADD COLUMN approval_updated_by TEXT NOT NULL DEFAULT 'operator'")
             if "approval_trail_json" not in integration_columns:
                 conn.execute("ALTER TABLE integration_registry ADD COLUMN approval_trail_json TEXT NOT NULL DEFAULT '[]'")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS patch_runs (
+                    patch_run_id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    repo_root TEXT NOT NULL,
+                    branch TEXT NOT NULL DEFAULT '',
+                    upstream_ref TEXT NOT NULL DEFAULT '',
+                    source_commit TEXT NOT NULL DEFAULT '',
+                    target_commit TEXT NOT NULL DEFAULT '',
+                    current_step_key TEXT NOT NULL DEFAULT '',
+                    current_step_label TEXT NOT NULL DEFAULT '',
+                    current_step_index INTEGER NOT NULL DEFAULT 0,
+                    total_steps INTEGER NOT NULL DEFAULT 0,
+                    progress_percent INTEGER NOT NULL DEFAULT 0,
+                    message TEXT NOT NULL DEFAULT '',
+                    requested_by TEXT NOT NULL DEFAULT 'operator',
+                    requested_at TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL DEFAULT '',
+                    refresh_used INTEGER NOT NULL DEFAULT 0,
+                    note TEXT NOT NULL DEFAULT '',
+                    details_json TEXT NOT NULL DEFAULT '{}'
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_patch_runs_updated ON patch_runs(updated_at DESC)"
+            )
 
     @staticmethod
     def _row_to_job(row: sqlite3.Row) -> JobRecord:
@@ -1031,6 +1180,36 @@ class SQLiteJobStore(JobStore):
             approval_trail=_load_trail(row["approval_trail_json"]),
         )
 
+    @staticmethod
+    def _row_to_patch_run(row: sqlite3.Row) -> PatchRunRecord:
+        try:
+            details = json.loads(str(row["details_json"] or "{}"))
+        except json.JSONDecodeError:
+            details = {}
+        if not isinstance(details, dict):
+            details = {}
+        return PatchRunRecord(
+            patch_run_id=str(row["patch_run_id"]),
+            status=str(row["status"] or ""),
+            repo_root=str(row["repo_root"] or ""),
+            branch=str(row["branch"] or ""),
+            upstream_ref=str(row["upstream_ref"] or ""),
+            source_commit=str(row["source_commit"] or ""),
+            target_commit=str(row["target_commit"] or ""),
+            current_step_key=str(row["current_step_key"] or ""),
+            current_step_label=str(row["current_step_label"] or ""),
+            current_step_index=int(row["current_step_index"] or 0),
+            total_steps=int(row["total_steps"] or 0),
+            progress_percent=int(row["progress_percent"] or 0),
+            message=str(row["message"] or ""),
+            requested_by=str(row["requested_by"] or "operator"),
+            requested_at=str(row["requested_at"] or ""),
+            updated_at=str(row["updated_at"] or ""),
+            refresh_used=bool(row["refresh_used"]),
+            note=str(row["note"] or ""),
+            details=details,
+        )
+
 
 def create_job_store(settings: AppSettings) -> JobStore:
     """Create store backend based on environment settings."""
@@ -1054,6 +1233,8 @@ def create_job_store(settings: AppSettings) -> JobStore:
                 sqlite_store.upsert_runtime_input(runtime_input)
             for entry in json_store.list_integration_registry_entries():
                 sqlite_store.upsert_integration_registry_entry(entry)
+            for patch_run in json_store.list_patch_runs():
+                sqlite_store.upsert_patch_run(patch_run)
             queue_payload = JsonJobStore._read_json(settings.queue_file, default=[])
             for queued in JsonJobStore._ensure_queue_list(queue_payload):
                 sqlite_store.enqueue_job(queued)

@@ -647,6 +647,27 @@ code {
   min-height: 120px;
 }
 
+.admin-progress {
+  margin: 10px 0 14px;
+}
+
+.admin-progress-bar {
+  width: 100%;
+  height: 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+  border: 1px solid var(--line);
+}
+
+.admin-progress-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent-strong), #56c0ff);
+  transition: width 180ms ease;
+}
+
 .admin-kv {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

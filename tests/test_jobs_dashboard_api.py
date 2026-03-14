@@ -52,6 +52,433 @@ def _make_job(
     )
 
 
+def test_admin_patch_status_api_returns_runtime_payload(app_components, monkeypatch):
+    _, _, app = app_components
+    client = TestClient(app)
+    observed = {}
+
+    class DummyPatchRuntime:
+        def build_patch_status(self, *, refresh: bool = False):
+            observed["refresh"] = refresh
+            return {
+                "status": "update_available",
+                "current_branch": "master",
+                "upstream_ref": "origin/master",
+                "behind_count": 2,
+                "ahead_count": 0,
+                "working_tree_dirty": False,
+                "message": "패치가 있습니다. 진행하시겠습니까?",
+            }
+
+    monkeypatch.setattr(dashboard, "_build_patch_control_runtime", lambda: DummyPatchRuntime())
+
+    response = client.get("/api/admin/patch-status?refresh=1")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert observed["refresh"] is True
+    assert payload["status"] == "update_available"
+    assert payload["behind_count"] == 2
+    assert payload["message"] == "패치가 있습니다. 진행하시겠습니까?"
+
+
+def test_agent_cli_check_api_returns_git_and_gh(app_components, monkeypatch):
+    _, _, app = app_components
+    client = TestClient(app)
+
+    monkeypatch.setattr(
+        dashboard,
+        "collect_agent_cli_status",
+        lambda command_config: {
+            "gemini": {"ok": True, "command": "gemini --version", "output": "gemini"},
+            "codex": {"ok": True, "command": "codex --version", "output": "codex"},
+            "git": {"ok": True, "command": "git --version", "output": "git version 2.50.1"},
+            "gh": {"ok": True, "command": "gh --version", "output": "gh version 2.80.0"},
+        },
+    )
+
+    response = client.get("/api/agents/check")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["git"]["ok"] is True
+    assert payload["git"]["command"] == "git --version"
+    assert payload["gh"]["ok"] is True
+    assert payload["gh"]["command"] == "gh --version"
+
+
+def test_admin_patch_run_latest_api_returns_runtime_payload(app_components, monkeypatch):
+    _, store, app = app_components
+    client = TestClient(app)
+
+    class DummyPatchRunRuntime:
+        def get_latest_patch_run_payload(self):
+            return {
+                "active": True,
+                "patch_run_id": "patch-1",
+                "status": "waiting_updater",
+                "current_step_label": "업데이트 대기",
+                "progress_percent": 20,
+            }
+
+    monkeypatch.setattr(
+        dashboard,
+        "_build_dashboard_patch_runtime",
+        lambda current_store, current_settings: DummyPatchRunRuntime(),
+    )
+
+    response = client.get("/api/admin/patch-runs/latest")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["active"] is True
+    assert payload["patch_run_id"] == "patch-1"
+    assert payload["status"] == "waiting_updater"
+    assert payload["progress_percent"] == 20
+
+
+def test_admin_patch_updater_status_api_returns_runtime_payload(app_components, monkeypatch):
+    settings, store, app = app_components
+    client = TestClient(app)
+
+    class DummyPatchUpdaterRuntime:
+        def read_status_payload(self):
+            return {
+                "service_name": "agenthub-updater",
+                "status": "tracking",
+                "pid": 4242,
+                "active_patch_run_id": "patch-1",
+                "last_heartbeat_at": "2026-03-13T10:00:00+09:00",
+                "updated_at": "2026-03-13T10:00:00+09:00",
+                "message": "Updater service가 patch run을 감지했습니다.",
+                "details": {"next_action": "service_drain_restart_not_implemented"},
+            }
+
+    monkeypatch.setattr(
+        dashboard,
+        "_build_patch_updater_runtime",
+        lambda current_store, current_settings: DummyPatchUpdaterRuntime(),
+    )
+
+    response = client.get("/api/admin/patch-updater-status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "tracking"
+    assert payload["active_patch_run_id"] == "patch-1"
+    assert payload["details"]["next_action"] == "service_drain_restart_not_implemented"
+
+
+def test_admin_security_governance_api_returns_runtime_payload(app_components, monkeypatch):
+    _, store, app = app_components
+    client = TestClient(app)
+
+    class DummySecurityGovernanceRuntime:
+        def build_status(self):
+            return {
+                "overall_status": "warning",
+                "warning_count": 2,
+                "transport": {
+                    "public_base_url": "https://agenthub.example.com",
+                    "https_enforced": True,
+                },
+                "warnings": [{"code": "cors_too_permissive", "message": "CORS too wide"}],
+            }
+
+    monkeypatch.setattr(
+        dashboard,
+        "_build_security_governance_runtime",
+        lambda current_settings: DummySecurityGovernanceRuntime(),
+    )
+
+    response = client.get("/api/admin/security-governance")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["overall_status"] == "warning"
+    assert payload["warning_count"] == 2
+    assert payload["transport"]["https_enforced"] is True
+
+
+def test_admin_durable_runtime_hygiene_api_returns_runtime_payload(app_components, monkeypatch):
+    _, store, app = app_components
+    client = TestClient(app)
+
+    class DummyDurableRuntimeHygieneRuntime:
+        def build_hygiene_status(self):
+            return {
+                "generated_at": "2026-03-14T00:00:00+00:00",
+                "retention_days": 7,
+                "message": "정리 후보 3건을 찾았습니다.",
+                "summary": {
+                    "cleanup_candidate_count": 3,
+                    "queue_cleanup_candidate_count": 1,
+                    "workspace_warning_count": 2,
+                },
+                "patch_lock": {"stale_active_lock": False},
+            }
+
+    monkeypatch.setattr(
+        dashboard,
+        "_build_durable_runtime_hygiene_runtime",
+        lambda current_store, current_settings: DummyDurableRuntimeHygieneRuntime(),
+    )
+
+    response = client.get("/api/admin/durable-runtime-hygiene")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["retention_days"] == 7
+    assert payload["summary"]["cleanup_candidate_count"] == 3
+
+
+def test_admin_durable_runtime_hygiene_cleanup_api_returns_cleanup_payload(app_components, monkeypatch):
+    _, store, app = app_components
+    client = TestClient(app)
+
+    class DummyDurableRuntimeHygieneRuntime:
+        def cleanup(self):
+            return {
+                "cleanup_applied": True,
+                "message": "durable runtime hygiene 정리를 적용했습니다.",
+                "summary": {"cleanup_candidate_count": 0},
+                "cleanup": {"patch_lock_cleared": True},
+                "patch_lock": {"stale_active_lock": False},
+            }
+
+    monkeypatch.setattr(
+        dashboard,
+        "_build_durable_runtime_hygiene_runtime",
+        lambda current_store, current_settings: DummyDurableRuntimeHygieneRuntime(),
+    )
+
+    response = client.post("/api/admin/durable-runtime-hygiene/cleanup")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["cleanup_applied"] is True
+    assert payload["cleanup"]["patch_lock_cleared"] is True
+
+
+def test_admin_durable_runtime_self_check_api_returns_runtime_payload(app_components, monkeypatch):
+    _, store, app = app_components
+    client = TestClient(app)
+
+    class DummyDurableRuntimeSelfCheckRuntime:
+        def read_status(self):
+            return {
+                "generated_at": "2026-03-14T00:00:00+00:00",
+                "overall_status": "warning",
+                "message": "periodic self-check 경고 2건이 있습니다.",
+                "summary": {
+                    "patch_health_failed_check_count": 1,
+                    "cleanup_candidate_count": 2,
+                    "security_warning_count": 1,
+                },
+                "report_meta": {"stale": False, "path": "data/report.json"},
+                "patch_health": {"failed_checks": ["updater_status"]},
+                "warnings": [{"code": "patch_updater_offline", "message": "offline"}],
+            }
+
+    monkeypatch.setattr(
+        dashboard,
+        "_build_durable_runtime_self_check_runtime",
+        lambda current_store, current_settings: DummyDurableRuntimeSelfCheckRuntime(),
+    )
+
+    response = client.get("/api/admin/durable-runtime-self-check")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["overall_status"] == "warning"
+    assert payload["summary"]["patch_health_failed_check_count"] == 1
+    assert payload["report_meta"]["stale"] is False
+
+
+def test_admin_durable_runtime_self_check_run_api_returns_runtime_payload(app_components, monkeypatch):
+    _, store, app = app_components
+    client = TestClient(app)
+
+    class DummyDurableRuntimeSelfCheckRuntime:
+        def run_check(self, *, trigger: str = "manual"):
+            assert trigger == "manual"
+            return {
+                "generated_at": "2026-03-14T00:00:00+00:00",
+                "overall_status": "ready",
+                "message": "periodic self-check 기준을 충족합니다.",
+                "summary": {"patch_health_failed_check_count": 0},
+                "report_meta": {"stale": False},
+                "warnings": [],
+            }
+
+    monkeypatch.setattr(
+        dashboard,
+        "_build_durable_runtime_self_check_runtime",
+        lambda current_store, current_settings: DummyDurableRuntimeSelfCheckRuntime(),
+    )
+
+    response = client.post("/api/admin/durable-runtime-self-check/run")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["overall_status"] == "ready"
+    assert payload["summary"]["patch_health_failed_check_count"] == 0
+
+
+def test_admin_durable_runtime_self_check_alert_acknowledge_api_returns_runtime_payload(app_components, monkeypatch):
+    _, store, app = app_components
+    client = TestClient(app)
+
+    class DummyDurableRuntimeSelfCheckRuntime:
+        def acknowledge_alert(self, *, acted_by: str = "operator", note: str = ""):
+            assert acted_by == "dashboard"
+            assert note == "handled"
+            return {
+                "generated_at": "2026-03-14T00:00:00+00:00",
+                "overall_status": "warning",
+                "message": "periodic self-check 경고를 확인했습니다.",
+                "summary": {"patch_health_failed_check_count": 1},
+                "report_meta": {"stale": False},
+                "alert": {
+                    "active": True,
+                    "state": "acknowledged",
+                    "acknowledged": True,
+                    "acknowledged_by": "dashboard",
+                    "note": "handled",
+                },
+                "warnings": [{"code": "patch_updater_offline", "message": "offline"}],
+            }
+
+    monkeypatch.setattr(
+        dashboard,
+        "_build_durable_runtime_self_check_runtime",
+        lambda current_store, current_settings: DummyDurableRuntimeSelfCheckRuntime(),
+    )
+
+    response = client.post(
+        "/api/admin/durable-runtime-self-check/alert/acknowledge",
+        json={"acted_by": "dashboard", "note": "handled"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["alert"]["state"] == "acknowledged"
+    assert payload["alert"]["acknowledged_by"] == "dashboard"
+
+
+def test_admin_patch_run_create_api_returns_created_patch_run(app_components, monkeypatch):
+    _, store, app = app_components
+    client = TestClient(app)
+    observed = {}
+
+    class DummyPatchRunRuntime:
+        def create_patch_run(self, *, refresh: bool = False, note: str = ""):
+            observed["refresh"] = refresh
+            observed["note"] = note
+            return {
+                "created": True,
+                "patch_run": {
+                    "patch_run_id": "patch-2",
+                    "status": "waiting_updater",
+                    "progress_percent": 20,
+                    "note": note,
+                },
+            }
+
+    monkeypatch.setattr(
+        dashboard,
+        "_build_dashboard_patch_runtime",
+        lambda current_store, current_settings: DummyPatchRunRuntime(),
+    )
+
+    response = client.post(
+        "/api/admin/patch-runs",
+        json={"refresh": True, "note": "야간 반영"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert observed == {"refresh": True, "note": "야간 반영"}
+    assert payload["created"] is True
+    assert payload["patch_run"]["patch_run_id"] == "patch-2"
+    assert payload["patch_run"]["status"] == "waiting_updater"
+    assert payload["patch_run"]["note"] == "야간 반영"
+
+
+def test_admin_patch_run_rollback_api_returns_requested_payload(app_components, monkeypatch):
+    _, store, app = app_components
+    client = TestClient(app)
+    observed = {}
+
+    class DummyPatchRunRuntime:
+        def request_rollback(self, *, patch_run_id: str, note: str = ""):
+            observed["patch_run_id"] = patch_run_id
+            observed["note"] = note
+            return {
+                "rollback_requested": True,
+                "patch_run": {
+                    "patch_run_id": patch_run_id,
+                    "status": "rollback_requested",
+                    "progress_percent": 15,
+                    "details": {"rollback_note": note},
+                },
+            }
+
+    monkeypatch.setattr(
+        dashboard,
+        "_build_dashboard_patch_runtime",
+        lambda current_store, current_settings: DummyPatchRunRuntime(),
+    )
+
+    response = client.post(
+        "/api/admin/patch-runs/patch-2/rollback",
+        json={"note": "직전 커밋으로 복구"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert observed == {"patch_run_id": "patch-2", "note": "직전 커밋으로 복구"}
+    assert payload["rollback_requested"] is True
+    assert payload["patch_run"]["status"] == "rollback_requested"
+
+
+def test_admin_patch_run_restore_api_returns_requested_payload(app_components, monkeypatch):
+    _, store, app = app_components
+    client = TestClient(app)
+    observed = {}
+
+    class DummyPatchRunRuntime:
+        def request_restore(self, *, patch_run_id: str, note: str = ""):
+            observed["patch_run_id"] = patch_run_id
+            observed["note"] = note
+            return {
+                "restore_requested": True,
+                "patch_run": {
+                    "patch_run_id": patch_run_id,
+                    "status": "restore_requested",
+                    "progress_percent": 15,
+                    "details": {"restore_note": note},
+                },
+            }
+
+    monkeypatch.setattr(
+        dashboard,
+        "_build_dashboard_patch_runtime",
+        lambda current_store, current_settings: DummyPatchRunRuntime(),
+    )
+
+    response = client.post(
+        "/api/admin/patch-runs/patch-2/restore",
+        json={"note": "백업 상태로 복원"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert observed == {"patch_run_id": "patch-2", "note": "백업 상태로 복원"}
+    assert payload["restore_requested"] is True
+    assert payload["patch_run"]["status"] == "restore_requested"
+
+
 def test_jobs_api_supports_pagination_and_latest_updated_order(app_components):
     _, store, app = app_components
     client = TestClient(app)
@@ -2091,12 +2518,16 @@ def test_roles_api_default_catalog_hides_legacy_provider_roles(app_components, m
     assert "log-analyzer-gemini" in role_codes
     assert "log-analyzer-claude" not in role_codes
     assert "log-analyzer-copilot" not in role_codes
+    assert "summary-reviewer" in role_codes
+    assert "test-reviewer" in role_codes
     helper_templates = {item["code"]: item.get("template_key", "") for item in payload["roles"]}
     helper_tools = {item["code"]: item.get("allowed_tools", []) for item in payload["roles"]}
     assert helper_templates["ai-helper"] == "codex_helper"
     assert helper_templates["incident-analyst"] == "codex_helper"
     assert helper_templates["orchestration-helper"] == "codex_helper"
     assert helper_templates["data-ai-engineer"] == "codex_helper"
+    assert helper_templates["summary-reviewer"] == "reviewer"
+    assert helper_templates["test-reviewer"] == "reviewer"
     assert helper_tools["ai-helper"] == ["log_lookup", "repo_search", "memory_search"]
     assert helper_tools["incident-analyst"] == ["log_lookup", "repo_search", "memory_search"]
     assert helper_tools["orchestration-helper"] == ["log_lookup", "repo_search", "memory_search"]

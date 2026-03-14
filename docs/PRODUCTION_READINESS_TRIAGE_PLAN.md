@@ -23,6 +23,7 @@
 
 2. `P1` 운영 시크릿 후속 작업
    - 코드상 추적 제거와 ignore는 끝났지만, 실제 webhook/search/MCP 키 로테이션은 운영 작업으로 남아 있다.
+   - admin 화면의 `security / TLS governance` baseline과 app-level HTTPS 강제 경계는 들어갔지만, 실제 secret/TLS 운영 절차는 여전히 남아 있다.
    - 필요 시 Git 히스토리 정리도 별도 절차로 진행해야 한다.
 
 3. `P2` 문서 싱크 유지
@@ -107,10 +108,12 @@
 
 1. 실제 GitHub webhook secret 로테이션
 2. 검색 API 키, MCP 토큰 등 운영 시크릿 전수 점검
-3. 필요 시 저장소 히스토리에서 시크릿 흔적 제거
+3. reverse proxy / TLS termination 실제 점검
+4. 필요 시 저장소 히스토리에서 시크릿 흔적 제거
 
 참고 runbook:
 - [SECRET_ROTATION_AND_HISTORY_CLEANUP_RUNBOOK.md](./SECRET_ROTATION_AND_HISTORY_CLEANUP_RUNBOOK.md)
+- [REVERSE_PROXY_TLS_RUNBOOK.md](./REVERSE_PROXY_TLS_RUNBOOK.md)
 
 ## 완료 기준
 

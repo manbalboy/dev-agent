@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from app.dashboard import (
     _build_dashboard_job_action_runtime,
     _stop_signal_path,
@@ -61,3 +63,35 @@ def test_requeue_job_returns_already_active_for_running_job(app_components):
         "reason": "already_active",
         "job_id": job.job_id,
     }
+
+
+def test_requeue_job_is_blocked_while_patch_lock_active(app_components):
+    settings, store, _ = app_components
+    job = _make_job("job-patch-blocked")
+    store.create_job(job)
+    settings.patch_lock_file.parent.mkdir(parents=True, exist_ok=True)
+    settings.patch_lock_file.write_text(
+        json.dumps(
+            {
+                "active": True,
+                "patch_run_id": "patch-1",
+                "status": "draining",
+                "message": "패치 진행 중이라 새 작업 수락이 일시 중지되었습니다.",
+                "updated_at": "2026-03-13T10:00:00+09:00",
+                "details": {},
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    runtime = _build_dashboard_job_action_runtime(store, settings)
+
+    try:
+        runtime.requeue_job(job.job_id)
+    except Exception as exc:
+        assert getattr(exc, "status_code", None) == 409
+        assert "patch_run_id=patch-1" in str(getattr(exc, "detail", ""))
+    else:
+        raise AssertionError("expected HTTPException")

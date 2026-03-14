@@ -1,0 +1,10 @@
+[Unit]
+Description=AgentHub periodic durable runtime self-check
+After=network.target
+
+[Service]
+Type=oneshot
+User=docker
+WorkingDirectory=/home/docker/agentHub
+EnvironmentFile=/home/docker/agentHub/.env
+ExecStart=/home/docker/agentHub/.venv/bin/python -m app.self_check_main

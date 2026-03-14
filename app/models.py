@@ -202,6 +202,42 @@ class IntegrationRegistryRecord:
         return cls(**payload)
 
 
+@dataclass
+class PatchRunRecord:
+    """Stored operator-approved patch/update run state."""
+
+    patch_run_id: str
+    status: str
+    repo_root: str
+    branch: str
+    upstream_ref: str
+    source_commit: str
+    target_commit: str
+    current_step_key: str
+    current_step_label: str
+    current_step_index: int
+    total_steps: int
+    progress_percent: int
+    message: str
+    requested_by: str
+    requested_at: str
+    updated_at: str
+    refresh_used: bool = False
+    note: str = ""
+    details: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize to a plain dictionary for JSON storage."""
+
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: Dict[str, Any]) -> "PatchRunRecord":
+        """Create a PatchRunRecord from stored JSON data."""
+
+        return cls(**payload)
+
+
 
 def utc_now_iso() -> str:
     """Return an ISO timestamp in UTC.

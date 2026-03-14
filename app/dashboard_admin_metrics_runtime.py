@@ -1368,7 +1368,7 @@ class DashboardAdminMetricsRuntime:
                 "id": "vector_memory_retrieval",
                 "label": "Vector Memory Retrieval",
                 "enabled": vector_memory_retrieval_enabled,
-                "detail": "memory_search 한정으로 vector retrieval을 opt-in 실험하고, 실패 시 SQLite 검색으로 자동 fallback 합니다.",
+                "detail": "memory_search와 planner/reviewer/coder memory context에 vector retrieval을 opt-in 실험하고, 실패 시 SQLite selection으로 자동 fallback 합니다.",
             },
             {
                 "id": "langgraph_planner_shadow",

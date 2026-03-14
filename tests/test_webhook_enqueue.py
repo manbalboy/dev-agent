@@ -126,6 +126,44 @@ def test_ignore_disallowed_repository(app_components):
     assert store.queue_size() == 0
 
 
+def test_webhook_rejects_new_job_while_patch_lock_active(app_components):
+    settings, store, app = app_components
+    client = TestClient(app)
+    settings.patch_lock_file.parent.mkdir(parents=True, exist_ok=True)
+    settings.patch_lock_file.write_text(
+        json.dumps(
+            {
+                "active": True,
+                "patch_run_id": "patch-1",
+                "status": "draining",
+                "message": "패치 진행 중이라 새 작업을 받을 수 없습니다.",
+                "updated_at": "2026-03-13T10:00:00+09:00",
+                "details": {},
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    body = json.dumps(_issue_payload()).encode("utf-8")
+    response = client.post(
+        "/webhooks/github",
+        data=body,
+        headers={
+            "X-GitHub-Event": "issues",
+            "X-Hub-Signature-256": _sign(settings.webhook_secret, body),
+            "Content-Type": "application/json",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["accepted"] is False
+    assert response.json()["reason"] == "patch_in_progress"
+    assert response.json()["patch_run_id"] == "patch-1"
+    assert store.queue_size() == 0
+
+
 def test_enqueue_long_track_uses_stable_issue_branch(app_components):
     settings, store, app = app_components
     client = TestClient(app)

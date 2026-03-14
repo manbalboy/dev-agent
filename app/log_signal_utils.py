@@ -5,9 +5,11 @@ from __future__ import annotations
 import re
 
 OPTIONAL_HELPER_ACTORS = {
+    "COMMIT_SUMMARY",
     "TECH_WRITER",
     "TECH_WRITER_CODEX",
     "PR_SUMMARY",
+    "ESCALATION",
     "CODEX_HELPER",
     "COPILOT",
 }
@@ -37,7 +39,7 @@ def classify_cli_health_hint(text: str | None, *, actor: str | None = None) -> s
     provider_label = "CLI"
     if "gh " in lowered or "github" in lowered or actor_key == "GITHUB":
         provider_label = "GitHub CLI"
-    elif "gemini" in lowered or actor_key in {"PLANNER", "REVIEWER", "TESTER_GEMINI"}:
+    elif "gemini" in lowered or actor_key in {"PLANNER", "REVIEWER", "TESTER_GEMINI", "COMMIT_SUMMARY", "PR_SUMMARY", "ESCALATION", "TEST_REVIEWER", "SUMMARY_REVIEWER"}:
         provider_label = "Gemini CLI"
     elif "codex" in lowered or actor_key in {"CODER", "CODEX_HELPER", "COPILOT", "TECH_WRITER", "TECH_WRITER_CODEX"}:
         provider_label = "Codex CLI"

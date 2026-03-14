@@ -234,11 +234,11 @@ def test_prepare_commit_summary_with_ai_logs_fallback_instead_of_failure(tmp_pat
 
     assert summary == ""
     assert any(
-        actor == "CODEX_HELPER" and "falling back" in message and "failed" not in message.lower()
+        actor == "COMMIT_SUMMARY" and "falling back" not in message and "deterministic fallback" in message and "failed" not in message.lower()
         for _, actor, message in actor_logs
     )
     assert any(
-        actor == "TECH_WRITER" and "using deterministic fallback" in message and "failed" not in message.lower()
+        actor == "CODEX_HELPER" and "falling back" in message and "failed" not in message.lower()
         for _, actor, message in actor_logs
     )
 
@@ -267,7 +267,7 @@ def test_prepare_commit_summary_with_ai_compresses_login_hint_in_fallback_log(tm
         for _, actor, message in actor_logs
     )
     assert any(
-        actor == "TECH_WRITER" and "로그인/인증 상태 확인 필요" in message
+        actor == "COMMIT_SUMMARY" and "로그인/인증 상태 확인 필요" in message
         for _, actor, message in actor_logs
     )
 

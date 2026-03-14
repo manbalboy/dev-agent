@@ -334,6 +334,47 @@ def test_issue_register_stores_requested_workflow_override(app_components, monke
     assert stored.workflow_id == "wf-special"
 
 
+def test_issue_register_is_blocked_while_patch_lock_active(app_components, monkeypatch, tmp_path: Path):
+    settings, _, app = app_components
+    client = TestClient(app)
+
+    workflows_path = tmp_path / "config" / "workflows.json"
+    apps_path = tmp_path / "config" / "apps.json"
+    _write_workflow_catalog(workflows_path)
+    _write_apps(apps_path)
+    monkeypatch.setattr(dashboard, "_WORKFLOWS_CONFIG_PATH", workflows_path)
+    monkeypatch.setattr(dashboard, "_APPS_CONFIG_PATH", apps_path)
+    settings.patch_lock_file.parent.mkdir(parents=True, exist_ok=True)
+    settings.patch_lock_file.write_text(
+        json.dumps(
+            {
+                "active": True,
+                "patch_run_id": "patch-1",
+                "status": "draining",
+                "message": "패치 진행 중이라 새 작업 수락이 일시 중지되었습니다.",
+                "updated_at": "2026-03-13T10:00:00+09:00",
+                "details": {},
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    response = client.post(
+        "/api/issues/register",
+        json={
+            "title": "Blocked by patch",
+            "body": "Should not enqueue while patch lock is active",
+            "app_code": "web",
+            "track": "enhance",
+        },
+    )
+
+    assert response.status_code == 409
+    assert "patch_run_id=patch-1" in response.json()["detail"]
+
+
 def test_upsert_app_persists_normalized_source_repository_and_workflow_id(app_components, monkeypatch, tmp_path: Path):
     _, _, app = app_components
     client = TestClient(app)
@@ -387,6 +428,46 @@ def test_upsert_app_rejects_unknown_workflow_id(app_components, monkeypatch, tmp
 
     assert response.status_code == 400
     assert "등록되지 않은 workflow_id" in response.json()["detail"]
+
+
+def test_delete_app_api_removes_registered_app(app_components, monkeypatch, tmp_path: Path):
+    _, _, app = app_components
+    client = TestClient(app)
+
+    apps_path = tmp_path / "config" / "apps.json"
+    workflows_path = tmp_path / "config" / "workflows.json"
+    _write_workflow_catalog(workflows_path)
+    _write_apps(apps_path)
+    monkeypatch.setattr(dashboard, "_APPS_CONFIG_PATH", apps_path)
+    monkeypatch.setattr(dashboard, "_WORKFLOWS_CONFIG_PATH", workflows_path)
+
+    response = client.delete("/api/apps/web")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["deleted"] is True
+    assert [item["code"] for item in payload["apps"]] == ["default"]
+
+
+def test_map_app_workflow_api_updates_existing_app(app_components, monkeypatch, tmp_path: Path):
+    _, _, app = app_components
+    client = TestClient(app)
+
+    apps_path = tmp_path / "config" / "apps.json"
+    workflows_path = tmp_path / "config" / "workflows.json"
+    _write_workflow_catalog(workflows_path)
+    _write_apps(apps_path)
+    monkeypatch.setattr(dashboard, "_APPS_CONFIG_PATH", apps_path)
+    monkeypatch.setattr(dashboard, "_WORKFLOWS_CONFIG_PATH", workflows_path)
+
+    response = client.post("/api/apps/web/workflow", json={"workflow_id": "wf-special"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["saved"] is True
+    assert payload["workflow_id"] == "wf-special"
+    mapped = next(item for item in payload["apps"] if item["code"] == "web")
+    assert mapped["workflow_id"] == "wf-special"
 
 
 def test_issue_register_stores_app_source_repository_on_job(app_components, monkeypatch, tmp_path: Path):

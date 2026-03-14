@@ -45,6 +45,8 @@ def _write_roles(path: Path) -> None:
                     {"code": "publisher", "name": "퍼블리셔", "cli": "codex", "template_key": "coder", "enabled": True},
                     {"code": "copywriter", "name": "카피라이터", "cli": "codex", "template_key": "coder", "enabled": True},
                     {"code": "tech-writer", "name": "기술 문서 작성가", "cli": "codex", "template_key": "documentation_writer", "enabled": True},
+                    {"code": "summary-reviewer", "name": "요약 리뷰어", "cli": "gemini", "template_key": "reviewer", "enabled": True},
+                    {"code": "test-reviewer", "name": "테스트 리뷰어", "cli": "gemini", "template_key": "reviewer", "enabled": True},
                     {"code": "escalation-helper", "name": "에스컬레이션", "cli": "codex", "template_key": "escalation", "enabled": True},
                     {"code": "orchestration-helper", "name": "오케스트레이션", "cli": "codex", "template_key": "codex_helper", "enabled": True},
                     {"code": "research-agent", "name": "리서치", "cli": "python3", "template_key": "research_search", "enabled": True},
@@ -72,7 +74,10 @@ def test_default_ai_role_router_matches_primary_strategy(tmp_path: Path) -> None
     reviewer = router.resolve("reviewer")
     coder = router.resolve("coder")
     documentation = router.resolve("documentation")
+    commit_summary = router.resolve("commit_summary")
+    pr_summary = router.resolve("pr_summary")
     escalation = router.resolve("escalation")
+    test_reviewer = router.resolve("test_reviewer")
 
     assert planner.role_code == "architect"
     assert planner.cli == "gemini"
@@ -94,9 +99,21 @@ def test_default_ai_role_router_matches_primary_strategy(tmp_path: Path) -> None
     assert documentation.cli == "codex"
     assert documentation.template_keys[0] == "documentation_writer"
 
-    assert escalation.role_code == "escalation-helper"
-    assert escalation.cli == "codex"
+    assert commit_summary.role_code == "summary-reviewer"
+    assert commit_summary.cli == "gemini"
+    assert commit_summary.template_keys == ("commit_summary",)
+
+    assert pr_summary.role_code == "summary-reviewer"
+    assert pr_summary.cli == "gemini"
+    assert pr_summary.template_keys == ("pr_summary",)
+
+    assert escalation.role_code == "summary-reviewer"
+    assert escalation.cli == "gemini"
     assert escalation.fallback_route == "codex_helper"
+
+    assert test_reviewer.role_code == "test-reviewer"
+    assert test_reviewer.cli == "gemini"
+    assert test_reviewer.template_keys == ("reviewer",)
 
 
 def test_ai_role_router_allows_route_provider_swap_without_code_change(tmp_path: Path) -> None:

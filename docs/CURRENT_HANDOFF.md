@@ -1,8 +1,1410 @@
 # Current Handoff
 
-기준 시각: 2026-03-13 (KST)
+기준 시각: 2026-03-14 (KST)
+
+- 이 문서의 현재 source-of-truth는 `## 1. 이번 턴까지 완료한 것` 섹션이다.
+- 그 아래의 오래된 섹션들은 당시 시점 기록이며, 라인 수/테스트 수/다음 우선순위가 현재와 다를 수 있다.
 
 ## 1. 이번 턴까지 완료한 것
+
+### Phase 8-B first slice: vector retrieval prompt-input rollout baseline
+
+- [app/memory_retrieval_runtime.py](../app/memory_retrieval_runtime.py) 가 이제 `vector_memory_retrieval` 활성 시 `memory_search` tool 뿐 아니라 planner / reviewer / coder용 `MEMORY_CONTEXT.json` 생성에도 Qdrant vector 후보를 섞는다.
+  - route별 query를 따로 만들고
+  - vector hit가 현재 runtime DB entry와 연결될 때만 context에 올리며
+  - 기존 SQLite 기반 selection/context는 fallback으로 유지한다.
+- `MEMORY_TRACE.json` 과 `MEMORY_SELECTION.json` 에도 route별 vector 사용 여부를 남기도록 확장했다.
+  - `source_counts`
+  - `vector_selected_count`
+  - `vector_routes`
+- feature flag/operator 설명도 현재 동작에 맞게 갱신했다.
+  - [app/feature_flags.py](../app/feature_flags.py)
+  - [app/dashboard_admin_metrics_runtime.py](../app/dashboard_admin_metrics_runtime.py)
+- 현재 상태:
+  - vector retrieval은 이제 `memory_search only`가 아니라 prompt-input baseline까지 올라왔다.
+  - 여전히 `opt-in`이며, Qdrant 미구성/실패/no match면 기존 DB selection으로 자동 fallback 한다.
+  - 이번 슬라이스는 planner/reviewer/coder prompt injection baseline까지이며, planner/recovery graph promotion이나 long-horizon self-growing 변경은 아직 아니다.
+- 다음 우선순위 1~3:
+  1. `8-E. remaining runtime split / read-service long-tail`
+  2. `8-A. planner / recovery / diagnosis graph-subgraph primary-candidate 승격`
+  3. `8-C. self-growing signal -> next strategy 입력 강제`
+- 리스크 / 가정:
+  - vector candidate는 현재 runtime DB에 매핑되는 memory만 prompt context에 올린다. stale shadow hit는 의도적으로 무시한다.
+  - route query는 현재 `issue_title + route hint` 기반 heuristic 이므로, 이후 query builder 고도화 여지가 있다.
+  - 이번 슬라이스는 opt-in baseline이라 기본 동작은 그대로다.
+- 검증 결과:
+  - `.venv/bin/python -m py_compile app/memory_retrieval_runtime.py app/feature_flags.py app/dashboard_admin_metrics_runtime.py tests/test_memory_retrieval_runtime.py` -> `ok`
+  - `.venv/bin/python -m pytest -q tests/test_memory_retrieval_runtime.py tests/test_orchestrator_retry.py -k "memory_retrieval"` -> `9 passed, 41 deselected`
+  - `.venv/bin/python -m pytest -q tests/test_tool_runtime.py tests/test_tool_support_runtime.py -k "vector_memory_retrieval or memory_search or vector"` -> `5 passed, 10 deselected`
+  - `.venv/bin/python -m pytest -q tests/test_workflow_settings_api.py tests/test_dashboard_settings_runtime.py tests/test_jobs_dashboard_api.py -k "vector_memory_retrieval or feature_flags or admin_metrics"` -> `4 passed, 50 deselected`
+  - `.venv/bin/python -m pytest -q` -> `548 passed, 10 warnings`
+
+### Roadmap rephase: Phase 8 nonlinear engine closure / Phase 9 HA gate
+
+- [docs/PHASE8_NONLINEAR_ENGINE_AND_SELF_GROWING_PLAN.md](./PHASE8_NONLINEAR_ENGINE_AND_SELF_GROWING_PLAN.md) 를 추가해 Phase 8을 `비선형성 / vector retrieval / graph-subgraph / self-growing strong closure` phase로 재정의했다.
+- 상위 source-of-truth 문서도 같은 방향으로 맞췄다.
+  - [docs/AGENT_PRODUCT_ENGINE_EXECUTION_PLAN.md](./AGENT_PRODUCT_ENGINE_EXECUTION_PLAN.md)
+  - [docs/GOAL_CLOSURE_PRIORITY_RESET.md](./GOAL_CLOSURE_PRIORITY_RESET.md)
+  - [docs/PHASE7_PATCH_CONTROL_AND_DURABLE_RUNTIME_PLAN.md](./PHASE7_PATCH_CONTROL_AND_DURABLE_RUNTIME_PLAN.md)
+  - [docs/DOCUMENT_MAP.md](./DOCUMENT_MAP.md)
+  - [README.md](../README.md)
+- 이번 재배치의 핵심 원칙:
+  - `Phase 8`은 Phase 4를 다시 시작하는 단계가 아니라, 이미 partial/shadow/opt-in 인 엔진 요소를 strong으로 승격하는 단계다.
+  - 남은 Phase 7 항목인 `remaining runtime split / read-service long-tail`, `durable backend`, `self-check alert provider policy hardening` 은 `8-E. Phase 7 Carry-Over Enabling Track`으로 넘겨 관리한다.
+  - `Phase 9`는 그 뒤에 오는 `Zero-Downtime / HA` 전용 phase로 고정한다.
+- 현재 상태:
+  - 상위 로드맵의 `Delivery Order` 는 이제 `7 -> 8(engine closure) -> 9(HA)` 순서다.
+  - goal-reset 문서도 `비선형 runtime / vector / graph-subgraph / self-growing strong closure` 를 핵심 필수로 올렸다.
+  - Phase 7 문서는 baseline을 사실상 닫은 뒤 남은 blocker를 Phase 8 enabling track으로 넘긴 상태로 정리됐다.
+- 다음 우선순위 1~3:
+  1. `8-E. Phase 7 Carry-Over Enabling Track`
+  2. `8-A. Nonlinear Runtime Promotion`
+  3. `8-B. Vector Retrieval Promotion`
+- 리스크 / 가정:
+  - 이번 턴은 문서 재배치이며, 코드 실행 순서나 runtime behavior를 직접 바꾸지는 않았다.
+  - `operator-facing graph/subgraph visualization baseline` 은 Phase 8에 포함되지만, `full visual editor / drag-and-drop builder` 까지 이번 우선순위로 올린 것은 아니다.
+  - mobile emulator/E2E strong, integration/operator control strong 같은 기존 핵심 항목은 삭제가 아니라 상대 우선순위 조정이다.
+  - 현재 worktree 기준 [docs/GOAL_CLOSURE_PRIORITY_RESET.md](./GOAL_CLOSURE_PRIORITY_RESET.md), [docs/PHASE7_PATCH_CONTROL_AND_DURABLE_RUNTIME_PLAN.md](./PHASE7_PATCH_CONTROL_AND_DURABLE_RUNTIME_PLAN.md), [docs/PHASE8_NONLINEAR_ENGINE_AND_SELF_GROWING_PLAN.md](./PHASE8_NONLINEAR_ENGINE_AND_SELF_GROWING_PLAN.md) 는 신규/untracked 문서 상태이므로, 이후 커밋 단계에서 같이 포함해야 한다.
+- 검증 결과:
+  - 문서 상호참조와 phase 정의를 수동 점검했다.
+  - 코드/테스트 실행은 하지 않았다. 이번 슬라이스는 docs-only 변경이다.
+
+### Durable self-check alert exponential backoff baseline
+
+- [app/self_check_alert_delivery_runtime.py](../app/self_check_alert_delivery_runtime.py) 에 route 실패 누적 기준 exponential backoff를 추가했다.
+  - 같은 fingerprint 재전송은 기존 `repeat_minutes` cooldown을 유지한다.
+  - 같은 route가 연속 실패하면 재시도 간격은 `repeat -> 2x -> 4x` 식으로 커지고 `failure_backoff_max_minutes` 상한에서 멈춘다.
+  - delivery payload 는 `effective_repeat_minutes`, `consecutive_failure_count`, `backoff_active`, `failure_backoff_max_minutes` 를 함께 반환한다.
+- [app/config.py](../app/config.py), [app/self_check_main.py](../app/self_check_main.py), [app/dashboard_builder_runtime.py](../app/dashboard_builder_runtime.py) 는 새 설정 `AGENTHUB_SELF_CHECK_ALERT_FAILURE_BACKOFF_MAX_MINUTES` 를 연결했다.
+- [app/templates/index.html](../app/templates/index.html) 의 `Periodic Self-Check` detail 은 현재 retry window, max backoff, 연속 실패 수를 같이 보여준다.
+- 운영 설정과 hygiene 계약도 같이 갱신했다.
+  - [.env.example](../.env.example)
+  - [scripts/setup_local_config.sh](../scripts/setup_local_config.sh)
+  - [scripts/check_repo_hygiene.py](../scripts/check_repo_hygiene.py)
+  - [tests/test_setup_local_config_script.py](../tests/test_setup_local_config_script.py)
+  - [tests/test_repo_hygiene.py](../tests/test_repo_hygiene.py)
+- 관련 핵심 계약:
+  - [tests/test_self_check_alert_delivery_runtime.py](../tests/test_self_check_alert_delivery_runtime.py)
+  - [tests/test_durable_runtime_self_check.py](../tests/test_durable_runtime_self_check.py)
+  - [tests/test_jobs_dashboard_api.py](../tests/test_jobs_dashboard_api.py)
+- 현재 상태:
+  - self-check alert delivery 는 이제 primary/critical route 상태뿐 아니라 route별 backoff 상태까지 persisted payload로 남긴다.
+  - acknowledged alert 는 계속 재전송하지 않고 idle route로 남으며, open 상태의 반복 실패만 backoff 대상이다.
+  - operator는 대시보드에서 현재 적용 중인 retry window와 연속 실패 수를 바로 읽을 수 있다.
+- 다음 우선순위 1~3:
+  1. `remaining runtime split / read-service long-tail 정리`
+  2. `durable backend / self-check alert provider policy hardening`
+  3. `LICENSE / 정책 의사결정`
+- 리스크 / 가정:
+  - 이번 슬라이스는 exponential backoff 상한까지만 넣었고, provider별 jitter, route disable, dead target quarantine은 아직 없다.
+  - current backoff는 route별 persisted state 기준이므로 delivery file 삭제 시 failure streak도 같이 초기화된다.
+- 검증 결과:
+  - `.venv/bin/python -m py_compile app/self_check_alert_delivery_runtime.py app/config.py app/self_check_main.py app/dashboard_builder_runtime.py app/dashboard.py` -> `ok`
+  - `.venv/bin/python -m pytest -q tests/test_self_check_alert_delivery_runtime.py tests/test_durable_runtime_self_check.py` -> `14 passed`
+  - `.venv/bin/python -m pytest -q tests/test_setup_local_config_script.py tests/test_repo_hygiene.py` -> `4 passed`
+  - `.venv/bin/python -m pytest -q tests/test_jobs_dashboard_api.py -k "durable_runtime_self_check or security_governance or patch_updater_status"` -> `5 passed, 28 deselected`
+
+### Dashboard builder compatibility split
+
+- [app/dashboard_builder_runtime.py](../app/dashboard_builder_runtime.py) 를 추가했다.
+  - `_build_dashboard_*`, `_build_patch_*`, `_build_durable_*` 계열 builder 본문을 이 파일로 옮겼다.
+  - `_job_workspace_path`, `_memory_runtime_db_path`, `_get_memory_runtime_store`, `_classify_command_target`, `_run_gh_command`, `_read_registered_apps` 같은 helper 본문도 같이 옮겼다.
+- [app/dashboard.py](../app/dashboard.py) 는 이제 route 조립, config constant, monkeypatch-friendly compatibility wrapper 중심만 남긴다.
+  - 기존 테스트가 기대하는 `app.dashboard` import surface를 유지하기 위해 `collect_agent_cli_status`, `load_workflows`, `feature_flags_payload`, `utc_now_iso` 같은 상단 import surface도 다시 노출한다.
+  - 새 builder runtime은 `app.dashboard` 를 lazy import 해서 patched wrapper/constant를 다시 참조한다.
+- 관련 핵심 계약:
+  - [tests/test_jobs_dashboard_api.py](../tests/test_jobs_dashboard_api.py)
+  - [tests/test_node_runs_api.py](../tests/test_node_runs_api.py)
+  - [tests/test_workflow_settings_api.py](../tests/test_workflow_settings_api.py)
+  - [tests/test_assistant_chat.py](../tests/test_assistant_chat.py)
+  - [tests/test_assistant_log_analysis.py](../tests/test_assistant_log_analysis.py)
+  - [tests/test_dashboard_job_action_runtime.py](../tests/test_dashboard_job_action_runtime.py)
+  - [tests/test_dashboard_job_artifact_runtime.py](../tests/test_dashboard_job_artifact_runtime.py)
+  - [tests/test_dashboard_view_runtime.py](../tests/test_dashboard_view_runtime.py)
+  - [tests/test_dashboard_assistant_diagnosis_runtime.py](../tests/test_dashboard_assistant_diagnosis_runtime.py)
+- 현재 상태:
+  - [app/dashboard.py](../app/dashboard.py) 는 `792 -> 452` lines 로 줄었다.
+  - builder 구현은 [app/dashboard_builder_runtime.py](../app/dashboard_builder_runtime.py) `690` lines 로 이동했고, `dashboard.py` 는 compatibility wrapper 파일로 성격이 더 분명해졌다.
+  - route는 이미 분리된 [app/dashboard_job_router.py](../app/dashboard_job_router.py), [app/dashboard_write_router.py](../app/dashboard_write_router.py), [app/dashboard_operator_router.py](../app/dashboard_operator_router.py), [app/dashboard_config_router.py](../app/dashboard_config_router.py) 에 남아 있다.
+- 다음 우선순위 1~3:
+  1. `remaining runtime split / read-service long-tail 정리`
+  2. `durable backend / self-check alert escalation policy / backoff hardening`
+  3. `LICENSE / 정책 의사결정`
+- 리스크 / 가정:
+  - 새 builder runtime은 compatibility를 위해 `app.dashboard` lazy import를 사용하므로, 앞으로 builder contract를 바꿀 때는 [app/dashboard.py](../app/dashboard.py) wrapper surface와 같이 봐야 한다.
+  - `dashboard.py` 는 얇아졌지만 여전히 monkeypatch contract용 public shim 역할을 하므로, helper 이름 변경은 테스트/라우터 lazy import 경계를 같이 깨뜨릴 수 있다.
+- 검증 결과:
+  - `.venv/bin/python -m py_compile app/dashboard.py app/dashboard_builder_runtime.py` -> `ok`
+  - `.venv/bin/python -m pytest -q tests/test_assistant_chat.py tests/test_assistant_log_analysis.py tests/test_jobs_dashboard_api.py tests/test_node_runs_api.py tests/test_workflow_settings_api.py` -> `82 passed`
+  - `.venv/bin/python -m pytest -q tests/test_dashboard_job_action_runtime.py tests/test_dashboard_job_artifact_runtime.py tests/test_dashboard_view_runtime.py tests/test_dashboard_assistant_diagnosis_runtime.py` -> `13 passed`
+
+### Dashboard jobs/admin-metrics/view router split
+
+- [app/dashboard_job_router.py](../app/dashboard_job_router.py) 를 추가했다.
+  - `GET /`
+  - `GET /api/jobs`
+  - `GET /api/admin/metrics`
+  - `GET /api/jobs/options`
+  - `GET /jobs/{job_id}`
+  - `GET /api/jobs/{job_id}`
+  - `GET /api/jobs/{job_id}/node-runs`
+  - `POST /api/jobs/{job_id}/stop`
+  - `POST /api/jobs/{job_id}/requeue`
+  - `POST /api/jobs/{job_id}/dead-letter/retry`
+  - `POST /api/jobs/{job_id}/workflow/manual-retry`
+  - `POST /api/jobs/requeue-failed`
+  - `GET /logs/{file_name}`
+  job/view/admin-metrics route를 이 서브라우터로 이동했다.
+- [app/dashboard.py](../app/dashboard.py) 에서는 관련 payload model과 route wrapper를 제거하고 `router.include_router(...)`만 남겼다.
+- 새 route 구현은 `app.dashboard` lazy import 후 기존 `_build_dashboard_job_list_runtime`, `_build_dashboard_admin_metrics_runtime`, `_build_dashboard_job_detail_runtime`, `_build_dashboard_job_action_runtime`, `_build_dashboard_view_runtime` builder를 그대로 사용한다.
+- 관련 핵심 계약:
+  - [tests/test_jobs_dashboard_api.py](../tests/test_jobs_dashboard_api.py)
+  - [tests/test_node_runs_api.py](../tests/test_node_runs_api.py)
+  - [tests/test_log_route_security.py](../tests/test_log_route_security.py)
+  - [tests/test_dashboard_job_list_runtime.py](../tests/test_dashboard_job_list_runtime.py)
+  - [tests/test_dashboard_job_detail_runtime.py](../tests/test_dashboard_job_detail_runtime.py)
+  - [tests/test_dashboard_job_action_runtime.py](../tests/test_dashboard_job_action_runtime.py)
+  - [tests/test_dashboard_view_runtime.py](../tests/test_dashboard_view_runtime.py)
+- 현재 상태:
+  - [app/dashboard.py](../app/dashboard.py) 는 `995 -> 792` lines 로 줄었다.
+  - jobs/admin-metrics/page-log/action API는 기존 경로/응답 계약을 유지하면서 [app/dashboard_job_router.py](../app/dashboard_job_router.py) 에서 처리한다.
+- 다음 우선순위 1~3:
+  1. `remaining runtime split / read-service long-tail 정리`
+  2. `durable backend / self-check alert escalation policy / backoff hardening`
+  3. `LICENSE / 정책 의사결정`
+- 리스크 / 가정:
+  - 이번 슬라이스는 job/view route grouping 분리까지이며, `dashboard.py` 에는 builder/helper와 compatibility wrapper가 아직 남아 있다.
+  - route-level monkeypatch가 필요하면 `app.dashboard_job_router` 와 `app.dashboard` lazy import 경계를 같이 봐야 한다.
+- 검증 결과:
+  - `.venv/bin/python -m py_compile app/dashboard.py app/dashboard_job_router.py` -> `ok`
+  - `.venv/bin/python -m pytest -q tests/test_jobs_dashboard_api.py tests/test_node_runs_api.py tests/test_log_route_security.py -k "jobs_api or job_options_api or admin_metrics or job_detail_api or node_runs or dead_letter or manual_retry or requeue or log_route or job_detail_page"` -> `33 passed, 26 deselected`
+  - `.venv/bin/python -m pytest -q tests/test_dashboard_job_list_runtime.py tests/test_dashboard_job_detail_runtime.py tests/test_dashboard_job_action_runtime.py tests/test_dashboard_view_runtime.py` -> `13 passed`
+
+### Dashboard apps/assistant/issue write router split
+
+- [app/dashboard_write_router.py](../app/dashboard_write_router.py) 를 추가했다.
+  - `GET/POST/DELETE /api/apps*`
+  - `POST /api/assistant/codex-chat`
+  - `POST /api/assistant/chat`
+  - `POST /api/assistant/log-analysis`
+  - `POST /api/issues/register`
+  write-oriented dashboard route를 이 서브라우터로 이동했다.
+- [app/dashboard.py](../app/dashboard.py) 에서는 관련 payload model과 route wrapper를 제거하고 `router.include_router(...)`만 남겼다.
+- 새 route 구현은 `app.dashboard` lazy import 후 기존 `_build_dashboard_app_registry_runtime`, `_build_dashboard_assistant_runtime`, `_build_dashboard_issue_registration_runtime` builder를 그대로 사용해 monkeypatch 기반 테스트 계약을 유지한다.
+- 관련 핵심 계약:
+  - [tests/test_assistant_chat.py](../tests/test_assistant_chat.py)
+  - [tests/test_assistant_log_analysis.py](../tests/test_assistant_log_analysis.py)
+  - [tests/test_dashboard_app_registry_runtime.py](../tests/test_dashboard_app_registry_runtime.py)
+  - [tests/test_dashboard_issue_registration_runtime.py](../tests/test_dashboard_issue_registration_runtime.py)
+  - [tests/test_workflow_settings_api.py](../tests/test_workflow_settings_api.py)
+- 현재 상태:
+  - [app/dashboard.py](../app/dashboard.py) 는 `1140 -> 995` lines 로 줄었다.
+  - apps/assistant/issue registration API는 기존 경로/응답 계약을 유지하면서 [app/dashboard_write_router.py](../app/dashboard_write_router.py) 에서 처리한다.
+- 다음 우선순위 1~3:
+  1. `remaining runtime split / read-service long-tail 정리`
+  2. `durable backend / self-check alert escalation policy / backoff hardening`
+  3. `LICENSE / 정책 의사결정`
+- 리스크 / 가정:
+  - 이번 슬라이스는 write-oriented route grouping 분리까지이며, job detail/action/view route와 일부 builder/helper는 아직 [app/dashboard.py](../app/dashboard.py) 에 남아 있다.
+  - builder monkeypatch 계약은 유지했지만, route-level monkeypatch가 필요하면 `app.dashboard_write_router` 와 `app.dashboard` lazy import 경계를 같이 봐야 한다.
+- 검증 결과:
+  - `.venv/bin/python -m py_compile app/dashboard.py app/dashboard_write_router.py` -> `ok`
+  - `.venv/bin/python -m pytest -q tests/test_assistant_chat.py tests/test_assistant_log_analysis.py tests/test_dashboard_app_registry_runtime.py tests/test_dashboard_issue_registration_runtime.py` -> `18 passed`
+  - `.venv/bin/python -m pytest -q tests/test_workflow_settings_api.py -k "issue_register or upsert_app"` -> `5 passed, 10 deselected`
+
+### Dashboard operator patch/memory/self-check router expansion
+
+- [app/dashboard_operator_router.py](../app/dashboard_operator_router.py) 에 아래 operator/admin route 묶음을 추가로 이동했다.
+  - `GET /api/admin/patch-status`
+  - `GET /api/admin/patch-runs/latest`
+  - `GET /api/admin/patch-updater-status`
+  - `GET /api/admin/security-governance`
+  - `GET/POST /api/admin/durable-runtime-hygiene*`
+  - `GET/POST /api/admin/durable-runtime-self-check*`
+  - `POST /api/admin/patch-runs*`
+  - `GET/POST /api/admin/memory*`
+- [app/dashboard.py](../app/dashboard.py) 에서는 관련 payload model과 route wrapper를 제거했다.
+- 새 route 구현은 `app.dashboard` lazy import 후 기존 `_build_patch_control_runtime`, `_build_dashboard_patch_runtime`, `_build_durable_runtime_self_check_runtime`, `_build_dashboard_memory_admin_runtime` builder를 그대로 사용해 monkeypatch 기반 테스트 계약을 유지한다.
+- 관련 핵심 계약:
+  - [tests/test_jobs_dashboard_api.py](../tests/test_jobs_dashboard_api.py)
+  - [tests/test_durable_runtime_self_check.py](../tests/test_durable_runtime_self_check.py)
+  - [tests/test_dashboard_memory_admin_runtime.py](../tests/test_dashboard_memory_admin_runtime.py)
+  - [tests/test_dashboard_patch_runtime.py](../tests/test_dashboard_patch_runtime.py)
+- 현재 상태:
+  - [app/dashboard.py](../app/dashboard.py) 는 `1424 -> 1140` lines 로 줄었다.
+  - operator-facing patch/hygiene/self-check/memory admin API는 기존 경로/응답 계약을 유지하면서 [app/dashboard_operator_router.py](../app/dashboard_operator_router.py) 에서 처리한다.
+- 다음 우선순위 1~3:
+  1. `remaining runtime split / read-service long-tail 정리`
+  2. `durable backend / self-check alert escalation policy / backoff hardening`
+  3. `LICENSE / 정책 의사결정`
+- 리스크 / 가정:
+  - 이번 슬라이스는 operator route grouping 확장까지이며, app registry, assistant, issue registration, job detail/action route는 아직 [app/dashboard.py](../app/dashboard.py) 에 남아 있다.
+  - builder monkeypatch 계약은 유지했지만, route-level monkeypatch가 필요하면 `app.dashboard_operator_router` 와 `app.dashboard` lazy import 경계를 같이 봐야 한다.
+- 검증 결과:
+  - `.venv/bin/python -m py_compile app/dashboard.py app/dashboard_operator_router.py` -> `ok`
+  - `.venv/bin/python -m pytest -q tests/test_jobs_dashboard_api.py -k "patch_status or patch_run or patch_updater_status or security_governance or durable_runtime_hygiene or durable_runtime_self_check or admin_memory"` -> `16 passed, 17 deselected`
+  - `.venv/bin/python -m pytest -q tests/test_durable_runtime_self_check.py tests/test_dashboard_memory_admin_runtime.py tests/test_dashboard_patch_runtime.py` -> `21 passed`
+
+### Dashboard roles/settings config router split
+
+- [app/dashboard_config_router.py](../app/dashboard_config_router.py) 를 추가했다.
+  - `GET/POST/DELETE /api/roles*`
+  - `GET/POST /api/workflows*`
+  - `GET/POST /api/feature-flags`
+  - `GET/POST /api/agents/config`
+  - `GET /api/agents/check`
+  - `GET /api/agents/models`
+  config-oriented dashboard API를 이 서브라우터로 이동했다.
+- [app/dashboard.py](../app/dashboard.py) 에서는 관련 payload model과 route wrapper를 제거하고 `router.include_router(...)`만 남겼다.
+- 새 라우터는 호출 시점에 `app.dashboard` 를 lazy import 해서 `_ROLES_CONFIG_PATH`, `_WORKFLOWS_CONFIG_PATH`, `_FEATURE_FLAGS_CONFIG_PATH` monkeypatch 계약을 그대로 유지한다.
+- 관련 핵심 계약:
+  - [tests/test_workflow_settings_api.py](../tests/test_workflow_settings_api.py)
+  - [tests/test_jobs_dashboard_api.py](../tests/test_jobs_dashboard_api.py)
+  - [tests/test_dashboard_settings_runtime.py](../tests/test_dashboard_settings_runtime.py)
+- 현재 상태:
+  - [app/dashboard.py](../app/dashboard.py) 는 `1656 -> 1424` lines 로 줄었다.
+  - roles/workflows/feature-flags/agent-config API는 기존 경로/응답 계약을 유지하면서 [app/dashboard_config_router.py](../app/dashboard_config_router.py) 에서 처리한다.
+- 다음 우선순위 1~3:
+  1. `remaining runtime split / read-service long-tail 정리`
+  2. `durable backend / self-check alert escalation policy / backoff hardening`
+  3. `LICENSE / 정책 의사결정`
+- 리스크 / 가정:
+  - 이번 슬라이스는 config-oriented route grouping 분리까지이며, assistant, issue registration, app registry, admin patch/memory route는 아직 [app/dashboard.py](../app/dashboard.py) 에 남아 있다.
+  - config path override 테스트는 유지되지만, 이후 route-level monkeypatch가 필요하면 `app.dashboard_config_router` 와 `app.dashboard` 의 lazy import 경계를 같이 봐야 한다.
+- 검증 결과:
+  - `.venv/bin/python -m py_compile app/dashboard.py app/dashboard_config_router.py` -> `ok`
+  - `.venv/bin/python -m pytest -q tests/test_workflow_settings_api.py` -> `15 passed`
+  - `.venv/bin/python -m pytest -q tests/test_workflow_settings_api.py tests/test_jobs_dashboard_api.py -k "roles_api or feature_flags or workflows or agent_models or agent_cli_check_api_returns_git_and_gh"` -> `6 passed, 42 deselected`
+  - `.venv/bin/python -m pytest -q tests/test_dashboard_settings_runtime.py` -> `6 passed`
+
+### Dashboard operator runtime-input / integration router split
+
+- [app/dashboard_operator_router.py](../app/dashboard_operator_router.py) 를 추가했다.
+  - `GET/POST /api/admin/runtime-inputs*`
+  - `GET/POST /api/admin/integrations*`
+  operator-side admin API를 이 서브라우터로 이동했다.
+- [app/dashboard.py](../app/dashboard.py) 에서는 관련 payload model, route wrapper, builder를 제거하고 `router.include_router(...)`만 남겼다.
+- 목적은 `remaining runtime split / read-service long-tail` 다음 조각으로, 내부 runtime은 이미 분리된 상태에서 `dashboard.py` 에 남아 있던 operator admin route surface를 줄이는 것이다.
+- 관련 핵심 계약:
+  - [tests/test_jobs_dashboard_api.py](../tests/test_jobs_dashboard_api.py)
+  - [tests/test_dashboard_admin_metrics_runtime.py](../tests/test_dashboard_admin_metrics_runtime.py)
+- 현재 상태:
+  - [app/dashboard.py](../app/dashboard.py) 는 `1894 -> 1656` lines 로 줄었다.
+  - runtime input / integration CRUD는 기존 경로와 응답 형태를 유지하면서 [app/dashboard_operator_router.py](../app/dashboard_operator_router.py) 에서 처리한다.
+- 다음 우선순위 1~3:
+  1. `remaining runtime split / read-service long-tail 정리`
+  2. `durable backend / self-check alert escalation policy / backoff hardening`
+  3. `LICENSE / 정책 의사결정`
+- 리스크 / 가정:
+  - 이번 슬라이스는 operator admin route grouping 분리까지이며, roles/admin patch route와 일부 builder는 아직 [app/dashboard.py](../app/dashboard.py) 에 남아 있다.
+  - API path/response contract는 유지했지만, route 정의 위치가 바뀌었으므로 이후 monkeypatch가 필요하면 `app.dashboard_operator_router` 쪽을 봐야 한다.
+- 검증 결과:
+  - `.venv/bin/python -m py_compile app/dashboard.py app/dashboard_operator_router.py` -> `ok`
+  - `.venv/bin/python -m pytest -q tests/test_jobs_dashboard_api.py -k "runtime_input or integrations or admin_metrics"` -> `6 passed, 27 deselected`
+  - `.venv/bin/python -m pytest -q tests/test_dashboard_admin_metrics_runtime.py tests/test_jobs_dashboard_api.py -k "runtime_input or integrations or admin_metrics"` -> `7 passed, 27 deselected`
+
+### Dashboard compatibility helper runtime split
+
+- [app/dashboard_compat_runtime.py](../app/dashboard_compat_runtime.py) 를 추가했다.
+  - assistant dispatch helper
+  - provider alias compatibility wrapper
+  - GitHub CLI / label / repository normalization helper
+  - app/workflow config IO helper
+  구현 본문을 이 파일로 모았다.
+- [app/dashboard.py](../app/dashboard.py) 는 `_run_log_analyzer`, `_run_assistant_chat_provider`, `_run_codex_log_analysis`, `_run_copilot_log_analysis`, `_run_gh_command`, `_ensure_label`, `_read_registered_apps` 같은 dashboard-local compatibility helper에서 이제 thin pass-through만 남기고 새 runtime으로 위임한다.
+- 목적은 `remaining runtime split / read-service long-tail` 다음 조각으로, route 테스트가 기대하는 monkeypatch 포인트는 유지하면서 `dashboard.py` 하단 helper implementation 의존을 더 줄이는 것이다.
+- 관련 핵심 계약:
+  - [tests/test_dashboard_compat_runtime.py](../tests/test_dashboard_compat_runtime.py)
+  - [tests/test_dashboard_assistant_runtime.py](../tests/test_dashboard_assistant_runtime.py)
+  - [tests/test_dashboard_app_registry_runtime.py](../tests/test_dashboard_app_registry_runtime.py)
+  - [tests/test_dashboard_issue_registration_runtime.py](../tests/test_dashboard_issue_registration_runtime.py)
+  - [tests/test_assistant_chat.py](../tests/test_assistant_chat.py)
+  - [tests/test_assistant_log_analysis.py](../tests/test_assistant_log_analysis.py)
+  - [tests/test_workflow_settings_api.py](../tests/test_workflow_settings_api.py)
+- 현재 상태:
+  - [app/dashboard.py](../app/dashboard.py) 는 `1897 -> 1894` lines 로 줄었다.
+  - assistant/GitHub/app-config helper 본문은 [app/dashboard_compat_runtime.py](../app/dashboard_compat_runtime.py) 로 이동했고, dashboard module monkeypatch 계약은 그대로 유지한다.
+- 다음 우선순위 1~3:
+  1. `remaining runtime split / read-service long-tail 정리`
+  2. `durable backend / self-check alert escalation policy / backoff hardening`
+  3. `LICENSE / 정책 의사결정`
+- 리스크 / 가정:
+  - `_run_log_analyzer`, `_run_assistant_chat_provider` 는 테스트에서 provider wrapper monkeypatch를 사용하므로 완전 제거하지 않고 pass-through로 유지했다.
+  - `dashboard.py` 에는 아직 roles/runtime-input/integration/admin patch 관련 thin builder/route surface가 남아 있다.
+- 검증 결과:
+  - `.venv/bin/python -m py_compile app/dashboard.py app/dashboard_compat_runtime.py` -> `ok`
+  - `.venv/bin/python -m pytest -q tests/test_dashboard_compat_runtime.py tests/test_dashboard_assistant_runtime.py tests/test_dashboard_app_registry_runtime.py tests/test_dashboard_issue_registration_runtime.py` -> `15 passed`
+  - `.venv/bin/python -m pytest -q tests/test_assistant_chat.py tests/test_assistant_log_analysis.py tests/test_workflow_settings_api.py -k "issue_register or upsert_app or assistant/chat or log_analysis"` -> `11 passed, 14 deselected`
+
+### Dashboard dead wrapper cleanup after runtime split
+
+- [app/dashboard.py](../app/dashboard.py) 에 남아 있던 unused dashboard-local helper를 정리했다.
+  - `_build_job_runtime_signals`
+  - `_list_dashboard_jobs`
+  - `_build_job_summary`
+  - `_filter_dashboard_jobs`
+  - `_paginate_dashboard_jobs`
+  - `_dashboard_filter_options`
+  는 더 이상 참조되지 않아 제거했다.
+- [app/dashboard.py](../app/dashboard.py) 의 admin metrics builder는 삭제한 wrapper를 다시 두지 않고 runtime/static method를 직접 주입하도록 바꿨다.
+  - `DashboardJobListRuntime.list_dashboard_jobs()`
+  - `DashboardJobListRuntime.build_job_summary()`
+- 목적은 `remaining runtime split / read-service long-tail` 다음 조각으로, runtime split 이후 남은 dead local surface를 걷어 `dashboard.py` 잔여를 더 줄이는 것이다.
+- 관련 핵심 계약:
+  - [tests/test_dashboard_job_list_runtime.py](../tests/test_dashboard_job_list_runtime.py)
+  - [tests/test_dashboard_view_runtime.py](../tests/test_dashboard_view_runtime.py)
+  - [tests/test_jobs_dashboard_api.py](../tests/test_jobs_dashboard_api.py)
+- 현재 상태:
+  - [app/dashboard.py](../app/dashboard.py) 는 `1959 -> 1897` lines 로 줄었다.
+  - admin metrics / jobs / log / page read path는 기존 계약을 유지한다.
+- 다음 우선순위 1~3:
+  1. `remaining runtime split / read-service long-tail 정리`
+  2. `durable backend / self-check alert escalation policy / backoff hardening`
+  3. `LICENSE / 정책 의사결정`
+- 리스크 / 가정:
+  - 이번 슬라이스는 dead helper cleanup 이며, route grouping 자체나 assistant/GitHub compatibility wrapper는 그대로 남겨뒀다.
+  - `dashboard.py` 는 더 얇아졌지만 아직 roles/runtime-input/integration/admin patch wrapper가 일부 남아 있다.
+- 검증 결과:
+  - `rg -n "_build_job_runtime_signals\\(|_list_dashboard_jobs\\(|_build_job_summary\\(|_filter_dashboard_jobs\\(|_paginate_dashboard_jobs\\(|_dashboard_filter_options\\(" app tests` -> no matches
+  - `.venv/bin/python -m py_compile app/dashboard.py` -> `ok`
+  - `.venv/bin/python -m pytest -q tests/test_dashboard_job_list_runtime.py tests/test_dashboard_view_runtime.py tests/test_jobs_dashboard_api.py -k "jobs_api or job_options_api or job_detail_page or log_route or admin_metrics"` -> `8 passed, 32 deselected`
+
+### Durable self-check critical escalation route baseline
+
+- [app/self_check_alert_delivery_runtime.py](../app/self_check_alert_delivery_runtime.py) 에 route-aware delivery 상태를 붙였다.
+  - 기존 primary webhook delivery baseline은 유지한다.
+  - `critical` severity alert 일 때만 추가 target인 `critical escalation` route 를 활성화한다.
+  - persisted delivery payload 는 이제 route별 상태(`routes[]`), active route 수, partial failure 상태를 함께 담는다.
+- 설정 경계도 같이 확장했다.
+  - [app/config.py](../app/config.py)
+  - [.env.example](../.env.example)
+  - [scripts/setup_local_config.sh](../scripts/setup_local_config.sh)
+  - [scripts/check_repo_hygiene.py](../scripts/check_repo_hygiene.py)
+  - 새 ENV: `AGENTHUB_SELF_CHECK_ALERT_CRITICAL_WEBHOOK_URL`
+- [app/dashboard.py](../app/dashboard.py), [app/self_check_main.py](../app/self_check_main.py) 는 이제 critical escalation route 설정까지 포함한 delivery runtime builder를 사용한다.
+- [app/templates/index.html](../app/templates/index.html) 의 `Periodic Self-Check` detail 은 route count, active route count, route별 status/target 을 같이 보여준다.
+- 관련 핵심 계약:
+  - [tests/test_self_check_alert_delivery_runtime.py](../tests/test_self_check_alert_delivery_runtime.py)
+  - [tests/test_durable_runtime_self_check.py](../tests/test_durable_runtime_self_check.py)
+  - [tests/test_jobs_dashboard_api.py](../tests/test_jobs_dashboard_api.py)
+  - [tests/test_setup_local_config_script.py](../tests/test_setup_local_config_script.py)
+  - [tests/test_repo_hygiene.py](../tests/test_repo_hygiene.py)
+- 현재 상태:
+  - self-check alert delivery 는 이제 primary route + optional critical escalation route 까지 지원한다.
+  - 같은 alert fingerprint 는 route별 cooldown 이후에만 다시 전송한다.
+- 다음 우선순위 1~3:
+  1. `remaining runtime split / read-service long-tail 정리`
+  2. `durable backend / self-check alert escalation policy / backoff hardening`
+  3. `LICENSE / 정책 의사결정`
+- 리스크 / 가정:
+  - current escalation route 는 `critical` severity 기준의 정적 추가 target 이며, ack-aware suppression, exponential backoff, provider별 재시도 정책은 아직 없다.
+  - primary URL과 critical URL이 같으면 duplicate send는 피하고 primary route만 유지한다.
+  - dashboard visibility는 route summary를 보여주지만, 개별 route 재전송/disable action은 아직 없다.
+- 검증 결과:
+  - `.venv/bin/python -m py_compile app/self_check_alert_delivery_runtime.py app/dashboard.py app/self_check_main.py app/config.py` -> `ok`
+  - `.venv/bin/python -m pytest -q tests/test_self_check_alert_delivery_runtime.py` -> `6 passed`
+  - `.venv/bin/python -m pytest -q tests/test_setup_local_config_script.py tests/test_repo_hygiene.py` -> `4 passed`
+  - `.venv/bin/python -m pytest -q tests/test_durable_runtime_self_check.py tests/test_jobs_dashboard_api.py -k "durable_runtime_self_check"` -> `9 passed, 30 deselected`
+
+### Dashboard page / log view runtime split
+
+- [app/dashboard_view_runtime.py](../app/dashboard_view_runtime.py) 를 추가했다.
+  - dashboard shell render
+  - job detail HTML shell render
+  - plain-text log file read/validation
+  - stop signal path helper
+  를 route 밖으로 옮겼다.
+- [app/dashboard.py](../app/dashboard.py) 는 이제
+  - `GET /`
+  - `GET /jobs/{job_id}`
+  - `GET /logs/{file_name}`
+  에서 thin wrapper만 남기고 [app/dashboard_view_runtime.py](../app/dashboard_view_runtime.py) 로 위임한다.
+- 목적은 `remaining runtime split / read-service long-tail` 의 다음 조각으로, 아직 route 안에 남아 있던 HTML shell / log-serving read surface를 정리하는 것이다.
+- 관련 핵심 계약:
+  - [tests/test_dashboard_view_runtime.py](../tests/test_dashboard_view_runtime.py)
+  - [tests/test_log_route_security.py](../tests/test_log_route_security.py)
+  - [tests/test_node_runs_api.py](../tests/test_node_runs_api.py)
+- 현재 상태:
+  - [app/dashboard.py](../app/dashboard.py) 는 `1967 -> 1958` lines 로 줄었다.
+  - `job_detail.html` render는 request-first `TemplateResponse` 형태로 통일됐다.
+- 다음 우선순위 1~3:
+  1. `remaining runtime split / read-service long-tail 정리`
+  2. `durable backend / self-check alert routing / escalation hardening`
+  3. `LICENSE / 정책 의사결정`
+- 리스크 / 가정:
+  - 이번 슬라이스는 view/log surface 분리까지만 다루며, assistant monkeypatch wrapper와 workflow/app helper thin wrapper는 그대로 남겨뒀다.
+  - `/logs/*` route는 기존과 동일하게 filename allow-list 검증 후 UTF-8 text를 그대로 반환한다.
+- 검증 결과:
+  - `.venv/bin/python -m py_compile app/dashboard_view_runtime.py app/dashboard.py` -> `ok`
+  - `.venv/bin/python -m pytest -q tests/test_dashboard_view_runtime.py tests/test_log_route_security.py tests/test_node_runs_api.py -k "job_detail_page or log_route"` -> `5 passed, 25 deselected`
+
+### Durable self-check alert webhook delivery baseline
+
+- [app/self_check_alert_delivery_runtime.py](../app/self_check_alert_delivery_runtime.py) 를 추가했다.
+  - self-check alert webhook delivery 상태를 별도 runtime/persisted payload로 관리한다.
+  - 같은 alert fingerprint는 `AGENTHUB_SELF_CHECK_ALERT_REPEAT_MINUTES` 기준 cooldown 이후에만 재전송한다.
+  - 최신 delivery state는 [app/config.py](../app/config.py) 의 `durable_runtime_self_check_alert_delivery_file` 경로인 `data/durable_runtime_self_check_alert_delivery.json` 에 저장된다.
+- [app/durable_runtime_self_check.py](../app/durable_runtime_self_check.py) 는 이제 alert lifecycle 외에 delivery payload도 함께 반환한다.
+  - `read_status()` 는 현재 alert/report 기준 delivery visibility를 붙인다.
+  - `run_check()` 는 alert state 갱신 후 webhook delivery를 시도하고 결과를 payload에 포함한다.
+  - `acknowledge_alert()` 응답도 acknowledged alert 기준 delivery 상태를 다시 계산한다.
+- [app/dashboard.py](../app/dashboard.py), [app/self_check_main.py](../app/self_check_main.py) 는 새 delivery runtime을 builder로 연결했다.
+  - dashboard/self-check timer 모두 같은 delivery state file을 사용한다.
+  - [app/templates/index.html](../app/templates/index.html) 의 `Periodic Self-Check` 카드는 이제 delivery 상태, target, last attempt, next due, error를 같이 보여준다.
+- 운영 설정/문서도 현재 기준으로 맞췄다.
+  - [.env.example](../.env.example)
+  - [scripts/setup_local_config.sh](../scripts/setup_local_config.sh)
+  - [scripts/check_repo_hygiene.py](../scripts/check_repo_hygiene.py)
+  - [README.md](../README.md)
+  - [docs/AGENT_PRODUCT_ENGINE_EXECUTION_PLAN.md](./AGENT_PRODUCT_ENGINE_EXECUTION_PLAN.md)
+  - [docs/PHASE7_PATCH_CONTROL_AND_DURABLE_RUNTIME_PLAN.md](./PHASE7_PATCH_CONTROL_AND_DURABLE_RUNTIME_PLAN.md)
+- 관련 핵심 계약:
+  - [tests/test_self_check_alert_delivery_runtime.py](../tests/test_self_check_alert_delivery_runtime.py)
+  - [tests/test_durable_runtime_self_check.py](../tests/test_durable_runtime_self_check.py)
+  - [tests/test_jobs_dashboard_api.py](../tests/test_jobs_dashboard_api.py)
+  - [tests/test_setup_local_config_script.py](../tests/test_setup_local_config_script.py)
+  - [tests/test_repo_hygiene.py](../tests/test_repo_hygiene.py)
+- 현재 상태:
+  - self-check baseline은 이제 report/alert lifecycle에 더해 optional webhook delivery state까지 함께 유지한다.
+  - outbound target은 단일 webhook baseline이며, multi-target routing/escalation policy는 아직 없다.
+- 다음 우선순위 1~3:
+  1. `remaining runtime split / read-service long-tail 정리`
+  2. `durable backend / self-check alert routing / escalation hardening`
+  3. `LICENSE / 정책 의사결정`
+- 리스크 / 가정:
+  - webhook delivery는 `AGENTHUB_SELF_CHECK_ALERT_WEBHOOK_URL` 이 비어 있으면 자동으로 비활성화된다.
+  - 같은 alert fingerprint 판단은 warning code set 기준이므로, code가 같고 메시지 세부만 바뀐 경우 같은 alert로 간주한다.
+  - 현재 delivery runtime은 인증 헤더/다중 타깃/백오프 정책 없이 단일 JSON webhook POST baseline만 제공한다.
+- 검증 결과:
+  - `.venv/bin/python -m py_compile app/self_check_alert_delivery_runtime.py app/durable_runtime_self_check.py app/self_check_main.py app/dashboard.py app/config.py` -> `ok`
+  - `.venv/bin/python -m pytest -q tests/test_self_check_alert_delivery_runtime.py tests/test_durable_runtime_self_check.py` -> `10 passed`
+  - `.venv/bin/python -m pytest -q tests/test_jobs_dashboard_api.py -k "durable_runtime_self_check"` -> `3 passed, 30 deselected`
+  - `.venv/bin/python -m pytest -q tests/test_setup_local_config_script.py tests/test_repo_hygiene.py` -> `4 passed`
+
+### Dashboard GitHub CLI helper runtime split
+
+- [app/dashboard_github_cli_runtime.py](../app/dashboard_github_cli_runtime.py) 를 추가했다.
+  - `normalize_repository_ref`
+  - `extract_issue_url`
+  - `extract_issue_number`
+  - `run_gh_command`
+  - `ensure_label`
+  - `ensure_agent_run_label`
+  를 통해 dashboard-originated GitHub CLI / label / repository ref helper 본문을 라우터 밖으로 이동했다.
+- [app/dashboard.py](../app/dashboard.py) 는 기존 monkeypatch 포인트인 `_run_gh_command`, `_ensure_label`, `_ensure_agent_run_label`, `_extract_issue_url`, `_extract_issue_number`, `_normalize_repository_ref` 를 thin wrapper로만 유지하고, 본문은 새 runtime으로 위임한다.
+- 목적은 `remaining runtime split / read-service long-tail` 다음 조각으로, issue registration / app registry 가 공유하던 GitHub helper를 dashboard 본문에서 더 걷어내는 것이다.
+- 관련 핵심 계약:
+  - [tests/test_dashboard_github_cli_runtime.py](../tests/test_dashboard_github_cli_runtime.py)
+  - [tests/test_dashboard_issue_registration_runtime.py](../tests/test_dashboard_issue_registration_runtime.py)
+  - [tests/test_dashboard_app_registry_runtime.py](../tests/test_dashboard_app_registry_runtime.py)
+  - [tests/test_workflow_settings_api.py](../tests/test_workflow_settings_api.py)
+- 현재 상태:
+  - [app/dashboard.py](../app/dashboard.py) 는 `2022 -> 1942` lines 로 줄었다.
+  - dashboard route 테스트/monkeypatch compatibility 포인트는 유지했다.
+- 다음 우선순위 1~3:
+  1. `remaining runtime split / read-service long-tail 정리`
+  2. `durable backend / self-check alert automation 경계 보강`
+  3. `LICENSE / 정책 의사결정`
+- 리스크 / 가정:
+  - 현재 `github_webhook.py` 는 여전히 자체 branch/track helper를 갖고 있고, 이번 슬라이스는 dashboard-originated GitHub helper만 공통화했다.
+  - wrapper를 남겨 호환성은 유지했지만, 완전한 helper 제거까지는 아직 한 단계 더 남아 있다.
+- 검증 결과:
+  - `.venv/bin/python -m py_compile app/dashboard.py app/dashboard_github_cli_runtime.py app/dashboard_issue_registration_runtime.py app/dashboard_app_registry_runtime.py` -> `ok`
+  - `.venv/bin/python -m pytest -q tests/test_dashboard_github_cli_runtime.py tests/test_dashboard_issue_registration_runtime.py tests/test_dashboard_app_registry_runtime.py` -> `12 passed`
+  - `.venv/bin/python -m pytest -q tests/test_workflow_settings_api.py -k "issue_register or upsert_app"` -> `5 passed, 10 deselected`
+
+### Dashboard enqueue support runtime split
+
+- [app/dashboard_job_enqueue_runtime.py](../app/dashboard_job_enqueue_runtime.py) 를 추가했다.
+  - `normalize_app_code`
+  - `normalize_track`
+  - `detect_title_track`
+  - `build_branch_name`
+  - `build_log_file_name`
+  - `find_active_job`
+  - `queue_followup_job_from_backlog_candidate`
+  를 통해 dashboard-originated issue/backlog enqueue naming/helper 본문을 라우터 밖으로 이동했다.
+- [app/dashboard.py](../app/dashboard.py) 는 이제 [app/dashboard_issue_registration_runtime.py](../app/dashboard_issue_registration_runtime.py), [app/dashboard_memory_admin_runtime.py](../app/dashboard_memory_admin_runtime.py), [app/dashboard_app_registry_runtime.py](../app/dashboard_app_registry_runtime.py) builder에서 이 runtime 또는 static helper를 재사용한다.
+- 목적은 `remaining runtime split / read-service long-tail` 다음 조각으로, route에 직접 남아 있던 enqueue/follow-up support helper를 걷어 `dashboard.py` 를 더 얇게 만드는 것이다.
+- 관련 핵심 계약:
+  - [tests/test_dashboard_job_enqueue_runtime.py](../tests/test_dashboard_job_enqueue_runtime.py)
+  - [tests/test_dashboard_issue_registration_runtime.py](../tests/test_dashboard_issue_registration_runtime.py)
+  - [tests/test_dashboard_memory_admin_runtime.py](../tests/test_dashboard_memory_admin_runtime.py)
+  - [tests/test_dashboard_app_registry_runtime.py](../tests/test_dashboard_app_registry_runtime.py)
+  - [tests/test_workflow_settings_api.py](../tests/test_workflow_settings_api.py)
+- 현재 상태:
+  - [app/dashboard.py](../app/dashboard.py) 는 `2285 -> 2022` lines 로 줄었다.
+  - shared branch/log/follow-up queue 규칙은 이제 `dashboard.py` 대신 [app/dashboard_job_enqueue_runtime.py](../app/dashboard_job_enqueue_runtime.py) 에서 관리한다.
+- 다음 우선순위 1~3:
+  1. `remaining runtime split / read-service long-tail 정리`
+  2. `durable backend / self-check alert automation 경계 보강`
+  3. `LICENSE / 정책 의사결정`
+- 리스크 / 가정:
+  - 현재 `github_webhook.py` 는 비슷한 branch/track helper를 별도로 들고 있어, webhook path까지의 완전한 공통화는 아직 하지 않았다.
+  - 이번 슬라이스는 enqueue helper 경계 분리까지이며, route grouping 자체나 runtime input/integration admin route 구조는 그대로다.
+- 검증 결과:
+  - `.venv/bin/python -m py_compile app/dashboard.py app/dashboard_job_enqueue_runtime.py app/dashboard_memory_admin_runtime.py app/dashboard_issue_registration_runtime.py` -> `ok`
+  - `.venv/bin/python -m pytest -q tests/test_dashboard_job_enqueue_runtime.py tests/test_dashboard_issue_registration_runtime.py tests/test_dashboard_memory_admin_runtime.py tests/test_dashboard_app_registry_runtime.py` -> `17 passed`
+  - `.venv/bin/python -m pytest -q tests/test_workflow_settings_api.py -k "issue_register or upsert_app"` -> `5 passed, 10 deselected`
+
+### Durable self-check alert lifecycle baseline
+
+- [app/durable_runtime_self_check.py](../app/durable_runtime_self_check.py) 에 persisted alert state를 붙였다.
+  - self-check warning set 기준으로 `open` / `acknowledged` / `resolved` lifecycle 을 계산한다.
+  - 최신 alert state는 [app/config.py](../app/config.py) 의 `durable_runtime_self_check_alert_file` 경로인 `data/durable_runtime_self_check_alert.json` 에 저장된다.
+  - active alert acknowledge, clean run 이후 resolved 전이, stale/missing report 상황의 current payload 우선 merge 규칙까지 포함한다.
+- [app/dashboard.py](../app/dashboard.py) 는 이제 self-check runtime builder에 alert file을 주입하고, `POST /api/admin/durable-runtime-self-check/alert/acknowledge` 경로를 제공한다.
+- [app/self_check_main.py](../app/self_check_main.py) 도 같은 alert file을 사용하도록 맞췄다.
+- [app/templates/index.html](../app/templates/index.html) 의 `Periodic Self-Check` 카드는 이제 alert state, acknowledge 버튼, acknowledged/resolved metadata, alert file 경로를 같이 보여준다.
+- 관련 핵심 계약:
+  - [tests/test_durable_runtime_self_check.py](../tests/test_durable_runtime_self_check.py)
+  - [tests/test_jobs_dashboard_api.py](../tests/test_jobs_dashboard_api.py)
+- 현재 상태:
+  - [app/dashboard.py](../app/dashboard.py) 는 `2261 -> 2285` lines 이다.
+  - self-check baseline은 이제 report 파일과 alert 파일을 함께 유지하지만, 외부 notification/webhook 전송까지는 아직 하지 않는다.
+- 다음 우선순위 1~3:
+  1. `remaining runtime split / read-service long-tail 정리`
+  2. `durable backend / self-check alert automation 경계 보강`
+  3. `LICENSE / 정책 의사결정`
+- 리스크 / 가정:
+  - 현재 alert fingerprint는 warning code set 기준이라, 같은 code 조합 안에서 메시지 세부가 바뀌어도 같은 alert 로 간주한다.
+  - dashboard acknowledge 는 operator note 입력 UI 없이 기본 `acted_by=dashboard` 로만 남긴다.
+  - outbound notification, escalation, webhook 연계는 이번 슬라이스 범위 밖이다.
+- 검증 결과:
+  - `.venv/bin/python -m py_compile app/durable_runtime_self_check.py app/self_check_main.py app/dashboard.py` -> `ok`
+  - `.venv/bin/python -m pytest -q tests/test_durable_runtime_self_check.py` -> `5 passed`
+  - `.venv/bin/python -m pytest -q tests/test_jobs_dashboard_api.py -k "durable_runtime_self_check"` -> `3 passed, 30 deselected`
+
+### Dashboard assistant diagnosis runtime split
+
+- [app/dashboard_assistant_diagnosis_runtime.py](../app/dashboard_assistant_diagnosis_runtime.py) 를 추가했다.
+  - `build_agent_observability_context`
+  - `derive_assistant_diagnosis_queries`
+  - `build_assistant_diagnosis_runtime`
+  - `run_assistant_diagnosis_loop`
+  - `assistant_tool_docs_file`
+  를 통해 assistant diagnosis trace/query/tool loop와 runtime context helper를 라우터 밖으로 이동했다.
+- [app/dashboard.py](../app/dashboard.py) 는 이제 [app/dashboard_assistant_runtime.py](../app/dashboard_assistant_runtime.py) builder에서 dashboard-local helper 대신 [app/dashboard_assistant_diagnosis_runtime.py](../app/dashboard_assistant_diagnosis_runtime.py) 의 direct method delegation을 사용한다.
+  - assistant diagnosis loop
+  - diagnosis query/context 조립
+  - recent failed/running job observability context
+- 목적은 `remaining runtime split / read-service long-tail` 에서 assistant read-heavy diagnosis helper를 먼저 빼 `dashboard.py` 를 계속 얇게 만드는 것이다.
+- 관련 핵심 계약:
+  - [tests/test_dashboard_assistant_diagnosis_runtime.py](../tests/test_dashboard_assistant_diagnosis_runtime.py)
+  - [tests/test_dashboard_assistant_runtime.py](../tests/test_dashboard_assistant_runtime.py)
+  - [tests/test_assistant_chat.py](../tests/test_assistant_chat.py)
+  - [tests/test_assistant_log_analysis.py](../tests/test_assistant_log_analysis.py)
+  - [tests/test_jobs_dashboard_api.py](../tests/test_jobs_dashboard_api.py)
+- 현재 상태:
+  - [app/dashboard.py](../app/dashboard.py) 는 `2441 -> 2261` lines 로 줄었다.
+  - 최신 큰 파일 상태:
+    - [app/dashboard.py](../app/dashboard.py): `2261` lines
+    - [app/orchestrator.py](../app/orchestrator.py): `2605` lines
+- 다음 우선순위 1~3:
+  1. `remaining runtime split / read-service long-tail 정리`
+  2. `durable backend / self-check alerting 경계 보강`
+  3. `LICENSE / 정책 의사결정`
+- 리스크 / 가정:
+  - 이번 슬라이스는 assistant diagnosis/helper boundary 분리까지이며, `_run_log_analyzer` / `_run_assistant_chat_provider` 같은 route monkeypatch compatibility 포인트는 [app/dashboard.py](../app/dashboard.py) 에 그대로 남겨뒀다.
+  - 기존 prompt shape 와 `ASSISTANT_DIAGNOSIS_TRACE.json` 계약은 유지하고 내부 helper 위치만 이동했다.
+- 검증 결과:
+  - `.venv/bin/python -m py_compile app/dashboard.py app/dashboard_assistant_diagnosis_runtime.py app/dashboard_assistant_runtime.py` -> `ok`
+  - `.venv/bin/python -m pytest -q tests/test_dashboard_assistant_diagnosis_runtime.py tests/test_dashboard_assistant_runtime.py` -> `6 passed`
+  - `.venv/bin/python -m pytest -q tests/test_assistant_chat.py tests/test_assistant_log_analysis.py tests/test_jobs_dashboard_api.py -k "assistant_diagnosis or assistant/chat or log_analysis"` -> `6 passed, 36 deselected`
+
+### Dashboard observability helper delegation cleanup
+
+- [app/dashboard_job_runtime.py](../app/dashboard_job_runtime.py) 에 아래 observability/read helper를 올렸다.
+  - `read_job_runtime_recovery_trace`
+  - `read_dashboard_jsonl`
+  - `top_counter_items`
+  - `safe_average`
+  - `latest_non_empty`
+- [app/dashboard.py](../app/dashboard.py) 는 이제 job detail/admin metrics builder에서 dashboard-local wrapper 대신 [app/dashboard_job_runtime.py](../app/dashboard_job_runtime.py) 의 direct method delegation을 사용한다.
+  - `runtime_recovery_trace` reader
+  - dead-letter / requeue / needs-human summary 조립
+  - log summary / integration health facet 조립
+  - admin metrics 용 diagnosis trace / JSONL / counter utility
+- 목적은 `remaining runtime split / read-service long-tail` 에서 `job detail` 과 `admin metrics` 가 공유하던 observability helper 중복을 먼저 걷어 `dashboard.py` 를 계속 얇게 만드는 것이다.
+- 관련 핵심 계약:
+  - [tests/test_dashboard_job_runtime.py](../tests/test_dashboard_job_runtime.py)
+  - [tests/test_dashboard_admin_metrics_runtime.py](../tests/test_dashboard_admin_metrics_runtime.py)
+  - [tests/test_dashboard_job_detail_runtime.py](../tests/test_dashboard_job_detail_runtime.py)
+  - [tests/test_node_runs_api.py](../tests/test_node_runs_api.py)
+  - [tests/test_jobs_dashboard_api.py](../tests/test_jobs_dashboard_api.py)
+- 현재 상태:
+  - [app/dashboard.py](../app/dashboard.py) 는 `2792 -> 2441` lines 로 줄었다.
+  - 최신 큰 파일 상태:
+    - [app/dashboard.py](../app/dashboard.py): `2441` lines
+    - [app/orchestrator.py](../app/orchestrator.py): `2605` lines
+- 다음 우선순위 1~3:
+  1. `remaining runtime split / read-service long-tail 정리`
+  2. `durable backend / self-check alerting 경계 보강`
+  3. `LICENSE / 정책 의사결정`
+- 리스크 / 가정:
+  - 이번 슬라이스는 observability helper delegation cleanup 까지이며, job detail HTML shell 과 issue/app/assistant write helper 등 일부 route-local 조립은 아직 [app/dashboard.py](../app/dashboard.py) 에 남아 있다.
+  - 기존 API shape 와 recovery/integration payload 계약은 유지하고 내부 helper 위치만 이동했다.
+- 검증 결과:
+  - `.venv/bin/python -m py_compile app/dashboard.py app/dashboard_job_runtime.py app/dashboard_job_detail_runtime.py app/dashboard_admin_metrics_runtime.py` -> `ok`
+  - `.venv/bin/python -m pytest -q tests/test_dashboard_job_runtime.py tests/test_dashboard_admin_metrics_runtime.py tests/test_dashboard_job_detail_runtime.py` -> `13 passed`
+  - `.venv/bin/python -m pytest -q tests/test_node_runs_api.py tests/test_jobs_dashboard_api.py -k "admin_metrics or assistant_diagnosis or runtime_recovery_trace or job_detail_api"` -> `22 passed, 34 deselected`
+
+### Dashboard job artifact / log helper runtime split
+
+- [app/dashboard_job_artifact_runtime.py](../app/dashboard_job_artifact_runtime.py) 를 추가했다.
+  - `read_agent_md_files`
+  - `read_stage_md_snapshots`
+  - `resolve_channel_log_path`
+  - `parse_log_events`
+  - `build_focus_job_log_context`
+  - `tail_text_lines`
+  를 통해 log path resolution, log event parsing, agent/stage markdown snapshot, focus job log context helper 책임을 라우터 밖으로 이동했다.
+- [app/dashboard.py](../app/dashboard.py) 는 이제 builder를 통해 아래 경계가 같은 runtime을 재사용한다.
+  - [app/dashboard_job_detail_runtime.py](../app/dashboard_job_detail_runtime.py)
+  - [app/dashboard_assistant_runtime.py](../app/dashboard_assistant_runtime.py)
+  - [app/dashboard_job_runtime.py](../app/dashboard_job_runtime.py)
+  - log file route와 assistant diagnosis helper
+- 목적은 `remaining runtime split / read-service long-tail` 에서 detail/assistant/log route가 공유하던 read-heavy file/artifact helper를 먼저 빼 `dashboard.py` 를 계속 얇게 만드는 것이다.
+- 관련 핵심 계약:
+  - [tests/test_dashboard_job_artifact_runtime.py](../tests/test_dashboard_job_artifact_runtime.py)
+  - [tests/test_log_route_security.py](../tests/test_log_route_security.py)
+  - [tests/test_dashboard_job_detail_runtime.py](../tests/test_dashboard_job_detail_runtime.py)
+  - [tests/test_node_runs_api.py](../tests/test_node_runs_api.py)
+  - [tests/test_dashboard_assistant_runtime.py](../tests/test_dashboard_assistant_runtime.py)
+  - [tests/test_assistant_chat.py](../tests/test_assistant_chat.py)
+  - [tests/test_assistant_log_analysis.py](../tests/test_assistant_log_analysis.py)
+- 현재 상태:
+  - [app/dashboard.py](../app/dashboard.py) 는 `2991 -> 2792` lines 로 줄었다.
+  - 최신 큰 파일 상태:
+    - [app/dashboard.py](../app/dashboard.py): `2792` lines
+    - [app/orchestrator.py](../app/orchestrator.py): `2605` lines
+- 다음 우선순위 1~3:
+  1. `remaining runtime split / read-service long-tail 정리`
+  2. `durable backend / self-check alerting 경계 보강`
+  3. `LICENSE / 정책 의사결정`
+- 리스크 / 가정:
+  - 이번 슬라이스는 shared file/artifact helper boundary 분리까지이며, job detail HTML shell 과 일부 read-side operator surface 는 아직 [app/dashboard.py](../app/dashboard.py) 에 남아 있다.
+  - 기존 legacy debug log path 호환성과 `parse_log_events` 의 최근 300개 event tail 계약은 유지하고 내부 조립 위치만 이동했다.
+- 검증 결과:
+  - `.venv/bin/python -m py_compile app/dashboard_job_artifact_runtime.py app/dashboard.py app/dashboard_job_detail_runtime.py app/dashboard_assistant_runtime.py app/dashboard_job_runtime.py` -> `ok`
+  - `.venv/bin/python -m pytest -q tests/test_dashboard_job_artifact_runtime.py tests/test_log_route_security.py tests/test_dashboard_job_detail_runtime.py tests/test_node_runs_api.py` -> `33 passed, 2 warnings`
+  - `.venv/bin/python -m pytest -q tests/test_assistant_chat.py tests/test_assistant_log_analysis.py tests/test_dashboard_assistant_runtime.py` -> `14 passed`
+
+### Dashboard jobs list / options read runtime split
+
+- [app/dashboard_job_list_runtime.py](../app/dashboard_job_list_runtime.py) 를 추가했다.
+  - `list_jobs_payload`
+  - `get_job_options_payload`
+  - `list_dashboard_jobs`
+  를 통해 `jobs list / options` read path 조립과 filtering/pagination helper 책임을 라우터 밖으로 이동했다.
+- [app/dashboard.py](../app/dashboard.py) 의 아래 경로는 이제 thin wrapper만 남긴다.
+  - `GET /api/jobs`
+  - `GET /api/jobs/options`
+- 목적은 `remaining runtime split / read-service long-tail` 에서 반복 호출되는 list/filter/read 조각을 먼저 runtime으로 옮겨 `dashboard.py` 와 admin metrics 의 공통 read helper를 얇게 만드는 것이다.
+- 관련 핵심 계약:
+  - [tests/test_dashboard_job_list_runtime.py](../tests/test_dashboard_job_list_runtime.py)
+  - [tests/test_jobs_dashboard_api.py](../tests/test_jobs_dashboard_api.py)
+  - [tests/test_dashboard_admin_metrics_runtime.py](../tests/test_dashboard_admin_metrics_runtime.py)
+- 현재 상태:
+  - [app/dashboard.py](../app/dashboard.py) 는 `3379 -> 3207` lines 로 줄었다.
+  - 최신 큰 파일 상태:
+    - [app/dashboard.py](../app/dashboard.py): `3207` lines
+    - [app/orchestrator.py](../app/orchestrator.py): `2605` lines
+- 다음 우선순위 1~3:
+  1. `remaining runtime split / read-service long-tail 정리`
+  2. `durable backend / self-check alerting 경계 보강`
+  3. `LICENSE / 정책 의사결정`
+- 리스크 / 가정:
+  - 이번 슬라이스는 jobs list/options read 조립과 helper delegation 까지이며, job detail page HTML route 와 나머지 read-heavy operator surface 는 아직 [app/dashboard.py](../app/dashboard.py) 에 남아 있다.
+  - 기존 API shape 는 유지하고 내부 조립 위치만 이동했다.
+- 검증 결과:
+  - `.venv/bin/python -m py_compile app/dashboard_job_list_runtime.py app/dashboard.py` -> `ok`
+  - `.venv/bin/python -m pytest -q tests/test_dashboard_job_list_runtime.py tests/test_jobs_dashboard_api.py` -> `35 passed`
+  - `.venv/bin/python -m pytest -q tests/test_dashboard_admin_metrics_runtime.py` -> `1 passed`
+
+### Dashboard job detail / node-runs read runtime split
+
+- [app/dashboard_job_detail_runtime.py](../app/dashboard_job_detail_runtime.py) 를 추가했다.
+  - `get_job_detail_payload`
+  - `get_job_node_runs_payload`
+  를 통해 `job detail / node-runs` read path 조립 책임을 라우터 밖으로 이동했다.
+- [app/dashboard.py](../app/dashboard.py) 의 아래 경로는 이제 thin wrapper만 남긴다.
+  - `GET /api/jobs/{job_id}`
+  - `GET /api/jobs/{job_id}/node-runs`
+- 목적은 `remaining runtime split / read-service long-tail` 중 가장 큰 read-heavy 블록을 먼저 줄여 `dashboard.py` 를 계속 얇게 만드는 것이다.
+- 관련 핵심 계약:
+  - [tests/test_dashboard_job_detail_runtime.py](../tests/test_dashboard_job_detail_runtime.py)
+  - [tests/test_node_runs_api.py](../tests/test_node_runs_api.py)
+- 현재 상태:
+  - [app/dashboard.py](../app/dashboard.py) 는 `3425 -> 3379` lines 로 줄었다.
+  - 최신 큰 파일 상태:
+    - [app/dashboard.py](../app/dashboard.py): `3379` lines
+    - [app/orchestrator.py](../app/orchestrator.py): `2605` lines
+- 다음 우선순위 1~3:
+  1. `remaining runtime split / read-service long-tail 정리`
+  2. `durable backend / self-check alerting 경계 보강`
+  3. `LICENSE / 정책 의사결정`
+- 리스크 / 가정:
+  - 이번 슬라이스는 route 본문 분리까지이며, workflow resolution / resume helper 본체는 아직 [app/dashboard.py](../app/dashboard.py) 에 남아 있다.
+  - 기존 API shape 는 유지하고 내부 조립 위치만 이동했다.
+- 검증 결과:
+  - `.venv/bin/python -m py_compile app/dashboard_job_detail_runtime.py app/dashboard.py` -> `ok`
+  - `.venv/bin/python -m pytest -q tests/test_dashboard_job_detail_runtime.py tests/test_node_runs_api.py` -> `27 passed, 2 warnings`
+
+### Phase 7-E4 secret rotation / reverse-proxy TLS runbook baseline
+
+- [docs/REVERSE_PROXY_TLS_RUNBOOK.md](../docs/REVERSE_PROXY_TLS_RUNBOOK.md) 를 추가했다.
+  - reverse proxy / TLS termination
+  - 권장 `.env`
+  - `nginx` 예시
+  - smoke test / rollback 절차
+  를 한 runbook 으로 정리했다.
+- [app/security_governance_runtime.py](../app/security_governance_runtime.py) 는 이제 아래 operator-facing payload 를 같이 반환한다.
+  - `operator_checklist`
+  - `recommended_env`
+  - `docs.tls_runbook`
+- [app/templates/index.html](../app/templates/index.html) 의 `Security / TLS Governance` detail 은 이제 운영 체크리스트, 권장 ENV, runbook 경로를 함께 보여준다.
+- [README.md](../README.md), [SECURITY.md](../SECURITY.md), [docs/DOCUMENT_MAP.md](../docs/DOCUMENT_MAP.md), [docs/PRODUCTION_READINESS_TRIAGE_PLAN.md](../docs/PRODUCTION_READINESS_TRIAGE_PLAN.md), [docs/AGENT_PRODUCT_ENGINE_EXECUTION_PLAN.md](../docs/AGENT_PRODUCT_ENGINE_EXECUTION_PLAN.md), [docs/PHASE7_PATCH_CONTROL_AND_DURABLE_RUNTIME_PLAN.md](../docs/PHASE7_PATCH_CONTROL_AND_DURABLE_RUNTIME_PLAN.md) 를 현재 운영 절차 기준으로 갱신했다.
+- 현재 상태:
+  - secret rotation runbook 과 reverse proxy/TLS runbook 이 분리된 운영 source-of-truth 로 연결됐다.
+  - `Security / TLS Governance` payload 는 단순 posture 경고에서 operator checklist + 권장 ENV + runbook pointer 까지 표면화한다.
+  - 최신 큰 파일 상태:
+    - [app/dashboard.py](../app/dashboard.py): `3425` lines
+    - [app/orchestrator.py](../app/orchestrator.py): `2605` lines
+- 다음 우선순위 1~3:
+  1. `remaining runtime split / read-service long-tail 정리`
+  2. `durable backend / self-check alerting 경계 보강`
+  3. `LICENSE / 정책 의사결정`
+- 리스크 / 가정:
+  - 이번 슬라이스는 운영 절차와 posture guidance 정례화까지이며, 실제 secret 교체/인증서 발급/프록시 반영은 여전히 운영 수행이 필요하다.
+  - `operator_checklist` 는 현재 reverse proxy/LB 종료를 기본 운영 모델로 가정한다.
+- 검증 결과:
+  - `.venv/bin/python -m py_compile app/security_governance_runtime.py app/dashboard.py` -> `ok`
+  - `.venv/bin/python -m pytest -q tests/test_security_governance_runtime.py tests/test_jobs_dashboard_api.py -k "security_governance"` -> `3 passed, 31 deselected`
+
+### Phase 7-E3 periodic self-check baseline
+
+- [app/durable_runtime_self_check.py](../app/durable_runtime_self_check.py) 를 추가했다.
+  - patch status
+  - latest patch run / updater status
+  - post-update health
+  - durable runtime hygiene
+  - security governance
+  를 하나의 persisted self-check report 로 합친다.
+- [app/self_check_main.py](../app/self_check_main.py) 를 추가했다.
+  - `systemd` timer 가 호출하는 one-shot self-check entrypoint 다.
+- [app/dashboard.py](../app/dashboard.py) 와 [app/templates/index.html](../app/templates/index.html) 에 아래 operator surface 를 추가했다.
+  - `GET /api/admin/durable-runtime-self-check`
+  - `POST /api/admin/durable-runtime-self-check/run`
+  - `Periodic Self-Check` admin 카드
+- [systemd/agenthub-self-check.service](../systemd/agenthub-self-check.service), [systemd/agenthub-self-check.timer](../systemd/agenthub-self-check.timer) 를 추가했고, [scripts/install_systemd.sh](../scripts/install_systemd.sh) 는 timer enable + 초기 1회 실행까지 수행한다.
+- [app/config.py](../app/config.py) 에 아래 경계를 추가했다.
+  - `durable_runtime_self_check_report_file`
+  - `AGENTHUB_SELF_CHECK_STALE_MINUTES` 기본값 `45`
+- 현재 상태:
+  - 최신 self-check report 는 `data/durable_runtime_self_check_report.json` 에 남는다.
+  - 기본 timer 주기는 `15min` 이고 stale 기준은 `45min` 이다.
+  - [app/dashboard.py](../app/dashboard.py) 는 `3368 -> 3425` lines 가 됐다.
+  - 최신 큰 파일 상태:
+    - [app/dashboard.py](../app/dashboard.py): `3425` lines
+    - [app/orchestrator.py](../app/orchestrator.py): `2605` lines
+- 다음 우선순위 1~3:
+  1. `실제 secret rotation / reverse-proxy TLS 운영 절차 정례화`
+  2. `remaining runtime split / read-service long-tail 정리`
+  3. `durable backend / self-check alerting 경계 보강`
+- 리스크 / 가정:
+  - self-check 는 observability baseline 이며 자동 복구/알림 전송까지는 아직 하지 않는다.
+  - `PatchHealthRuntime` 은 `systemctl is-active` 와 로컬 `/healthz` 호출을 사용하므로 실제 운영 환경에서는 self-check service 가 systemd/journal 접근 권한을 가진다고 가정한다.
+  - timer 미설치 환경에서도 dashboard 수동 실행은 가능하지만, stale 경고는 계속 남는다.
+- 검증 결과:
+  - `.venv/bin/python -m py_compile app/durable_runtime_self_check.py app/self_check_main.py app/dashboard.py` -> `ok`
+  - `.venv/bin/python -m pytest -q tests/test_durable_runtime_self_check.py tests/test_jobs_dashboard_api.py -k "durable_runtime_self_check or durable_runtime_hygiene or security_governance or patch_updater or patch_run"` -> `13 passed, 22 deselected`
+  - `.venv/bin/python -m pytest -q tests/test_setup_local_config_script.py tests/test_security_governance_runtime.py tests/test_durable_runtime_hygiene.py` -> `6 passed`
+  - `.venv/bin/python -m pytest -q tests/test_main_https_enforcement.py` -> `2 passed`
+  - `.venv/bin/python -m pytest -q tests/test_patch_health_runtime.py` -> `2 passed`
+
+### Dashboard issue registration write/service split
+
+- [app/dashboard_issue_registration_runtime.py](../app/dashboard_issue_registration_runtime.py) 를 추가했다.
+  - `register_issue`
+  책임을 라우터 밖으로 이동했다.
+- [app/dashboard.py](../app/dashboard.py) 의 아래 경로는 이제 thin wrapper만 남긴다.
+  - `POST /api/issues/register`
+- 목적은 `dashboard write action/service` 잔여 중 마지막 큰 mutation 블록이던 issue registration 을 추출해, dashboard write/service 축소 범위를 현재 목표 수준에서 닫는 것이다.
+- 관련 핵심 계약:
+  - [tests/test_dashboard_issue_registration_runtime.py](../tests/test_dashboard_issue_registration_runtime.py)
+  - [tests/test_workflow_settings_api.py](../tests/test_workflow_settings_api.py)
+- 현재 상태:
+  - `dashboard.py` 는 `3496 -> 3368` lines 로 줄었다.
+  - 최신 큰 파일 상태:
+    - [app/dashboard.py](../app/dashboard.py): `3368` lines
+    - [app/orchestrator.py](../app/orchestrator.py): `2605` lines
+- 다음 우선순위 1~3:
+  1. `durable runtime periodic self-check`
+  2. `실제 secret rotation / reverse-proxy TLS 운영 절차 정례화`
+  3. `remaining runtime split / read-service long-tail 정리`
+- 리스크 / 가정:
+  - issue registration 은 builder 주입으로 기존 `gh issue create/edit`, label ensure, active-job dedupe, workflow selection 계약을 유지한다.
+  - dashboard write/service 축소는 현재 목표 조각을 닫았지만, read-heavy block과 잡 상세 조합 로직은 여전히 [app/dashboard.py](../app/dashboard.py) 에 남아 있다.
+- 검증 결과:
+  - `.venv/bin/python -m pytest -q tests/test_dashboard_issue_registration_runtime.py` -> `3 passed`
+  - `.venv/bin/python -m pytest -q tests/test_workflow_settings_api.py -k "issue_register"` -> `3 passed, 12 deselected`
+  - `.venv/bin/python -m py_compile app/dashboard_issue_registration_runtime.py app/dashboard.py` -> `ok`
+
+### Dashboard memory admin write/service split
+
+- [app/dashboard_memory_admin_runtime.py](../app/dashboard_memory_admin_runtime.py) 를 추가했다.
+  - `search_entries`
+  - `list_backlog_candidates`
+  - `apply_backlog_action`
+  - `get_memory_detail`
+  - `override_memory`
+  책임을 라우터 밖으로 이동했다.
+- [app/dashboard.py](../app/dashboard.py) 의 아래 경로는 이제 thin wrapper만 남긴다.
+  - `GET /api/admin/memory/search`
+  - `GET /api/admin/memory/backlog`
+  - `POST /api/admin/memory/backlog/{candidate_id}/action`
+  - `GET /api/admin/memory/{memory_id}`
+  - `POST /api/admin/memory/{memory_id}/override`
+- 목적은 `dashboard write action/service` 잔여 중 `memory admin` 블록을 먼저 줄여, 다음 `issue registration` 추출 슬라이스를 받기 쉽게 만드는 것이다.
+- 관련 핵심 계약:
+  - [tests/test_dashboard_memory_admin_runtime.py](../tests/test_dashboard_memory_admin_runtime.py)
+  - [tests/test_jobs_dashboard_api.py](../tests/test_jobs_dashboard_api.py)
+- 현재 상태:
+  - `dashboard.py` 는 `3633 -> 3496` lines 로 줄었다.
+  - 최신 큰 파일 상태:
+    - [app/dashboard.py](../app/dashboard.py): `3496` lines
+    - [app/orchestrator.py](../app/orchestrator.py): `2605` lines
+- 다음 우선순위 1~3:
+  1. `durable runtime periodic self-check`
+  2. `실제 secret rotation / reverse-proxy TLS 운영 절차 정례화`
+  3. `remaining runtime split / read-service long-tail 정리`
+- 리스크 / 가정:
+  - 당시에는 `issue register` 액션이 아직 [app/dashboard.py](../app/dashboard.py) 에 남아 있었다.
+  - backlog `queue` 액션은 기존 `_queue_followup_job_from_backlog_candidate()` 브리지를 builder 주입으로 그대로 재사용한다.
+- 검증 결과:
+  - `.venv/bin/python -m pytest -q tests/test_dashboard_memory_admin_runtime.py` -> `6 passed`
+  - `.venv/bin/python -m pytest -q tests/test_jobs_dashboard_api.py -k "admin_memory_search_api or admin_memory_backlog_api or admin_memory_backlog_action_api or conv_pytest_file_pattern"` -> `3 passed, 27 deselected`
+  - `.venv/bin/python -m py_compile app/dashboard_memory_admin_runtime.py app/dashboard.py` -> `ok`
+
+### Dashboard assistant write/service split
+
+- [app/dashboard_assistant_runtime.py](../app/dashboard_assistant_runtime.py) 를 추가했다.
+  - `chat`
+  - `log_analysis`
+  책임을 라우터 밖으로 이동했다.
+- [app/dashboard.py](../app/dashboard.py) 의 아래 경로는 이제 thin wrapper만 남긴다.
+  - `POST /api/assistant/chat`
+  - `POST /api/assistant/log-analysis`
+  - `POST /api/assistant/codex-chat` 는 기존 호환 경로를 유지한 채 위 runtime을 재사용한다.
+- 목적은 `dashboard write action/service` 잔여 중 `assistant chat / log-analysis` 블록을 먼저 줄여, 다음 `issue registration / memory admin` 추출 슬라이스를 받기 쉽게 만드는 것이다.
+- 관련 핵심 계약:
+  - [tests/test_dashboard_assistant_runtime.py](../tests/test_dashboard_assistant_runtime.py)
+  - [tests/test_assistant_chat.py](../tests/test_assistant_chat.py)
+  - [tests/test_assistant_log_analysis.py](../tests/test_assistant_log_analysis.py)
+- 현재 상태:
+  - `dashboard.py` 는 `3736 -> 3633` lines 로 줄었다.
+  - 최신 큰 파일 상태:
+    - [app/dashboard.py](../app/dashboard.py): `3633` lines
+    - [app/orchestrator.py](../app/orchestrator.py): `2605` lines
+- 다음 우선순위 1~3:
+  1. `dashboard write action/service` 잔여의 다음 조각(`issue registration`)
+  2. `durable runtime periodic self-check`
+  3. `실제 secret rotation / reverse-proxy TLS 운영 절차 정례화`
+- 리스크 / 가정:
+  - 이번 턴은 assistant 블록만 추출했고 당시에는 `issue register`, `memory search/detail/override/backlog` 계열 action이 [app/dashboard.py](../app/dashboard.py) 에 남아 있었다.
+  - 기존 monkeypatch 포인트(`_run_assistant_chat_provider`, `_run_log_analyzer`, `_run_assistant_diagnosis_loop`)는 builder 주입으로 유지했다.
+- 검증 결과:
+  - `.venv/bin/python -m pytest -q tests/test_dashboard_assistant_runtime.py tests/test_assistant_chat.py tests/test_assistant_log_analysis.py` -> `14 passed`
+  - `.venv/bin/python -m py_compile app/dashboard_assistant_runtime.py app/dashboard.py` -> `ok`
+
+### Dashboard settings write/service split
+
+- [app/dashboard_settings_runtime.py](../app/dashboard_settings_runtime.py) 를 추가했다.
+  - `workflow_schema`
+  - `list_workflows`
+  - `validate_workflow`
+  - `save_workflow`
+  - `set_default_workflow`
+  - `get_feature_flags`
+  - `save_feature_flags`
+  - `get_agent_config`
+  - `update_agent_config`
+  - `get_agent_cli_status`
+  - `get_agent_model_status`
+  책임을 라우터 밖으로 이동했다.
+- [app/dashboard.py](../app/dashboard.py) 의 아래 경로는 이제 thin wrapper만 남긴다.
+  - `GET /api/workflows/schema`
+  - `GET /api/workflows`
+  - `POST /api/workflows/validate`
+  - `POST /api/workflows`
+  - `POST /api/workflows/default`
+  - `GET /api/feature-flags`
+  - `POST /api/feature-flags`
+  - `GET /api/agents/config`
+  - `POST /api/agents/config`
+  - `GET /api/agents/check`
+  - `GET /api/agents/models`
+- 목적은 `dashboard write action/service` 잔여 중 `workflow / feature flag / agent config` 묶음을 먼저 줄여, 다음 `assistant / issue registration / memory admin` 추출 슬라이스를 받기 쉽게 만드는 것이다.
+- 관련 핵심 계약:
+  - [tests/test_dashboard_settings_runtime.py](../tests/test_dashboard_settings_runtime.py)
+  - [tests/test_workflow_settings_api.py](../tests/test_workflow_settings_api.py)
+  - [tests/test_jobs_dashboard_api.py](../tests/test_jobs_dashboard_api.py)
+- 현재 상태:
+  - `dashboard.py` 는 `3758 -> 3736` lines 로 줄었다.
+  - 최신 큰 파일 상태:
+    - [app/dashboard.py](../app/dashboard.py): `3736` lines
+    - [app/orchestrator.py](../app/orchestrator.py): `2605` lines
+- 다음 우선순위 1~3:
+  1. `dashboard write action/service` 잔여의 다음 조각(`assistant / issue registration / memory admin`)
+  2. `durable runtime periodic self-check`
+  3. `실제 secret rotation / reverse-proxy TLS 운영 절차 정례화`
+- 리스크 / 가정:
+  - 이번 턴은 settings 블록만 추출했고 `assistant chat/log-analysis`, `issue register`, `memory override` 계열 action은 아직 [app/dashboard.py](../app/dashboard.py) 에 남아 있다.
+  - workflow validation 실패 응답은 기존과 동일하게 `HTTP 400 + {message, errors}` shape를 유지한다.
+- 검증 결과:
+  - `.venv/bin/python -m pytest -q tests/test_dashboard_settings_runtime.py tests/test_workflow_settings_api.py` -> `21 passed`
+  - `.venv/bin/python -m pytest -q tests/test_jobs_dashboard_api.py -k "agent_cli_check_api_returns_git_and_gh or agent_models_api_reports_dangerous_codex_templates"` -> `2 passed, 28 deselected`
+
+### Dashboard app registry write/service split
+
+- [app/dashboard_app_registry_runtime.py](../app/dashboard_app_registry_runtime.py) 를 추가했다.
+  - `list_apps`
+  - `upsert_app`
+  - `delete_app`
+  - `map_app_workflow`
+  책임을 라우터 밖으로 이동했다.
+- [app/dashboard.py](../app/dashboard.py) 의 아래 경로는 이제 thin wrapper만 남긴다.
+  - `GET /api/apps`
+  - `POST /api/apps`
+  - `DELETE /api/apps/{app_code}`
+  - `POST /api/apps/{app_code}/workflow`
+- 목적은 `dashboard write action/service` 잔여 중 `apps` 관리 블록을 먼저 줄여, 다음 `workflow / feature flag / agent config` 추출 슬라이스를 받기 쉽게 만드는 것이다.
+- 관련 핵심 계약:
+  - [tests/test_dashboard_app_registry_runtime.py](../tests/test_dashboard_app_registry_runtime.py)
+  - [tests/test_workflow_settings_api.py](../tests/test_workflow_settings_api.py)
+- 현재 상태:
+  - `dashboard.py` 는 `3875 -> 3758` lines 로 줄었다.
+  - 최신 큰 파일 상태:
+    - [app/dashboard.py](../app/dashboard.py): `3758` lines
+    - [app/orchestrator.py](../app/orchestrator.py): `2605` lines
+- 다음 우선순위 1~3:
+  1. `dashboard write action/service` 잔여의 다음 조각(`workflow / feature flag / agent config`)
+  2. `durable runtime periodic self-check`
+  3. `실제 secret rotation / reverse-proxy TLS 운영 절차 정례화`
+- 리스크 / 가정:
+  - 이번 턴은 `apps` 관리만 추출했고 workflow editor/feature flag/agent config write path는 아직 `dashboard.py`에 남아 있다.
+  - route contract는 유지했고, side effect(`gh label create`)도 기존 helper를 그대로 주입받는다.
+- 검증 결과:
+  - `.venv/bin/python -m pytest -q tests/test_dashboard_app_registry_runtime.py` -> `5 passed`
+  - `.venv/bin/python -m pytest -q tests/test_workflow_settings_api.py` -> `15 passed`
+
+### Phase 7-E2 security / TLS governance baseline
+
+- [app/security_governance_runtime.py](../app/security_governance_runtime.py) 를 추가했다.
+  - `AGENTHUB_PUBLIC_BASE_URL`
+  - `AGENTHUB_ENFORCE_HTTPS`
+  - `AGENTHUB_TRUST_X_FORWARDED_PROTO`
+  - CORS allow-list / wildcard
+  - webhook secret 길이 / test-like 값 여부
+  를 한 번에 점검한다.
+- [app/main.py](../app/main.py) 는 이제 `AGENTHUB_ENFORCE_HTTPS=true` 일 때 `/healthz`를 제외한 HTTP 요청을 `426 https_required`로 거부할 수 있다.
+  - `AGENTHUB_TRUST_X_FORWARDED_PROTO=true` 면 `X-Forwarded-Proto` 기준으로 HTTPS를 판정한다.
+- [app/dashboard.py](../app/dashboard.py) 에 `GET /api/admin/security-governance` 를 추가했다.
+- [app/templates/index.html](../app/templates/index.html) 에 `Security / TLS Governance` 카드와 `거버넌스 점검` 버튼을 추가했다.
+- 운영 설정 예시와 위생 검사도 같이 맞췄다.
+  - [app/config.py](../app/config.py)
+  - [.env.example](../.env.example)
+  - [scripts/setup_local_config.sh](../scripts/setup_local_config.sh)
+  - [scripts/check_repo_hygiene.py](../scripts/check_repo_hygiene.py)
+- 관련 핵심 계약:
+  - [tests/test_security_governance_runtime.py](../tests/test_security_governance_runtime.py)
+  - [tests/test_main_https_enforcement.py](../tests/test_main_https_enforcement.py)
+  - [tests/test_jobs_dashboard_api.py](../tests/test_jobs_dashboard_api.py)
+  - [tests/test_repo_hygiene.py](../tests/test_repo_hygiene.py)
+  - [tests/test_setup_local_config_script.py](../tests/test_setup_local_config_script.py)
+- 현재 상태:
+  - `7-E2 security / TLS governance` baseline implemented
+  - 최신 큰 파일 상태:
+    - [app/dashboard.py](../app/dashboard.py): `3875` lines
+    - [app/orchestrator.py](../app/orchestrator.py): `2605` lines
+- 다음 우선순위 1~3:
+  1. `dashboard write action/service` 잔여 축소
+  2. `durable runtime periodic self-check`
+  3. `실제 secret rotation / reverse-proxy TLS 운영 절차 정례화`
+- 리스크 / 가정:
+  - 현재 HTTPS 강제는 app-level baseline이다. 실제 TLS termination/certificate 운영은 reverse proxy/LB 절차가 따로 필요하다.
+  - `/healthz` 는 내부 점검 경로를 위해 HTTP 예외로 유지한다.
+  - secret rotation 자체는 여전히 운영 작업이며, 이번 턴은 posture surface + 경계 강화까지만 닫았다.
+- 검증 결과:
+  - `.venv/bin/python -m pytest -q tests/test_security_governance_runtime.py` -> `2 passed`
+  - `.venv/bin/python -m pytest -q tests/test_main_https_enforcement.py` -> `2 passed`
+  - `.venv/bin/python -m pytest -q tests/test_jobs_dashboard_api.py -k "security_governance or durable_runtime_hygiene or patch_status or patch_run or patch_updater"` -> `9 passed, 21 deselected`
+  - `.venv/bin/python -m pytest -q tests/test_repo_hygiene.py` -> `2 passed`
+  - `.venv/bin/python -m pytest -q tests/test_setup_local_config_script.py` -> `2 passed`
+
+### Phase 7-E1 durable runtime / workspace hygiene baseline
+
+- [app/durable_runtime_hygiene.py](../app/durable_runtime_hygiene.py) 를 추가했다.
+  - 오래된 `patch backup`
+  - `invalid workspace backup`
+  - queue `orphan / duplicate / stale`
+  - active patch run이 없는 `stale patch lock`
+  을 한 번에 감사한다.
+- cleanup은 live workspace를 자동 삭제하지 않고 안전한 대상만 정리한다.
+  - retention 지난 terminal/orphan patch backup
+  - invalid workspace backup
+  - queue leftover
+  - stale patch lock
+- [app/dashboard.py](../app/dashboard.py) 에 아래 API를 추가했다.
+  - `GET /api/admin/durable-runtime-hygiene`
+  - `POST /api/admin/durable-runtime-hygiene/cleanup`
+- [app/templates/index.html](../app/templates/index.html) 에 `Durable Runtime Hygiene` 카드와 `위생 점검 / 안전 정리 실행` 버튼을 추가했다.
+- 최신 cleanup report는 `data/durable_runtime_hygiene_report.json`에 남고, 보존 기준은 [app/config.py](../app/config.py) 의 `AGENTHUB_DURABLE_RETENTION_DAYS`(기본 `7`)다.
+- 관련 핵심 계약:
+  - [tests/test_durable_runtime_hygiene.py](../tests/test_durable_runtime_hygiene.py)
+  - [tests/test_dashboard_patch_runtime.py](../tests/test_dashboard_patch_runtime.py)
+  - [tests/test_jobs_dashboard_api.py](../tests/test_jobs_dashboard_api.py)
+- 현재 상태:
+  - `7-E1 durable runtime / workspace hygiene` baseline implemented
+  - 최신 큰 파일 상태:
+    - [app/dashboard.py](../app/dashboard.py): `3856` lines
+    - [app/orchestrator.py](../app/orchestrator.py): `2605` lines
+- 다음 우선순위 1~3:
+  1. `enterprise 운영 거버넌스 / secret / TLS`
+  2. `dashboard write action/service` 잔여 축소
+  3. `durable runtime periodic self-check`
+- 리스크 / 가정:
+  - 현재 cleanup은 `live workspace`를 삭제하지 않는다. unmanaged workspace는 operator review 대상으로만 남긴다.
+  - patch backup cleanup은 `done/restored` 또는 orphan backup만 retention policy로 정리한다. `failed/rolled_back/restore_failed` 계열 backup은 보호한다.
+  - periodic self-check/systemd timer는 아직 없다. 현재는 operator-triggered baseline이다.
+- 검증 결과:
+  - `.venv/bin/python -m pytest -q tests/test_durable_runtime_hygiene.py` -> `2 passed`
+  - `.venv/bin/python -m pytest -q tests/test_dashboard_patch_runtime.py` -> `9 passed`
+  - `.venv/bin/python -m pytest -q tests/test_jobs_dashboard_api.py` -> `29 passed`
+
+### Phase 7-D2 restore action / backup verification
+
+- [app/patch_backup_runtime.py](../app/patch_backup_runtime.py) 는 이제 `verify_backup_manifest()`를 제공하고, `restore_backup()`도 복원 전에 manifest와 실제 백업 파일을 먼저 검증한다.
+- [app/dashboard_patch_runtime.py](../app/dashboard_patch_runtime.py) 는 failed / rollback_failed / rolled_back / restore_failed patch run에 대해 `restore_requested`를 기록할 수 있다.
+  - operator note
+  - restore source status
+  - verified backup manifest
+  - next action
+  을 patch run details에 남긴다.
+- [app/patch_updater_runtime.py](../app/patch_updater_runtime.py) 는 이제
+  - `restore_requested`
+  - `restoring`
+  - `restore_verifying`
+  상태를 처리한다.
+  - backup manifest verification 실패 시 `restore_failed + manual_restore_required`
+  - 복원 후 서비스 재기동과 post-restore health check까지 수행
+  - 성공 시 `restored`
+  - 실패 시 `restore_failed + manual_restore_check_required`
+  로 종료한다.
+- [app/dashboard.py](../app/dashboard.py), [app/templates/index.html](../app/templates/index.html) 에 `복원 요청` API/버튼과 복원 검증/복원 결과 표면이 추가됐다.
+- 최신 기준 큰 파일 상태:
+  - [app/dashboard.py](../app/dashboard.py): `3821` lines
+  - [app/orchestrator.py](../app/orchestrator.py): `2605` lines
+- 최신 전체 검증:
+  - `465 passed, 12 warnings`
+- 관련 핵심 계약:
+  - [tests/test_patch_backup_runtime.py](../tests/test_patch_backup_runtime.py)
+  - [tests/test_dashboard_patch_runtime.py](../tests/test_dashboard_patch_runtime.py)
+  - [tests/test_patch_updater_runtime.py](../tests/test_patch_updater_runtime.py)
+  - [tests/test_jobs_dashboard_api.py](../tests/test_jobs_dashboard_api.py)
+- 다음 단계:
+  - `7-E1 durable runtime / workspace hygiene`
+  - `dashboard write action/service` 잔여 축소
+  - `enterprise 운영 거버넌스 / secret / TLS`
+
+### Optional helper failure noise reduction
+
+- [app/templates/job_detail.html](../app/templates/job_detail.html) 의 사용자 로그 역할 카드 집계가 이제 `TECH_WRITER`, `PR_SUMMARY`, `COMMIT_SUMMARY`, `ESCALATION` 같은 보조 helper의 non-zero 종료를 `실패`가 아니라 `주의`로 센다.
+- 상단 역할 카드와 실행 흐름 요약 배지도 보조 helper 실패는 빨간 `실패` 대신 amber 성격의 `주의(exit N)`로 보여준다.
+- 목적은 기술 문서 작성가/PR 요약기 같은 보조 route가 자주 fallback되더라도 operator가 이를 본작업 실패로 오인하지 않게 하는 것이다.
+- 관련 회귀:
+  - [tests/test_node_runs_api.py](../tests/test_node_runs_api.py)
+  - 최신 전체 검증: `456 passed, 12 warnings`
+
+### Phase 7-C2 rollback baseline
+
+- [app/patch_rollback_runtime.py](../app/patch_rollback_runtime.py) 를 추가했다.
+  - `.git` 저장소 여부
+  - dirty working tree 여부
+  - target commit 존재 여부
+  를 확인한 뒤 `git checkout -B <branch> <target_commit>` 기준으로 롤백한다.
+- [app/dashboard_patch_runtime.py](../app/dashboard_patch_runtime.py) 는 failed patch run에 대해 `rollback_requested`를 기록할 수 있다.
+  - 운영자 note
+  - rollback target commit
+  - 다음 액션
+  을 patch run details에 남긴다.
+- [app/patch_updater_runtime.py](../app/patch_updater_runtime.py) 는 이제
+  - `rollback_requested`
+  - `rolling_back`
+  - `rollback_verifying`
+  상태를 처리한다.
+  - rollback 후 서비스 재기동을 수행한다.
+  - health check가 통과하면 `rolled_back`
+  - 실패하면 `rollback_failed + manual_rollback_check_required`
+  로 종료한다.
+- [app/dashboard.py](../app/dashboard.py), [app/templates/index.html](../app/templates/index.html) 에 `실패 시 롤백` API/버튼이 추가됐다.
+- 최신 기준 큰 파일 상태:
+  - [app/dashboard.py](../app/dashboard.py): `3775` lines
+  - [app/orchestrator.py](../app/orchestrator.py): `2605` lines
+- 최신 전체 검증:
+  - `456 passed, 12 warnings`
+- 관련 핵심 계약:
+  - [test_patch_rollback_runtime.py](../tests/test_patch_rollback_runtime.py)
+  - [test_patch_updater_runtime.py](../tests/test_patch_updater_runtime.py)
+  - [test_dashboard_patch_runtime.py](../tests/test_dashboard_patch_runtime.py)
+  - [test_jobs_dashboard_api.py](../tests/test_jobs_dashboard_api.py)
+- 다음 단계:
+  - `7-D1 backup / restore + patch coupling`
+  - `durable runtime / workspace hygiene`
+  - `dashboard write action/service` 잔여 축소
+
+### Phase 7-C1 post-update health check
+
+- [app/patch_health_runtime.py](../app/patch_health_runtime.py) 를 추가했다.
+  - API `/healthz`
+  - worker service active 상태
+  - queue/store 접근
+  - patch lock 해제 여부
+  - updater status payload
+  를 패치 직후 점검한다.
+- [app/patch_updater_runtime.py](../app/patch_updater_runtime.py) 는 이제 `draining -> verifying -> done/failed`를 수행한다.
+  - 재기동 직후 patch run은 `verifying` 단계로 진입한다.
+  - health check가 통과하면 `done`
+  - 실패하면 `failed + manual_post_update_check_required`
+  로 종료된다.
+- [app/updater_main.py](../app/updater_main.py) 는 updater service에 `PatchHealthRuntime`을 같이 연결한다.
+- 최신 기준 큰 파일 상태:
+  - [app/dashboard.py](../app/dashboard.py): `3775` lines
+  - [app/orchestrator.py](../app/orchestrator.py): `2605` lines
+- 최신 전체 검증:
+  - `456 passed, 12 warnings`
+- 관련 핵심 계약:
+  - [test_patch_health_runtime.py](../tests/test_patch_health_runtime.py)
+  - [test_patch_updater_runtime.py](../tests/test_patch_updater_runtime.py)
+  - [test_patch_service_runtime.py](../tests/test_patch_service_runtime.py)
+- 다음 단계:
+  - `7-D1 backup / restore + patch coupling`
+  - `durable runtime / workspace hygiene`
+  - `dashboard write action/service` 잔여 축소
+
+### Phase 7-B2 service drain / stop / restart
+
+- [app/patch_service_runtime.py](../app/patch_service_runtime.py) 를 추가했다.
+  - patch lock 상태 파일을 관리한다.
+  - patch 진행 중 새 작업 수락 차단 경계를 제공한다.
+  - `worker stop -> api restart -> worker restart` 순서의 서비스 재기동 baseline을 수행한다.
+- [app/patch_updater_runtime.py](../app/patch_updater_runtime.py) 는 이제 `waiting_updater -> draining -> restarting` 상태 전이를 실제로 수행한다.
+  - dirty working tree / ahead-of-upstream는 시작 전에 `failed`로 전이한다.
+  - active job이 남아 있으면 drain 상태를 유지한다.
+  - active job이 비면 service restart를 수행하고 patch lock을 해제한다.
+  - 다음 단계는 `7-C1 post-update health check`였다.
+- [app/dashboard_job_action_runtime.py](../app/dashboard_job_action_runtime.py) 의 주요 requeue action은 patch lock 활성 시 `409`로 막힌다.
+- [app/dashboard.py](../app/dashboard.py) 의 dashboard issue register도 patch lock 활성 시 새 작업 등록을 막는다.
+- [app/github_webhook.py](../app/github_webhook.py) 는 patch lock 활성 시 webhook enqueue를 `accepted=false, reason=patch_in_progress`로 돌려준다.
+- [app/updater_main.py](../app/updater_main.py) 는 updater service에 `PatchServiceRuntime`을 같이 연결한다.
+- 최신 기준 큰 파일 상태:
+  - [app/dashboard.py](../app/dashboard.py): `3753` lines
+  - [app/orchestrator.py](../app/orchestrator.py): `2605` lines
+- 최신 전체 검증:
+  - `444 passed, 11 warnings`
+- 관련 핵심 계약:
+  - [test_patch_service_runtime.py](../tests/test_patch_service_runtime.py)
+  - [test_patch_updater_runtime.py](../tests/test_patch_updater_runtime.py)
+  - [test_dashboard_patch_runtime.py](../tests/test_dashboard_patch_runtime.py)
+  - [test_dashboard_job_action_runtime.py](../tests/test_dashboard_job_action_runtime.py)
+  - [test_webhook_enqueue.py](../tests/test_webhook_enqueue.py)
+- 다음 단계:
+  - `7-C1 post-update health check`
+  - `7-C2 rollback baseline`
+  - `7-D1 backup / restore + patch coupling`
+
+### CLI 연결 확인에 git / gh 추가
+
+- [app/agent_config_runtime.py](../app/agent_config_runtime.py) 의 `collect_agent_cli_status()`가 이제 `gemini`, `codex`뿐 아니라 `git`, `gh`도 같이 점검한다.
+- [app/templates/index.html](../app/templates/index.html) 의 `CLI 연결 확인` 결과 박스도 `GEMINI / CODEX / GIT / GH` 순서로 표시한다.
+- 관련 회귀:
+  - [test_agent_cli_runtime.py](../tests/test_agent_cli_runtime.py)
+  - [test_jobs_dashboard_api.py](../tests/test_jobs_dashboard_api.py)
+- 최신 검증:
+  - 타깃 회귀 `29 passed`
+  - 전체 회귀 `435 passed, 10 warnings`
+
+### Ultra-long test safety profile
+
+- 초장기/ultra 시험용 로컬 `.env` 안전 프로필 문서를 추가했다.
+  - [ULTRA_LONG_TEST_SAFETY_PROFILE.md](./ULTRA_LONG_TEST_SAFETY_PROFILE.md)
+- 현재 로컬 `.env`는 더 이상 `echo skip tests`를 쓰지 않고 아래 실테스트 명령을 사용한다.
+  - `AGENTHUB_TEST_COMMAND="bash scripts/run_agenthub_tests.sh auto"`
+  - `AGENTHUB_TEST_COMMAND_SECONDARY="bash scripts/run_agenthub_tests.sh auto"`
+  - `AGENTHUB_TEST_COMMAND_IMPLEMENT="bash scripts/run_agenthub_tests.sh implement"`
+  - `AGENTHUB_TEST_COMMAND_FIX="bash scripts/run_agenthub_tests.sh fix"`
+  - `AGENTHUB_WORKER_STALE_RUNNING_SECONDS=7200`
+  - `AGENTHUB_TEST_COMMAND_TIMEOUT_SECONDS=3600`
+- 이 값은 저장소 기본값이 아니라 `로컬 운영 프로필`이다.
+  - `.env.example`나 quickstart 기본값을 직접 바꾸지는 않는다.
+- README와 문서 맵에도 초장기 시험용 프로필 링크를 연결했다.
+  - [README.md](../README.md)
+  - [DOCUMENT_MAP.md](./DOCUMENT_MAP.md)
+- 실제 검증:
+  - `bash scripts/run_agenthub_tests.sh auto`
+  - 결과: `433 passed, 10 warnings`
+- 다음 사용 순서:
+  - 로컬 `.env`를 이 프로필로 유지
+  - 초장기 잡 enqueue 전에 `auto` 테스트를 한 번 재확인
+  - helper login/quota 경고는 본작업 실패와 분리해서 판정
+
+### Phase 7-B1 separate updater service
+
+- [app/patch_updater_runtime.py](../app/patch_updater_runtime.py) 를 추가했다.
+  - updater heartbeat/status를 `data/patch_updater_status.json`에 기록한다.
+  - 최신 `waiting_updater` patch run을 감지하면 claim 정보를 남긴다.
+- [app/updater_main.py](../app/updater_main.py) 를 추가했다.
+  - 별도 updater loop entrypoint baseline이다.
+- [app/dashboard.py](../app/dashboard.py) 에 아래 API를 추가했다.
+  - `GET /api/admin/patch-updater-status`
+- [app/templates/index.html](../app/templates/index.html) 에 `Updater 서비스` 카드를 추가했다.
+  - 상태
+  - 서비스 이름
+  - 활성 patch run
+  - 마지막 heartbeat
+  - 다음 액션
+- [systemd/agenthub-updater.service](../systemd/agenthub-updater.service) 를 추가했고, [scripts/install_systemd.sh](../scripts/install_systemd.sh) 는 updater service도 설치/기동한다.
+- 이번 슬라이스는 `claim + heartbeat + operator surface`까지다.
+  - 실제 `service drain / stop / restart`는 아직 하지 않는다.
+  - patch run의 `next_action`은 `service_drain_restart_not_implemented`로 남는다.
+- 현재 기준 큰 파일 상태:
+  - [app/orchestrator.py](../app/orchestrator.py): `2605` lines
+  - [app/dashboard.py](../app/dashboard.py): `3737` lines
+- 최신 전체 검증:
+  - `433 passed, 10 warnings`
+- 관련 핵심 계약은 아래 테스트로 고정했다.
+  - [test_patch_updater_runtime.py](../tests/test_patch_updater_runtime.py)
+  - [test_patch_control_runtime.py](../tests/test_patch_control_runtime.py)
+  - [test_dashboard_patch_runtime.py](../tests/test_dashboard_patch_runtime.py)
+  - [test_jobs_dashboard_api.py](../tests/test_jobs_dashboard_api.py)
+- 다음 단계:
+  - `7-B2 service drain / stop / restart`
+  - `7-C1 post-update health check`
+
+### Goal closure priority reset
+
+- `부분 가능` 상태가 남아 있는 항목들을 목표 기준으로 다시 정리했다.
+- 새 기준 문서:
+  - [GOAL_CLOSURE_PRIORITY_RESET.md](./GOAL_CLOSURE_PRIORITY_RESET.md)
+- 핵심 필수는 아래로 정리했다.
+  - `self-learning loop strong`
+  - `AI fallback strong`
+  - `integration/operator control strong`
+  - `mobile emulator/E2E strong`
+  - `patch/update/durable runtime baseline`
+- 후순위로 정리한 항목:
+  - `한/영 UI 완전 다국어`
+  - `그래프형 workflow 시각화`
+- 즉 현재 기준 다음 우선순위는 `remaining runtime split` 자체보다 `Phase 7 updater/durable runtime + AI fallback strong + self-growing 장기 증명`이다.
+
+### AI role execution policy alignment
+
+- 역할 경계 기준 문서 [AI_ROLE_EXECUTION_POLICY.md](./AI_ROLE_EXECUTION_POLICY.md) 를 추가했다.
+- 기본 정책은 아래로 정리했다.
+  - `Gemini`: 계획/리뷰/테스트 해석/commit·PR·escalation 요약
+  - `Codex`: 구현/리팩터/문서 실제 작성
+  - `bash`: pytest / npm test / e2e / emulator 실행
+- [config/ai_role_routing.json](../config/ai_role_routing.json), [app/ai_role_routing.py](../app/ai_role_routing.py) 기준 기본 route를 재정렬했다.
+  - `documentation -> tech-writer (Codex)`
+  - `commit_summary -> summary-reviewer (Gemini)`
+  - `pr_summary -> summary-reviewer (Gemini)`
+  - `escalation -> summary-reviewer (Gemini)`
+  - `test_reviewer -> test-reviewer (Gemini baseline route)`
+- [config/roles.json](../config/roles.json), [app/dashboard_roles_runtime.py](../app/dashboard_roles_runtime.py) 에 `summary-reviewer`, `test-reviewer` 기본 role을 추가했다.
+- [config/ai_commands.json](../config/ai_commands.json), [config/ai_commands.example.json](../config/ai_commands.example.json) 에서
+  - `commit_summary`
+  - `pr_summary`
+  - `escalation`
+  을 Gemini 명령으로 옮겼다.
+- [app/summary_runtime.py](../app/summary_runtime.py) 는 commit summary를 이제 Gemini route 먼저 시도하고, 실패 시 Codex helper fallback을 사용한다.
+- commit summary route actor는 `TECH_WRITER` 대신 `COMMIT_SUMMARY`로 남도록 바꿨다.
+- 로그 표시도 같이 맞췄다.
+  - [app/log_signal_utils.py](../app/log_signal_utils.py)
+  - [app/templates/job_detail.html](../app/templates/job_detail.html)
+  - `COMMIT_SUMMARY`, `PR_SUMMARY`, `ESCALATION` 는 optional Gemini helper로 분류된다.
+- 관련 회귀:
+  - [test_ai_role_routing.py](../tests/test_ai_role_routing.py)
+  - [test_summary_runtime.py](../tests/test_summary_runtime.py)
+  - [test_jobs_dashboard_api.py](../tests/test_jobs_dashboard_api.py)
+- 다음 단계:
+  - `test_reviewer` 전용 artifact / stage 연결
+  - CLI health card와 route/provider 상태 surface
+
+### Phase 7-A2 patch run state / progress
+
+- [app/models.py](../app/models.py) 에 [PatchRunRecord](../app/models.py) 를 추가했다.
+- [app/store.py](../app/store.py) 는 이제 patch run state를 JSON/SQLite 둘 다 저장/조회할 수 있다.
+  - `upsert_patch_run()`
+  - `get_patch_run()`
+  - `list_patch_runs()`
+- [app/dashboard_patch_runtime.py](../app/dashboard_patch_runtime.py) 를 추가했다.
+  - patch run baseline step:
+    - `approval_recorded`
+    - `waiting_updater`
+    - `drain_services`
+    - `update_code`
+    - `restart_services`
+    - `verify_health`
+  - 이번 슬라이스는 실제 updater 실행이 아니라 `waiting_updater`까지를 기록한다.
+- [app/dashboard.py](../app/dashboard.py) 에 아래 API를 추가했다.
+  - `GET /api/admin/patch-runs/latest`
+  - `POST /api/admin/patch-runs`
+- [app/templates/index.html](../app/templates/index.html) 운영 입력/상태 섹션에 `패치 실행 진행률` 카드를 추가했다.
+  - 상태
+  - 현재 단계
+  - 진행률
+  - 요청 시각
+  - 운영자 메모
+  - 현재 patch 기준 / 다음 액션
+- 현재 baseline의 `next_action`은 `separate_updater_service_required`다.
+- 이번 슬라이스로 `패치 상태 감지`와 `패치 실행 진행률 surface`가 분리됐다.
+- 다음 단계는 `7-B2 service drain / stop / restart`다.
+- 현재 기준 큰 파일 상태:
+  - [app/orchestrator.py](../app/orchestrator.py): `2605` lines
+  - [app/dashboard.py](../app/dashboard.py): `3737` lines
+- 최신 전체 검증:
+  - `430 passed, 10 warnings`
+- 관련 핵심 계약은 아래 테스트로 고정했다.
+  - [test_patch_control_runtime.py](../tests/test_patch_control_runtime.py)
+  - [test_dashboard_patch_runtime.py](../tests/test_dashboard_patch_runtime.py)
+  - [test_jobs_dashboard_api.py](../tests/test_jobs_dashboard_api.py)
+  - [test_store_and_queue.py](../tests/test_store_and_queue.py)
+
+### Phase 7-A1 patch status detection baseline
+
+- [app/patch_control_runtime.py](../app/patch_control_runtime.py) 를 추가했다.
+- admin 화면에서 현재 저장소의 patch/update 가능 여부를 읽는 baseline을 넣었다.
+  - 현재 branch
+  - 현재 commit / subject
+  - upstream ref
+  - behind / ahead
+  - dirty working tree
+  - update available 여부
+- [app/dashboard.py](../app/dashboard.py) 에 아래 API를 추가했다.
+  - `GET /api/admin/patch-status`
+  - `refresh=1` 이면 `git fetch --quiet origin` 후 다시 계산한다.
+- [app/templates/index.html](../app/templates/index.html) 운영 입력/상태 섹션에 `패치 상태` 카드를 추가했다.
+  - 상태
+  - branch / upstream
+  - behind / ahead
+  - working tree dirty 여부
+  - operator-friendly 메시지
+- 이번 슬라이스는 `감지`까지만 닫았다.
+  - 서비스 중지/업데이트/재기동은 아직 하지 않는다.
+- 관련 핵심 계약은 아래 테스트로 고정했다.
+  - [test_patch_control_runtime.py](../tests/test_patch_control_runtime.py)
+  - [test_jobs_dashboard_api.py](../tests/test_jobs_dashboard_api.py)
 
 ### Mobile E2E Runner Baseline
 
@@ -906,14 +2308,17 @@
 
 ## 3. 다음 우선순위
 
-1. `remaining runtime split`
-   - orchestrator 잔여 helper를 계속 줄이는 마감 단계
+1. `7-C2 rollback baseline`
+   - post-update health 실패 시 직전 commit 또는 지정 target으로 되돌리는 최소 경로
 
-2. `enterprise 운영 계층 보강`
+2. `7-D1 backup / restore + patch coupling`
+   - patch 전후 백업/복구 절차를 상태 기계에 연결
+
+3. `durable runtime / workspace hygiene`
+   - patch/update 흐름과 장기 운영 cleanup 정책을 연결
+
+4. `enterprise 운영 계층 보강`
    - usage trail, approval 경계, provider containment를 운영 surface로 더 조밀하게 엮는 단계
-
-3. `dashboard write action/service 잔여 축소`
-   - job action baseline은 분리됐고, 남은 admin mutation / operator write 경계를 더 잘게 분리하는 단계
 
 ## 4. 주의할 점
 
@@ -926,11 +2331,8 @@
 
 ## 5. 검증 결과
 
-- preview/provider runtime 타깃 회귀: `5 passed`
-- ux review runtime 타깃 회귀: `4 passed`
-- Phase 6-D2 code pattern/snippet 타깃 회귀: `13 passed`
-- Phase 6-D3 verification checklist 타깃 회귀: `14 passed`
-- Phase 6-E1 타깃 회귀: `24 passed, 1 warning`
+- patch health/drain 관련 타깃 회귀: `39 passed, 8 warnings`
+- 최신 전체 회귀: `448 passed, 11 warnings`
 - Phase 6-F3 integration health summary 타깃 회귀: `20 passed`
 - product review runtime 타깃 회귀: `8 passed, 43 deselected`
 - artifact io runtime 타깃 회귀: `11 passed, 43 deselected`
@@ -1278,15 +2680,15 @@
 ### 현재 기준
 
 - 현재 라인 수:
-  - [app/dashboard.py](../app/dashboard.py): `3656`
+  - [app/dashboard.py](../app/dashboard.py): `3754`
   - [app/orchestrator.py](../app/orchestrator.py): `2605`
 - 최신 전체 회귀:
-  - `420 passed, 10 warnings`
+  - `448 passed, 11 warnings`
 - 현재 다음 우선순위:
-  1. `remaining runtime split` 잔여 helper 축소
-  2. `enterprise 운영 계층 보강`
-  3. `dashboard write action/service 잔여 축소`
-  4. 모바일 트랙을 더 이어갈 경우 `MOBILE_E2E_RESULT 기반 blocker / flaky facet`
+  1. `7-C2 rollback baseline`
+  2. `7-D1 backup / restore + patch coupling`
+  3. `durable runtime / workspace hygiene`
+  4. `enterprise 운영 계층 보강`
 
 ## 7. 다음 세션 시작 순서
 

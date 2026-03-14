@@ -6,6 +6,7 @@ import json
 from app.config import AppSettings
 from app.dashboard_job_runtime import DashboardJobRuntime
 from app.models import IntegrationRegistryRecord, JobRecord, RuntimeInputRecord, utc_now_iso
+from app.workflow_resume import build_workflow_artifact_paths
 
 
 class _Store:
@@ -157,6 +158,57 @@ def test_build_job_log_summary_downgrades_optional_helper_failures_and_extracts_
     assert summary["auth_hint_count"] == 1
     assert summary["latest_auth_hint"]["message"] == "Codex CLI 로그인/인증 상태 확인 필요"
     assert summary["latest_optional_error"]["message"] == "[DONE] exit_code=1 elapsed=2.06s"
+
+
+def test_read_job_runtime_recovery_trace_enriches_failure_metadata(tmp_path: Path) -> None:
+    settings = _build_settings(tmp_path)
+    job = _build_job()
+    workspace = settings.repository_workspace_path(job.repository, job.app_code)
+    trace_path = build_workflow_artifact_paths(workspace)["runtime_recovery_trace"]
+    trace_path.parent.mkdir(parents=True, exist_ok=True)
+    trace_path.write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-03-14T09:01:00+00:00",
+                "latest_event_at": "2026-03-14T09:02:00+00:00",
+                "event_count": 1,
+                "events": [
+                    {
+                        "generated_at": "2026-03-14T09:02:00+00:00",
+                        "source": "worker_startup_sweep",
+                        "reason_code": "stale_heartbeat",
+                        "reason": "stale heartbeat detected",
+                        "stage": "implement_with_codex",
+                        "decision": "needs_human",
+                        "needs_human_summary": {
+                            "active": True,
+                            "recovery_path": "needs_human_candidate",
+                        },
+                    }
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    runtime = DashboardJobRuntime(
+        store=None,
+        settings=settings,
+        get_memory_runtime_store=lambda: None,
+        compute_job_resume_state=lambda job, node_runs, runtime_settings: {},
+        resolve_channel_log_path=lambda runtime_settings, file_name, channel="debug": runtime_settings.logs_dir / channel / file_name,
+    )
+
+    payload = runtime.read_job_runtime_recovery_trace(job)
+
+    assert payload["trace_path"] == str(trace_path)
+    assert payload["event_count"] == 1
+    assert payload["latest_failure_class"] == "stale_heartbeat"
+    assert payload["latest_provider_hint"] == "codex"
+    assert payload["latest_stage_family"] == "implementation"
+    assert payload["latest_needs_human_summary"]["recovery_path"] == "needs_human_candidate"
+    assert payload["events"][0]["provider_hint"] == "codex"
 
 
 def test_build_job_operator_inputs_returns_masked_env_inventory(tmp_path: Path) -> None:

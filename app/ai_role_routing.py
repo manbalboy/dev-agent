@@ -25,8 +25,8 @@ def default_ai_role_routing_payload() -> Dict[str, Any]:
     """Return the default AI routing policy.
 
     Current policy:
-    - Gemini: planning/review
-    - Codex: coding/expert work plus auxiliary helper tasks
+    - Gemini: planning/review/judgement summaries
+    - Codex: coding/refactor/documentation implementation
     """
 
     return {
@@ -70,32 +70,33 @@ def default_ai_role_routing_payload() -> Dict[str, Any]:
             },
             "documentation": {
                 "role_code": "tech-writer",
-                "template_keys": [
-                    "documentation_writer",
-                    "pr_summary",
-                    "commit_summary",
-                    "escalation",
-                ],
+                "template_keys": ["documentation_writer"],
                 "fallback_route": "coder",
                 "description": "기술 문서 번들 작성",
             },
             "commit_summary": {
-                "role_code": "tech-writer",
-                "template_keys": ["commit_summary", "pr_summary", "escalation"],
+                "role_code": "summary-reviewer",
+                "template_keys": ["commit_summary"],
                 "fallback_route": "codex_helper",
                 "description": "커밋 제목/요약 생성",
             },
             "pr_summary": {
-                "role_code": "tech-writer",
-                "template_keys": ["pr_summary", "escalation"],
+                "role_code": "summary-reviewer",
+                "template_keys": ["pr_summary"],
                 "fallback_route": "codex_helper",
                 "description": "PR 본문 요약 생성",
             },
             "escalation": {
-                "role_code": "escalation-helper",
-                "template_keys": ["escalation", "codex_helper"],
+                "role_code": "summary-reviewer",
+                "template_keys": ["escalation"],
                 "fallback_route": "codex_helper",
-                "description": "실패 분석과 보조 전략",
+                "description": "실패 원인 요약과 다음 액션 판단",
+            },
+            "test_reviewer": {
+                "role_code": "test-reviewer",
+                "template_keys": ["reviewer"],
+                "fallback_route": "codex_helper",
+                "description": "테스트 결과 해석과 품질 게이트 판단",
             },
             "codex_helper": {
                 "role_code": "orchestration-helper",

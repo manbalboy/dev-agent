@@ -111,6 +111,7 @@ class MemoryRetrievalRuntime:
             convention_entries=retrieval_corpus["convention_entries"],
             rankings_map=retrieval_corpus["rankings_map"],
         )
+        planner_context = self.annotate_route_context_items(planner_context, retrieval_source="db")
         reviewer_context = self.build_route_memory_context(
             route="reviewer",
             memory_log_entries=retrieval_corpus["memory_log_entries"],
@@ -119,6 +120,7 @@ class MemoryRetrievalRuntime:
             convention_entries=retrieval_corpus["convention_entries"],
             rankings_map=retrieval_corpus["rankings_map"],
         )
+        reviewer_context = self.annotate_route_context_items(reviewer_context, retrieval_source="db")
         coder_context = self.build_route_memory_context(
             route="coder",
             memory_log_entries=retrieval_corpus["memory_log_entries"],
@@ -126,6 +128,28 @@ class MemoryRetrievalRuntime:
             failure_pattern_entries=retrieval_corpus["failure_pattern_entries"],
             convention_entries=retrieval_corpus["convention_entries"],
             rankings_map=retrieval_corpus["rankings_map"],
+        )
+        coder_context = self.annotate_route_context_items(coder_context, retrieval_source="db")
+
+        vector_routes = {
+            route_name: self.build_route_vector_retrieval_payload(
+                job=job,
+                route=route_name,
+                entry_map=retrieval_corpus.get("entry_map", {}),
+            )
+            for route_name in ("planner", "reviewer", "coder")
+        }
+        planner_context = self.merge_route_context_items(
+            primary_items=vector_routes["planner"]["items"],
+            fallback_items=planner_context,
+        )
+        reviewer_context = self.merge_route_context_items(
+            primary_items=vector_routes["reviewer"]["items"],
+            fallback_items=reviewer_context,
+        )
+        coder_context = self.merge_route_context_items(
+            primary_items=vector_routes["coder"]["items"],
+            fallback_items=coder_context,
         )
 
         selection_payload = {
@@ -141,6 +165,14 @@ class MemoryRetrievalRuntime:
             "planner_context": [str(item.get("id", "")).strip() for item in planner_context],
             "reviewer_context": [str(item.get("id", "")).strip() for item in reviewer_context],
             "coder_context": [str(item.get("id", "")).strip() for item in coder_context],
+            "vector_routes": {
+                route_name: {
+                    "enabled": bool(route_payload.get("enabled")),
+                    "used_in_context": bool(route_payload.get("used_in_context")),
+                    "selected_ids": list(route_payload.get("selected_ids", []) or []),
+                }
+                for route_name, route_payload in vector_routes.items()
+            },
         }
         context_payload = {
             "generated_at": selection_payload["generated_at"],
@@ -150,6 +182,14 @@ class MemoryRetrievalRuntime:
             "planner_context": planner_context,
             "reviewer_context": reviewer_context,
             "coder_context": coder_context,
+            "vector_routes": {
+                route_name: {
+                    key: value
+                    for key, value in route_payload.items()
+                    if key != "items"
+                }
+                for route_name, route_payload in vector_routes.items()
+            },
         }
         route_traces = {
             "planner": self.memory_route_trace_payload(planner_context),
@@ -174,6 +214,14 @@ class MemoryRetrievalRuntime:
             "selected_total": len(selected_memory_ids),
             "selected_memory_ids": selected_memory_ids,
             "routes": route_traces,
+            "vector_routes": {
+                route_name: {
+                    key: value
+                    for key, value in route_payload.items()
+                    if key != "items"
+                }
+                for route_name, route_payload in vector_routes.items()
+            },
         }
 
         selection_path.write_text(json.dumps(selection_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -329,6 +377,11 @@ class MemoryRetrievalRuntime:
             "failure_pattern_entries": failure_pattern_entries,
             "convention_entries": convention_entries,
             "rankings_map": rankings_map,
+            "entry_map": {
+                str(entry.get("memory_id", "")).strip(): entry
+                for entry in runtime_entries
+                if isinstance(entry, dict) and str(entry.get("memory_id", "")).strip()
+            },
         }
 
     def load_memory_retrieval_corpus_from_files(self, *, paths: Dict[str, Path]) -> Dict[str, Any]:
@@ -359,6 +412,7 @@ class MemoryRetrievalRuntime:
             "failure_pattern_entries": failure_pattern_entries,
             "convention_entries": convention_entries,
             "rankings_map": rankings_map,
+            "entry_map": {},
         }
 
     @staticmethod
@@ -422,14 +476,28 @@ class MemoryRetrievalRuntime:
                     "id": memory_id,
                     "kind": kind,
                     "summary": str(item.get("summary", "")).strip(),
+                    "retrieval_source": str(item.get("retrieval_source", "")).strip() or "unknown",
+                    "vector_score": float(item.get("vector_score", 0.0) or 0.0),
                 }
             )
         return {
             "selected_count": len(selected_ids),
             "selected_ids": selected_ids,
             "kind_counts": kind_counts,
+            "source_counts": MemoryRetrievalRuntime.route_source_counts(selected_items),
+            "vector_selected_count": sum(
+                1 for item in selected_items if str(item.get("retrieval_source", "")).strip() == "vector"
+            ),
             "selected_items": selected_items,
         }
+
+    @staticmethod
+    def route_source_counts(items: List[Dict[str, Any]]) -> Dict[str, int]:
+        counts: Dict[str, int] = {}
+        for item in items:
+            source = str(item.get("retrieval_source", "")).strip() or "unknown"
+            counts[source] = int(counts.get(source, 0) or 0) + 1
+        return counts
 
     def write_strategy_shadow_report(
         self,
@@ -831,6 +899,153 @@ class MemoryRetrievalRuntime:
                 ordered_ids.append(item_id)
             dedup[item_id] = item
         return [dedup[item_id] for item_id in ordered_ids[:6]]
+
+    @staticmethod
+    def annotate_route_context_items(
+        items: List[Dict[str, Any]],
+        *,
+        retrieval_source: str,
+    ) -> List[Dict[str, Any]]:
+        normalized_source = str(retrieval_source or "").strip() or "db"
+        annotated: List[Dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            annotated.append({**item, "retrieval_source": normalized_source})
+        return annotated
+
+    @staticmethod
+    def merge_route_context_items(
+        *,
+        primary_items: List[Dict[str, Any]],
+        fallback_items: List[Dict[str, Any]],
+        limit: int = 6,
+    ) -> List[Dict[str, Any]]:
+        dedup: Dict[str, Dict[str, Any]] = {}
+        ordered_ids: List[str] = []
+        for item in list(primary_items) + list(fallback_items):
+            if not isinstance(item, dict):
+                continue
+            item_id = str(item.get("id", "")).strip()
+            if not item_id:
+                continue
+            if item_id in dedup:
+                continue
+            ordered_ids.append(item_id)
+            dedup[item_id] = item
+        return [dedup[item_id] for item_id in ordered_ids[: max(1, int(limit or 6))]]
+
+    def build_route_vector_retrieval_payload(
+        self,
+        *,
+        job: JobRecord,
+        route: str,
+        entry_map: Dict[str, Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        route_name = str(route or "").strip().lower()
+        payload: Dict[str, Any] = {
+            "enabled": bool(self.feature_enabled("vector_memory_retrieval")),
+            "route": route_name,
+            "query": "",
+            "configured": False,
+            "attempted": False,
+            "ok": False,
+            "detail": "disabled",
+            "item_count": 0,
+            "selected_ids": [],
+            "used_in_context": False,
+            "items": [],
+        }
+        if not payload["enabled"]:
+            return payload
+
+        query = self.route_vector_query_text(job=job, route=route_name)
+        payload["query"] = query
+        if not query or not entry_map:
+            payload["detail"] = "no_runtime_db_entries"
+            return payload
+
+        result = self.get_qdrant_shadow_transport().query_memory_entries(
+            query=query,
+            repository=job.repository,
+            execution_repository=self.job_execution_repository(job),
+            app_code=job.app_code,
+            workflow_id=str(job.workflow_id or "").strip(),
+            limit=3,
+            score_threshold=0.15,
+        )
+        result_payload = result.to_dict()
+        payload.update(
+            {
+                "configured": bool(result_payload.get("configured")),
+                "attempted": bool(result_payload.get("attempted")),
+                "ok": bool(result_payload.get("ok")),
+                "detail": str(result_payload.get("detail", "")).strip(),
+                "item_count": int(result_payload.get("item_count", 0) or 0),
+            }
+        )
+
+        vector_items: List[Dict[str, Any]] = []
+        for item in result_payload.get("items", []) or []:
+            if not isinstance(item, dict):
+                continue
+            memory_id = str(item.get("memory_id", "")).strip()
+            runtime_entry = entry_map.get(memory_id)
+            if not memory_id or not isinstance(runtime_entry, dict):
+                continue
+            context_entry = self.runtime_entry_context_entry(runtime_entry)
+            if not context_entry:
+                continue
+            context_entry["retrieval_source"] = "vector"
+            context_entry["vector_score"] = round(float(item.get("vector_score", 0.0) or 0.0), 4)
+            vector_items.append(context_entry)
+
+        payload["items"] = self.merge_route_context_items(
+            primary_items=vector_items,
+            fallback_items=[],
+            limit=3,
+        )
+        payload["selected_ids"] = [
+            str(item.get("id", "")).strip()
+            for item in payload["items"]
+            if isinstance(item, dict) and str(item.get("id", "")).strip()
+        ]
+        payload["used_in_context"] = bool(payload["items"])
+        return payload
+
+    @staticmethod
+    def route_vector_query_text(*, job: JobRecord, route: str) -> str:
+        issue_title = str(job.issue_title or "").strip()
+        app_code = str(job.app_code or "").strip()
+        workflow_id = str(job.workflow_id or "").strip()
+        parts = [issue_title]
+        if app_code:
+            parts.append(f"app={app_code}")
+        if workflow_id:
+            parts.append(f"workflow={workflow_id}")
+        normalized_route = str(route or "").strip().lower()
+        if normalized_route == "planner":
+            parts.append("planning architecture implementation strategy")
+        elif normalized_route == "reviewer":
+            parts.append("review quality regression test failure")
+        else:
+            parts.append("implementation code fix convention")
+        return " ".join(part for part in parts if part)
+
+    def runtime_entry_context_entry(self, entry: Dict[str, Any]) -> Dict[str, Any]:
+        memory_type = str(entry.get("memory_type", "")).strip()
+        payload = self.memory_runtime_entry_payload(entry)
+        if not payload:
+            return {}
+        if memory_type == "episodic":
+            return self.memory_log_context_entry(payload)
+        if memory_type == "decision":
+            return self.decision_context_entry(payload)
+        if memory_type == "failure_pattern":
+            return self.failure_pattern_context_entry(payload)
+        if memory_type == "convention":
+            return self.convention_context_entry(payload)
+        return {}
 
     @staticmethod
     def memory_log_context_entry(entry: Dict[str, Any]) -> Dict[str, Any]:

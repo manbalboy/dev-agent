@@ -34,9 +34,21 @@ def test_setup_local_config_uses_safe_codex_flags_by_default(tmp_path: Path) -> 
 
     assert result.returncode == 0
     commands_path = tmp_path / "agenthub-root" / "config" / "ai_commands.json"
+    env_path = tmp_path / "agenthub-root" / ".env"
     content = commands_path.read_text(encoding="utf-8")
+    env_content = env_path.read_text(encoding="utf-8")
     assert "--dangerously-bypass-approvals-and-sandbox" not in content
     assert "exec - -C {work_dir} --color never" in content
+    assert "AGENTHUB_SELF_CHECK_STALE_MINUTES=45" in env_content
+    assert "AGENTHUB_SELF_CHECK_ALERT_WEBHOOK_URL=" in env_content
+    assert "AGENTHUB_SELF_CHECK_ALERT_CRITICAL_WEBHOOK_URL=" in env_content
+    assert "AGENTHUB_SELF_CHECK_ALERT_WEBHOOK_TIMEOUT_SECONDS=10" in env_content
+    assert "AGENTHUB_SELF_CHECK_ALERT_REPEAT_MINUTES=180" in env_content
+    assert "AGENTHUB_SELF_CHECK_ALERT_FAILURE_BACKOFF_MAX_MINUTES=720" in env_content
+    assert "AGENTHUB_PUBLIC_BASE_URL=http://127.0.0.1:8321" in env_content
+    assert "AGENTHUB_ENFORCE_HTTPS=false" in env_content
+    assert "AGENTHUB_TRUST_X_FORWARDED_PROTO=false" in env_content
+    assert "AGENTHUB_CORS_ALLOW_ALL=false" in env_content
     assert "DANGER_MODE=false" in result.stdout
 
 

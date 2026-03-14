@@ -1,0 +1,11 @@
+[Unit]
+Description=Run AgentHub periodic durable runtime self-check
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=15min
+Persistent=true
+Unit=agenthub-self-check.service
+
+[Install]
+WantedBy=timers.target

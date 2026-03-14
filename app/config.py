@@ -43,6 +43,20 @@ class AppSettings:
     api_port: int
     store_backend: str
     sqlite_file: Path
+    patch_updater_poll_seconds: int = 5
+    patch_api_service_name: str = "agenthub-api"
+    patch_worker_service_name: str = "agenthub-worker"
+    patch_updater_service_name: str = "agenthub-updater"
+    durable_retention_days: int = 7
+    self_check_stale_minutes: int = 45
+    self_check_alert_webhook_url: str = ""
+    self_check_alert_critical_webhook_url: str = ""
+    self_check_alert_webhook_timeout_seconds: int = 10
+    self_check_alert_repeat_minutes: int = 180
+    self_check_alert_failure_backoff_max_minutes: int = 720
+    public_base_url: str = ""
+    enforce_https: bool = False
+    trust_x_forwarded_proto: bool = False
     memory_enabled: bool = False
     memory_dir: Path = Path("memory")
     cors_allow_all: bool = True
@@ -163,6 +177,41 @@ class AppSettings:
                 f"Current value: {store_backend}"
             )
         raw_sqlite_file = os.getenv("AGENTHUB_SQLITE_FILE", str(Path(raw_data_dir) / "agenthub.db"))
+        patch_updater_poll_seconds = _read_int_env(
+            "AGENTHUB_PATCH_UPDATER_POLL_SECONDS",
+            default=5,
+        )
+        patch_api_service_name = os.getenv("AGENTHUB_PATCH_API_SERVICE_NAME", "agenthub-api").strip() or "agenthub-api"
+        patch_worker_service_name = os.getenv("AGENTHUB_PATCH_WORKER_SERVICE_NAME", "agenthub-worker").strip() or "agenthub-worker"
+        patch_updater_service_name = os.getenv("AGENTHUB_PATCH_UPDATER_SERVICE_NAME", "agenthub-updater").strip() or "agenthub-updater"
+        durable_retention_days = _read_int_env("AGENTHUB_DURABLE_RETENTION_DAYS", default=7)
+        self_check_stale_minutes = _read_int_env("AGENTHUB_SELF_CHECK_STALE_MINUTES", default=45)
+        self_check_alert_webhook_url = os.getenv("AGENTHUB_SELF_CHECK_ALERT_WEBHOOK_URL", "").strip()
+        self_check_alert_critical_webhook_url = os.getenv(
+            "AGENTHUB_SELF_CHECK_ALERT_CRITICAL_WEBHOOK_URL",
+            "",
+        ).strip()
+        self_check_alert_webhook_timeout_seconds = _read_int_env(
+            "AGENTHUB_SELF_CHECK_ALERT_WEBHOOK_TIMEOUT_SECONDS",
+            default=10,
+        )
+        self_check_alert_repeat_minutes = _read_int_env(
+            "AGENTHUB_SELF_CHECK_ALERT_REPEAT_MINUTES",
+            default=180,
+        )
+        self_check_alert_failure_backoff_max_minutes = _read_int_env(
+            "AGENTHUB_SELF_CHECK_ALERT_FAILURE_BACKOFF_MAX_MINUTES",
+            default=720,
+        )
+        public_base_url = os.getenv("AGENTHUB_PUBLIC_BASE_URL", "").strip().rstrip("/")
+        enforce_https = (
+            os.getenv("AGENTHUB_ENFORCE_HTTPS", "false").strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
+        trust_x_forwarded_proto = (
+            os.getenv("AGENTHUB_TRUST_X_FORWARDED_PROTO", "false").strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
         cors_allow_all = (
             os.getenv("AGENTHUB_CORS_ALLOW_ALL", "true").strip().lower()
             in {"1", "true", "yes", "on"}
@@ -198,6 +247,20 @@ class AppSettings:
             api_port=api_port,
             store_backend=store_backend,
             sqlite_file=Path(raw_sqlite_file).resolve(),
+            patch_updater_poll_seconds=patch_updater_poll_seconds,
+            patch_api_service_name=patch_api_service_name,
+            patch_worker_service_name=patch_worker_service_name,
+            patch_updater_service_name=patch_updater_service_name,
+            durable_retention_days=durable_retention_days,
+            self_check_stale_minutes=self_check_stale_minutes,
+            self_check_alert_webhook_url=self_check_alert_webhook_url,
+            self_check_alert_critical_webhook_url=self_check_alert_critical_webhook_url,
+            self_check_alert_webhook_timeout_seconds=self_check_alert_webhook_timeout_seconds,
+            self_check_alert_repeat_minutes=self_check_alert_repeat_minutes,
+            self_check_alert_failure_backoff_max_minutes=self_check_alert_failure_backoff_max_minutes,
+            public_base_url=public_base_url,
+            enforce_https=enforce_https,
+            trust_x_forwarded_proto=trust_x_forwarded_proto,
             cors_allow_all=cors_allow_all,
             cors_origins=cors_origins,
             memory_enabled=memory_enabled,
@@ -254,6 +317,48 @@ class AppSettings:
         """Directory where per-job user-friendly log files are stored."""
 
         return self.logs_dir / "user"
+
+    @property
+    def patch_updater_status_file(self) -> Path:
+        """Path where the standalone updater service writes heartbeat/status."""
+
+        return self.data_dir / "patch_updater_status.json"
+
+    @property
+    def patch_lock_file(self) -> Path:
+        """Path where patch drain/restart temporarily blocks new job intake."""
+
+        return self.data_dir / "patch_operation_lock.json"
+
+    @property
+    def patch_backups_dir(self) -> Path:
+        """Directory where patch updater stores pre-patch backup snapshots."""
+
+        return self.data_dir / "patch_backups"
+
+    @property
+    def durable_runtime_hygiene_report_file(self) -> Path:
+        """Path where durable runtime cleanup writes its latest audit payload."""
+
+        return self.data_dir / "durable_runtime_hygiene_report.json"
+
+    @property
+    def durable_runtime_self_check_report_file(self) -> Path:
+        """Path where periodic durable runtime self-check writes its latest report."""
+
+        return self.data_dir / "durable_runtime_self_check_report.json"
+
+    @property
+    def durable_runtime_self_check_alert_file(self) -> Path:
+        """Path where periodic durable runtime self-check writes its latest alert state."""
+
+        return self.data_dir / "durable_runtime_self_check_alert.json"
+
+    @property
+    def durable_runtime_self_check_alert_delivery_file(self) -> Path:
+        """Path where periodic durable runtime self-check stores alert delivery state."""
+
+        return self.data_dir / "durable_runtime_self_check_alert_delivery.json"
 
     @property
     def resolved_memory_dir(self) -> Path:

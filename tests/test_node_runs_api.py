@@ -654,6 +654,20 @@ def test_job_detail_page_renders_failure_visibility_shell(app_components):
     assert "실패 단계군" in response.text
 
 
+def test_job_detail_page_marks_optional_helper_failures_as_warning_in_role_summary(app_components):
+    _, store, app = app_components
+    client = TestClient(app)
+    job = _make_job("job-detail-optional-helper-warning")
+    store.create_job(job)
+
+    response = client.get(f"/jobs/{job.job_id}")
+
+    assert response.status_code == 200
+    assert "주의 ${role.progress.warn}" in response.text
+    assert "function groupProgressBadgeClass(group)" in response.text
+    assert 'if (kind === "warn") return "interrupted";' in response.text
+
+
 def test_job_detail_api_includes_needs_human_summary(app_components):
     _, store, app = app_components
     client = TestClient(app)

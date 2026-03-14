@@ -22,6 +22,7 @@
 - 시크릿이 커밋되었다고 의심되면 값을 즉시 폐기하고 새 값으로 교체한다.
 - 커밋 히스토리에 남은 시크릿은 별도 운영 절차로 정리한다.
 - 실제 절차는 [docs/SECRET_ROTATION_AND_HISTORY_CLEANUP_RUNBOOK.md](./docs/SECRET_ROTATION_AND_HISTORY_CLEANUP_RUNBOOK.md)를 따른다.
+- reverse proxy / TLS cutover 절차는 [docs/REVERSE_PROXY_TLS_RUNBOOK.md](./docs/REVERSE_PROXY_TLS_RUNBOOK.md)를 따른다.
 
 ## Response Expectations
 
@@ -33,3 +34,5 @@
 
 - 운영 환경에서는 permissive CORS, 위험한 CLI 우회 플래그, 과도한 권한 설정을 기본값으로 사용하지 않는다.
 - 위험 모드가 필요하면 명시적으로 opt-in 해야 한다.
+- 운영 공개 URL은 `AGENTHUB_PUBLIC_BASE_URL=https://...` 로 명시하고, 앱 레벨 HTTPS 강제가 필요하면 `AGENTHUB_ENFORCE_HTTPS=true` 를 사용한다.
+- TLS가 reverse proxy/LB에서 끝나면 `AGENTHUB_TRUST_X_FORWARDED_PROTO=true` 로 `X-Forwarded-Proto` 기반 HTTPS 판정을 명시한다.

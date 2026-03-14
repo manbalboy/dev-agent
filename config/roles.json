@@ -13,6 +13,7 @@
     {"code":"designer","name":"디자이너","objective":"","cli":"codex","template_key":"coder","inputs":"요구사항","outputs":"UI/디자인 산출물","checklist":"","enabled":true},
     {"code":"devops-sre","name":"인프라·운영 엔지니어","objective":"","cli":"bash","template_key":"","inputs":"서비스 상태","outputs":"운영 조치","checklist":"","enabled":true},
     {"code":"escalation-helper","name":"에스컬레이션 도우미","objective":"","cli":"codex","template_key":"escalation","inputs":"실패 로그/상태","outputs":"보조 분석/다음 액션","checklist":"Codex로 실패 원인 분석 및 다음 액션 정리","enabled":true},
+    {"code":"summary-reviewer","name":"요약 리뷰어","objective":"","cli":"gemini","template_key":"reviewer","inputs":"변경 요약/실패 맥락","outputs":"커밋/PR/에스컬레이션 요약","checklist":"Gemini로 커밋/PR 메시지와 실패 요약을 판단·정리","enabled":true},
     {"code":"incident-analyst","name":"장애 원인 분석가","objective":"","cli":"codex","template_key":"codex_helper","inputs":"로그/지표","outputs":"RCA","checklist":"","allowed_tools":["log_lookup","repo_search","memory_search"],"enabled":true},
     {"code":"orchestration-helper","name":"오케스트레이션 도우미","objective":"","cli":"codex","template_key":"codex_helper","inputs":"워크플로우 상태/로그","outputs":"다음 단계/재시도 전략","checklist":"","allowed_tools":["log_lookup","repo_search","memory_search"],"enabled":true},
     {"code":"performance","name":"성능 최적화 엔지니어","objective":"","cli":"bash","template_key":"","inputs":"프로파일링","outputs":"개선안","checklist":"","enabled":true},
@@ -26,7 +27,8 @@
     {"code":"reviewer","name":"리뷰어","objective":"","cli":"gemini","template_key":"reviewer","inputs":"코드 diff","outputs":"리뷰 리포트","checklist":"","skills":["quality-review","risk-detection","ux-review"],"allowed_tools":[],"enabled":true},
     {"code":"security","name":"보안 엔지니어","objective":"","cli":"bash","template_key":"","inputs":"코드/설정","outputs":"보안 점검","checklist":"","enabled":true},
     {"code":"system-owner","name":"시스템 오너","objective":"","cli":"gemini","template_key":"planner","inputs":"이슈 본문/SPEC.md","outputs":"확정 스펙/우선순위","checklist":"","enabled":true},
-    {"code":"tech-writer","name":"기술 문서 작성가","objective":"","cli":"codex","template_key":"documentation_writer","inputs":"SPEC/PLAN/REVIEW","outputs":"README.md, COPYRIGHT.md, DEVELOPMENT_GUIDE.md","checklist":"Codex로 문서 번들/커밋/PR 요약 생성","enabled":true},
+    {"code":"tech-writer","name":"기술 문서 작성가","objective":"","cli":"codex","template_key":"documentation_writer","inputs":"SPEC/PLAN/REVIEW","outputs":"README.md, COPYRIGHT.md, DEVELOPMENT_GUIDE.md","checklist":"Codex로 문서 번들 실제 작성","enabled":true},
+    {"code":"test-reviewer","name":"테스트 리뷰어","objective":"","cli":"gemini","template_key":"reviewer","inputs":"테스트 리포트/실행 로그","outputs":"테스트 결과 해석/품질 게이트 판단","checklist":"Gemini로 테스트 실패 원인, 재현 경로, 품질 게이트 판단 정리","enabled":true},
     {"code":"test-automation","name":"테스트 자동화 엔지니어","objective":"","cli":"bash","template_key":"","inputs":"테스트 전략","outputs":"자동화 코드","checklist":"","enabled":true},
     {"code":"tester","name":"테스터","objective":"","cli":"bash","template_key":"","inputs":"코드 상태","outputs":"테스트 결과","checklist":"","enabled":true}
   ],

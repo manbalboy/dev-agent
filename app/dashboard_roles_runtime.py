@@ -51,6 +51,7 @@ def default_roles_payload() -> Dict[str, Any]:
         ("architect", "플래너", "gemini", "planner", "요구사항", "실행 계획"),
         ("devops-sre", "인프라·운영 엔지니어", "bash", "", "서비스 상태", "운영 조치"),
         ("escalation-helper", "에스컬레이션 도우미", "codex", "escalation", "실패 로그/상태", "보조 분석/다음 액션"),
+        ("summary-reviewer", "요약 리뷰어", "gemini", "reviewer", "변경 요약/실패 맥락", "커밋/PR/에스컬레이션 요약"),
         ("security", "보안 엔지니어", "bash", "", "코드/설정", "보안 점검"),
         ("db-engineer", "데이터베이스 엔지니어", "bash", "", "스키마", "DB 변경안"),
         ("performance", "성능 최적화 엔지니어", "bash", "", "프로파일링", "개선안"),
@@ -61,6 +62,7 @@ def default_roles_payload() -> Dict[str, Any]:
         ("orchestration-helper", "오케스트레이션 도우미", "codex", "codex_helper", "워크플로우 상태/로그", "다음 단계/재시도 전략"),
         ("system-owner", "시스템 오너", "gemini", "planner", "이슈 본문/SPEC.md", "확정 스펙/우선순위"),
         ("tech-writer", "기술 문서 작성가", "codex", "documentation_writer", "SPEC/PLAN/REVIEW", "README.md, COPYRIGHT.md, DEVELOPMENT_GUIDE.md"),
+        ("test-reviewer", "테스트 리뷰어", "gemini", "reviewer", "테스트 리포트/실행 로그", "테스트 결과 해석/품질 게이트 판단"),
         ("product-analyst", "제품 분석가", "gemini", "planner", "지표/요구", "개선 우선순위"),
         ("publisher", "퍼블리셔", "codex", "coder", "디자인 시스템/화면 구조", "퍼블리싱 결과물"),
         ("research-agent", "정보검색 도우미", "python3", "research_search", "질문/키워드", "SEARCH_CONTEXT.md"),
@@ -90,8 +92,14 @@ def default_roles_payload() -> Dict[str, Any]:
         "incident-analyst": ["log_lookup", "repo_search", "memory_search"],
         "orchestration-helper": ["log_lookup", "repo_search", "memory_search"],
     }
+    checklist_defaults = {
+        "summary-reviewer": "Gemini로 커밋/PR 메시지와 실패 요약을 판단·정리",
+        "tech-writer": "Codex로 문서 번들 실제 작성",
+        "test-reviewer": "Gemini로 테스트 실패 원인, 재현 경로, 품질 게이트 판단 정리",
+    }
     for role in roles:
         role["allowed_tools"] = list(tool_defaults.get(role["code"], []))
+        role["checklist"] = checklist_defaults.get(role["code"], "")
     presets = [
         {
             "preset_id": "default-dev",

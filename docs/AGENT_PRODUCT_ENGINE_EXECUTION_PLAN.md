@@ -20,13 +20,28 @@
 4. Agentic runtime adoption (`MCP` / `Qdrant` / `LangGraph`) 확보
 5. Job recovery / long-running 운영성 확보
 6. Operator control plane / third-party integration registry 확보
-7. Durable backend / workspace hygiene 확보
-8. 무중단/HA 도입
+7. Durable backend / patch control / workspace hygiene 확보
+8. Nonlinear engine / self-growing strong closure
+9. 무중단/HA 도입
+
+## Goal-Closure Priority Reset
+- phase 순서와 별도로, `진짜 목표에 도달하려면 무엇을 먼저 닫아야 하는가` 기준은 [GOAL_CLOSURE_PRIORITY_RESET.md](./GOAL_CLOSURE_PRIORITY_RESET.md) 를 따른다.
+- 현재 기준 핵심 필수는 아래다.
+  - `self-learning loop`를 `partial -> strong`
+  - `AI fallback`을 `partial -> strong`
+  - `nonlinear runtime / vector retrieval / graph-subgraph`를 `partial -> strong`
+  - `integration/operator control`을 `partial -> strong`
+  - `앱 개발 모드 + emulator E2E`를 `baseline -> strong`
+  - `patch/update/durable runtime` baseline 닫기
+- `operator-facing graph/subgraph visualization baseline`은 Phase 8에서 같이 올린다.
+- `한/영 UI 완전 다국어`, `full visual editor` 급 graph workflow 편집기는 여전히 후순위다.
 
 ## AI Role Policy
-- `Gemini`: 제품 정의, 기획, 리뷰, 우선순위 판단의 주 역할
-- `Codex`: 구현, 수정, 퍼블리싱, 리팩토링 같은 코더/전문가 역할의 주 역할
-- 문서화, 에스컬레이션, 보조 분석 같은 보조 역할도 현재 기본 경로는 `Codex`로 처리한다.
+- 상세 기준 문서: [AI_ROLE_EXECUTION_POLICY.md](./AI_ROLE_EXECUTION_POLICY.md)
+- `Gemini`: 제품 정의, 기획, 리뷰, 테스트 결과 해석, 품질 게이트 판단, commit/PR/escalation 요약의 주 역할
+- `Codex`: 구현, 수정, 퍼블리싱, 리팩토링, 기술 문서 실제 작성의 주 역할
+- `bash`: pytest / npm test / e2e / emulator 같은 실제 실행 역할
+- `documentation` route는 `Codex`, `commit_summary / pr_summary / escalation`은 `Gemini`, `tester`는 `bash`, `test_reviewer`는 `Gemini` baseline route로 둔다.
 - `Claude` / `Copilot` 이름은 일부 레거시 route/template alias로만 남아 있을 수 있다.
 - 실행 코드는 논리 역할(`planner/reviewer/coder/...`)을 직접 하드코딩하지 않고 `config/ai_role_routing.json`으로 라우팅한다.
 - 역할군을 바꿀 때는 파이썬 코드 대신 라우팅 파일과 provider-specific 템플릿(`planner__gemini`, `coder__codex` 등)을 수정한다.
@@ -131,17 +146,41 @@
 ### Phase 7. Durable Runtime
 - 목적: 365일 운영을 위한 저장소/워크스페이스/백업 기반을 강화한다.
 - 핵심 작업:
+  - patch/update detection
+  - patch run state / progress
+  - separate updater service
   - durable queue/state
   - workspace cleanup policy
   - backup / restore
   - periodic self-check
+  - 상세 설계/도입 순서: [PHASE7_PATCH_CONTROL_AND_DURABLE_RUNTIME_PLAN.md](./PHASE7_PATCH_CONTROL_AND_DURABLE_RUNTIME_PLAN.md)
+  - 현재 상태: `7-A1 patch status detection baseline`, `7-A2 patch run state / progress`, `7-B1 separate updater service`, `7-B2 service drain / stop / restart`, `7-C1 post-update health check`, `7-C2 rollback baseline`, `7-D1 backup baseline + patch coupling`, `7-D2 restore action / backup verification`, `7-E1 durable runtime / workspace hygiene baseline`, `7-E2 security / TLS governance baseline`, `7-E3 periodic self-check baseline`, `7-E4 secret rotation / reverse-proxy TLS runbook baseline`, `7-E5 self-check alert lifecycle baseline`, `7-E6 self-check alert routing baseline` implemented
+  - 남은 항목: `remaining runtime split / read-service long-tail`, `durable backend / self-check alert provider policy hardening`, `LICENSE / 정책 의사결정`
+  - 원칙: 엔진 승격 blocker 성격의 남은 항목은 [PHASE8_NONLINEAR_ENGINE_AND_SELF_GROWING_PLAN.md](./PHASE8_NONLINEAR_ENGINE_AND_SELF_GROWING_PLAN.md) 의 `8-E. Phase 7 Carry-Over Enabling Track`으로 넘겨 관리한다.
 
-### Phase 8. Zero-Downtime / HA
-- 목적: 마지막 단계에서 다중 인스턴스와 무중단 배포를 도입한다.
+### Phase 8. Nonlinear Engine / Self-Growing Strong Closure
+- 목적: 이미 partial/shadow/opt-in 으로 들어온 비선형 runtime, vector retrieval, graph/subgraph, self-growing loop를 strong/operator-visible/primary-candidate 상태로 승격한다.
+- 핵심 작업:
+  - nonlinear runtime / reusable subgraph promotion
+  - planner / reviewer / coder 후보 vector retrieval rollout
+  - self-growing long-horizon strategy loop closure
+  - operator-facing graph/subgraph visualization baseline
+  - Phase 7 carry-over enabling track 정리
+- 완료 조건:
+  - 비선형 runtime이 shadow-only가 아니다.
+  - vector retrieval이 `memory_search` 밖의 핵심 path로 올라온다.
+  - self-growing loop가 장기 효과를 근거로 실제 다음 전략을 바꾼다.
+  - operator가 workflow와 graph/subgraph decision path를 구조적으로 읽을 수 있다.
+  - 상세 설계/도입 순서: [PHASE8_NONLINEAR_ENGINE_AND_SELF_GROWING_PLAN.md](./PHASE8_NONLINEAR_ENGINE_AND_SELF_GROWING_PLAN.md)
+
+### Phase 9. Zero-Downtime / HA
+- 목적: 엔진 closure 이후 마지막 단계에서 다중 인스턴스와 무중단 배포를 도입한다.
 - 핵심 작업:
   - multi-worker claim model
   - external queue / lock
   - rolling restart / health-based traffic shift
+- 완료 조건:
+  - Phase 8 종료 기준이 닫힌 뒤에만 HA 검증으로 넘어간다.
 
 ## P0 Execution Backlog
 
@@ -190,43 +229,22 @@
   - orphan running recovery policy
 
 ## Current Sprint
-- Sprint goal: `현재 상태를 냉정하게 기준선으로 고정하고, 구조 리스크 축소와 Phase 5 운영 신뢰성 진입 준비를 시작한다.`
+- Sprint goal: `Phase 8 enabling track를 먼저 닫고, 비선형 엔진 strong closure의 첫 실사용 승격 조각에 들어간다.`
 - In scope:
-  - current state gap report 유지
-  - `dashboard.py` 점진 분리
-  - assistant/provider prompt 및 실행 경로 분리
-  - agent config / template safety 로직을 별도 runtime 모듈로 분리
-  - `orchestrator.py` 점진 분리의 다음 슬라이스 정의 및 착수
-  - commit summary / PR summary / code change summary helper 실행을 `summary_runtime`으로 추출
-  - design/publish/copywriter/documentation 보조 단계를 `content_stage_runtime`으로 추출
-  - review/fix stage 실행을 `review_fix_runtime`으로 추출
-  - planner stage(one-shot / graph / shadow trace)를 `planner_runtime`으로 추출
-  - implement/coder stage를 `implement_runtime`으로 추출
-  - workflow dispatch / node handler 본문을 `workflow_node_runtime`으로 추출
-  - workflow pipeline dispatch / node-run bookkeeping을 `workflow_pipeline_runtime`으로 추출
-  - git/github provider execution(`push/create_pr/url lookup`)을 `provider_runtime`으로 추출
-  - docker preview / port allocation / PR preview helper를 `preview_runtime`으로 추출
-  - app type 판별 / non-web UX skip helper를 `app_type_runtime`으로 추출
-  - product-definition stage/fallback/contract helper를 `product_definition_runtime`으로 추출
-  - improvement stage/strategy helper를 `improvement_runtime`으로 추출
-  - UX screenshot / UX_REVIEW markdown helper를 `ux_review_runtime`으로 추출
-  - workflow resume / workflow loading helper를 `workflow_resolution_runtime`으로 추출
-  - stage markdown snapshot / docs commit helper를 `docs_snapshot_runtime`으로 추출
-  - job detail/runtime signals/log summary/operator input helper를 `dashboard_job_runtime`으로 추출
-  - runtime input serialization / draft / request / provide helper를 `dashboard_runtime_input_runtime`으로 추출
-  - admin metrics / assistant diagnosis aggregation helper를 `dashboard_admin_metrics_runtime`으로 추출
-  - `runtime_recovery_trace` helper와 `_docs/RUNTIME_RECOVERY_TRACE.json` artifact를 추가
-  - `failure_classification` helper와 normalized failure class summary를 추가
-  - failure classification에 `provider_hint / stage_family` mapping을 추가
-  - dashboard / job detail에 failure class visibility를 추가
-  - 모바일 앱 개발 모드 규칙 문서 추가 및 planner/coder/reviewer prompt 반영
+  - `remaining runtime split / read-service long-tail` 마감
+  - `durable backend / self-check alert provider policy hardening`
+  - planner / recovery / diagnosis 중 최소 하나의 graph/subgraph primary-candidate 승격
+  - planner / reviewer 후보 vector retrieval rollout
+  - self-growing 장기 효과를 다음 전략 입력으로 연결
+  - operator-facing graph/subgraph visualization baseline 설계/첫 슬라이스
+  - `orchestrator.py` 구조 리스크 축소의 다음 작은 슬라이스 정의
+  - current state gap report / phase 문서 / handoff 동기화
   - production-readiness 기본선 유지
   - 회귀 테스트 유지
-  - Phase 6 문서화: operator control plane / third-party integration registry
 - Out of scope:
-  - 라이선스 정책 결정
-  - 운영 시크릿 실제 로테이션
-  - 파괴적 Git 히스토리 정리
+  - Phase 9 `Zero-Downtime / HA`
+  - `full visual editor / drag-and-drop` 급 graph workflow 편집기
+  - 운영 시크릿 실제 로테이션과 파괴적 Git 히스토리 정리
 
 ## Acceptance Criteria
 - 핵심 문서가 현재 소스 상태와 충돌하지 않는다.
@@ -239,21 +257,24 @@
 - 하지만 아직 `스스로 성장하는 24시간 개발 동료`라고 부르기에는 이르다.
 - 가장 큰 실제 부족분은 아래다.
   - [app/orchestrator.py](../app/orchestrator.py) 중심의 구조 리스크
-  - Phase 5는 operator ops surface까지 왔지만 remaining runtime split과 enterprise 운영 계층이 아직 남음
-  - Phase 4 기능의 shadow/opt-in 비중이 아직 높음
+  - Phase 7 baseline은 거의 닫혔지만 remaining runtime split, durable backend, self-check alert provider policy는 아직 남아 있고 이제 Phase 8 enabling track으로 관리해야 함
+  - Phase 4 기능의 shadow/opt-in 비중이 아직 높아 Phase 8 strong closure가 필요함
   - self-growing bridge는 장기 추세 집계와 failure cluster 연결, regressed/insufficient baseline facet, recurring failure cluster 재발 감소 측정까지 올라왔지만 장기 운영 증명은 아직 더 필요함
 - 현재 기준 대형 파일 상태:
-  - [app/dashboard.py](../app/dashboard.py): `3656` lines
+  - [app/dashboard.py](../app/dashboard.py): `452` lines
   - [app/orchestrator.py](../app/orchestrator.py): `2605` lines
-- 즉, `dashboard.py`는 1차 전환 기준 아래로 내려왔고, `orchestrator.py`도 failure transition/runtime 분리와 worker restart safety baseline까지 올라왔다. 다만 핵심 구조 리스크는 여전히 orchestrator 쪽에 남아 있다.
+- 즉, `dashboard.py`는 route와 builder 본문을 [dashboard_job_router](../app/dashboard_job_router.py), [dashboard_write_router](../app/dashboard_write_router.py), [dashboard_operator_router](../app/dashboard_operator_router.py), [dashboard_config_router](../app/dashboard_config_router.py), [dashboard_builder_runtime](../app/dashboard_builder_runtime.py) 로 분리한 뒤 compatibility wrapper만 남긴 상태까지 내려왔고, `orchestrator.py`도 failure transition/runtime 분리와 worker restart safety baseline까지 올라왔다. 다만 핵심 구조 리스크는 여전히 orchestrator 쪽에 남아 있다.
 - 상세 판정은 [CURRENT_STATE_GAP_REPORT.md](./CURRENT_STATE_GAP_REPORT.md) 를 따른다.
 
 ## Next Priority Shift
 - 현재부터의 우선순위는 `새 기능 폭 확대`보다 아래 순서를 따른다.
-  1. `orchestrator.py`의 남은 runtime 슬라이스 분리
-  2. enterprise 운영 계층 보강
-  3. dashboard write action/service 잔여 축소
+  1. `Phase 8-E carry-over enabling track`
+  2. `8-A Nonlinear Runtime Promotion`
+  3. `8-B Vector Retrieval Promotion`
+  4. `8-C Self-Growing Strong Closure`
+  5. `8-D Graph / Subgraph Visibility Baseline`
 - 현재 가장 자연스러운 다음 후보:
-  - `remaining runtime split` 잔여 정리
-  - 이후 enterprise 운영 계층 보강
-  - 현재 판단상 provider burst 계측, cooldown 전이, provider quarantine, provider circuit-breaker, planner/reviewer alternate route fallback, worker startup sweep trace, restart-safe requeue reason, running node/job mismatch audit, dead-letter 재큐잉 액션, operator note trail, dead-letter list / recovery history summary, provider outage history, startup sweep history, dead-letter / recovery action drilldown, recovery action groups, operator action trail까지는 올라왔다. `workspace_repository_runtime`, `preview_runtime`, `app_type_runtime`, `issue_spec_runtime`, `product_definition_runtime`, `product_review_runtime`, `artifact_io_runtime`, `design_governance_runtime`, `improvement_runtime`, `memory_retrieval_runtime`, `memory_quality_runtime`, `structured_memory_runtime`, `ux_review_runtime`, `template_artifact_runtime`, `tool_support_runtime`, `workflow_binding_runtime`, `job_execution_runtime`, `dashboard_job_action_runtime`까지 분리됐고, `summary_runtime`은 commit stage 본문을, `fixed_pipeline_runtime`은 legacy fixed pipeline 본문을 흡수했다. product-review operating principle alignment도 runtime 쪽으로 흡수됐다. self-growing bridge도 `_docs/SELF_GROWING_EFFECTIVENESS.json` baseline, 최근 7일 추세, 앱별 효과 분포, `failure_pattern_cluster` 기반 follow-up 효과, 재발 감소/유지/증가 집계, regressed reason 분포, insufficient baseline 원인 분포, 최근 회귀/기준 부족 사례까지 올라왔다. 다음 조각은 남은 runtime split 잔여 helper 축소와 enterprise 운영 계층 보강, dashboard write action/service 잔여 축소다.
+  - `remaining runtime split / read-service long-tail` 정리
+  - `durable backend / self-check alert provider policy hardening`
+  - 이후 `planner/reviewer vector retrieval`과 `planner/recovery/diagnosis graph promotion`
+- 현재 판단상 provider burst 계측, cooldown 전이, provider quarantine, provider circuit-breaker, planner/reviewer alternate route fallback, worker startup sweep trace, restart-safe requeue reason, running node/job mismatch audit, dead-letter 재큐잉 액션, operator note trail, dead-letter list / recovery history summary, provider outage history, startup sweep history, dead-letter / recovery action drilldown, recovery action groups, operator action trail까지는 올라왔다. `workspace_repository_runtime`, `preview_runtime`, `app_type_runtime`, `issue_spec_runtime`, `product_definition_runtime`, `product_review_runtime`, `artifact_io_runtime`, `design_governance_runtime`, `improvement_runtime`, `memory_retrieval_runtime`, `memory_quality_runtime`, `structured_memory_runtime`, `ux_review_runtime`, `template_artifact_runtime`, `tool_support_runtime`, `workflow_binding_runtime`, `job_execution_runtime`, `dashboard_job_action_runtime`, `dashboard_job_detail_runtime`, `dashboard_job_list_runtime`, `dashboard_job_workflow_runtime`, `dashboard_job_artifact_runtime`, `dashboard_view_runtime`, `dashboard_job_enqueue_runtime`, `dashboard_github_cli_runtime`, `dashboard_assistant_diagnosis_runtime`, `dashboard_app_registry_runtime`, `dashboard_settings_runtime`, `dashboard_assistant_runtime`, `dashboard_memory_admin_runtime`, `dashboard_issue_registration_runtime`, `dashboard_compat_runtime`, `dashboard_builder_runtime`, `dashboard_operator_router`, `dashboard_config_router`, `dashboard_write_router`, `dashboard_job_router`, `patch_control_runtime`, `dashboard_patch_runtime`, `patch_service_runtime`, `patch_health_runtime`, `patch_backup_runtime`, `durable_runtime_hygiene`, `durable_runtime_self_check`, `security_governance_runtime`, `self_check_alert_delivery_runtime`까지 분리됐고, `summary_runtime`은 commit stage 본문을, `fixed_pipeline_runtime`은 legacy fixed pipeline 본문을 흡수했다. product-review operating principle alignment도 runtime 쪽으로 흡수됐다. self-growing bridge도 `_docs/SELF_GROWING_EFFECTIVENESS.json` baseline, 최근 7일 추세, 앱별 효과 분포, `failure_pattern_cluster` 기반 follow-up 효과, 재발 감소/유지/증가 집계, regressed reason 분포, insufficient baseline 원인 분포, 최근 회귀/기준 부족 사례까지 올라왔다. Phase 7은 baseline을 거의 닫았고, 남은 조각은 이제 Phase 8 enabling track의 blocker 정리로 본다. 다음 조각은 나머지 read-heavy long-tail 정리, self-check alert provider policy hardening, 이후 planner/reviewer vector retrieval rollout과 graph/subgraph promotion이다.

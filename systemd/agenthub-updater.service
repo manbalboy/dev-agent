@@ -1,0 +1,15 @@
+[Unit]
+Description=AgentHub patch updater service
+After=network.target
+
+[Service]
+Type=simple
+User=docker
+WorkingDirectory=/home/docker/agentHub
+EnvironmentFile=/home/docker/agentHub/.env
+ExecStart=/home/docker/agentHub/.venv/bin/python -m app.updater_main
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

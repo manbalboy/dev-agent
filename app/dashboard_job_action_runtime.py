@@ -25,6 +25,7 @@ class DashboardJobActionRuntime:
         compute_job_resume_state: Callable[[JobRecord, List[Any], AppSettings], Dict[str, Any]],
         validate_manual_resume_target: Callable[..., Dict[str, Any]],
         append_runtime_recovery_trace_for_job: Callable[..., None],
+        ensure_patch_accepting_new_jobs: Callable[[], None],
     ) -> None:
         self.store = store
         self.settings = settings
@@ -33,6 +34,7 @@ class DashboardJobActionRuntime:
         self.compute_job_resume_state = compute_job_resume_state
         self.validate_manual_resume_target = validate_manual_resume_target
         self.append_runtime_recovery_trace_for_job = append_runtime_recovery_trace_for_job
+        self.ensure_patch_accepting_new_jobs = ensure_patch_accepting_new_jobs
 
     def request_job_stop(self, job_id: str) -> Dict[str, Any]:
         """Request graceful stop for one queued/running job."""
@@ -51,6 +53,7 @@ class DashboardJobActionRuntime:
     def requeue_job(self, job_id: str) -> Dict[str, Any]:
         """Requeue one failed job from dashboard."""
 
+        self.ensure_patch_accepting_new_jobs()
         job = self.store.get_job(job_id)
         if job is None:
             raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
@@ -79,6 +82,7 @@ class DashboardJobActionRuntime:
     def retry_dead_letter_job(self, job_id: str, *, note: str = "") -> Dict[str, Any]:
         """Requeue one dead-lettered job with explicit operator trace."""
 
+        self.ensure_patch_accepting_new_jobs()
         job = self.store.get_job(job_id)
         if job is None:
             raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
@@ -150,6 +154,7 @@ class DashboardJobActionRuntime:
     ) -> Dict[str, Any]:
         """Queue one failed/completed job with explicit manual rerun/resume policy."""
 
+        self.ensure_patch_accepting_new_jobs()
         job = self.store.get_job(job_id)
         if job is None:
             raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
@@ -261,6 +266,7 @@ class DashboardJobActionRuntime:
     def requeue_failed_jobs(self) -> Dict[str, Any]:
         """Requeue every failed job in one action."""
 
+        self.ensure_patch_accepting_new_jobs()
         jobs = self.store.list_jobs()
         failed_job_ids = [job.job_id for job in jobs if job.status == JobStatus.FAILED.value]
         for job_id in failed_job_ids:

@@ -48,7 +48,7 @@ FEATURE_FLAG_DESCRIPTIONS: Dict[str, str] = {
     "assistant_diagnosis_loop": "assistant log-analysis 전에 log/repo/memory tool을 순차 호출해 진단용 evidence pack과 trace를 기록합니다.",
     "mcp_tools_shadow": "기존 도구 실행 결과는 유지한 채 MCP shadow client를 병행 호출해 trace만 기록합니다.",
     "vector_memory_shadow": "SQLite memory DB는 그대로 유지한 채 vector index 후보 payload를 shadow artifact로만 기록합니다.",
-    "vector_memory_retrieval": "memory_search 한정으로 Qdrant vector retrieval을 opt-in 실험하고, 실패 시 SQLite 검색으로 fallback 합니다.",
+    "vector_memory_retrieval": "Qdrant vector retrieval을 memory_search와 planner/reviewer/coder memory context에 opt-in 실험하고, 실패 시 SQLite 기반 selection으로 fallback 합니다.",
     "langgraph_planner_shadow": "planner primary loop는 유지한 채 LangGraph subgraph shadow trace만 기록합니다.",
     "langgraph_recovery_shadow": "recovery primary policy는 유지한 채 LangGraph subgraph shadow trace만 기록합니다.",
 }

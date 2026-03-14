@@ -1188,7 +1188,7 @@
       function classifyLogEntry(entry) {
         const msg = String(entry.message || "");
         const actor = String(entry.actor || "ORCHESTRATOR").toUpperCase();
-        const optionalActors = new Set(["TECH_WRITER", "TECH_WRITER_CODEX", "PR_SUMMARY", "CODEX_HELPER", "COPILOT"]);
+        const optionalActors = new Set(["COMMIT_SUMMARY", "TECH_WRITER", "TECH_WRITER_CODEX", "PR_SUMMARY", "ESCALATION", "CODEX_HELPER", "COPILOT"]);
         if (msg.startsWith("Attempt ") && msg.includes(" failed:")) return "error";
         if (/^\[(LONG|ULTRA10|ULTRA)\]\s+.*failed:/i.test(msg)) return "error";
         if (msg.includes("Maximum retry count reached")) return "error";
@@ -1286,11 +1286,13 @@
           CODER: "코더",
           PLANNER: "플래너",
           REVIEWER: "리뷰어",
+          COMMIT_SUMMARY: "커밋 요약기",
           DESIGNER: "디자이너",
           COPYWRITER: "카피라이터",
           TECH_WRITER: "기술 문서 작성가",
           TECH_WRITER_CODEX: "문서 보조 코더",
           PR_SUMMARY: "PR 요약기",
+          ESCALATION: "에스컬레이션 요약기",
           TESTER_GPT: "테스터(gpt)",
           TESTER_GEMINI: "테스터(gemini)",
           TESTER: "테스터",
@@ -2947,18 +2949,38 @@
         return "ORCHESTRATOR";
       }
 
-      function summarizeGroupProgress(group) {
-        const entries = Array.isArray(group.entries) ? group.entries : [];
+      function groupProgressInfo(group) {
+        const entries = Array.isArray(group?.entries) ? group.entries : [];
+        const actor = detectGroupActor(group);
+        const isOptionalActor = isOptionalHelperActorName(actor);
         const done = entries.find((entry) => String(entry.message || "").startsWith("[DONE] "));
         if (done) {
           const matched = String(done.message || "").match(/exit_code=(\d+)/);
-          if (matched && Number(matched[1]) === 0) return "완료";
-          if (matched) return `실패(exit ${matched[1]})`;
-          return "완료";
+          if (matched && Number(matched[1]) === 0) return { label: "완료", kind: "done" };
+          if (matched) {
+            return {
+              label: `${isOptionalActor ? "주의" : "실패"}(exit ${matched[1]})`,
+              kind: isOptionalActor ? "warn" : "failed",
+            };
+          }
+          return { label: "완료", kind: "done" };
         }
         const hasRun = entries.some((entry) => String(entry.message || "").startsWith("[RUN] "));
-        if (hasRun) return "진행중";
-        return "대기";
+        if (hasRun) return { label: "진행중", kind: "running" };
+        return { label: "대기", kind: "queued" };
+      }
+
+      function summarizeGroupProgress(group) {
+        return groupProgressInfo(group).label;
+      }
+
+      function groupProgressBadgeClass(group) {
+        const kind = String(groupProgressInfo(group).kind || "");
+        if (kind === "failed") return "failed";
+        if (kind === "done") return "done";
+        if (kind === "warn") return "interrupted";
+        if (kind === "queued") return "queued";
+        return "running";
       }
 
       function groupLastTimestampMs(group) {
@@ -3082,17 +3104,18 @@
               groups: [],
               workflowStages: new Set(),
               tools: new Map(),
-              progress: { running: 0, done: 0, failed: 0, pending: 0 },
+              progress: { running: 0, done: 0, warn: 0, failed: 0, pending: 0 },
             });
           }
           const bucket = roleMap.get(actor);
           bucket.groups.push(group);
           const stageCode = String(group.stage || "").replace(/^stage:/, "");
           bucket.workflowStages.add(stageDisplayName(stageCode));
-          const progress = summarizeGroupProgress(group);
-          if (progress.startsWith("실패")) bucket.progress.failed += 1;
-          else if (progress === "완료") bucket.progress.done += 1;
-          else if (progress === "진행중") bucket.progress.running += 1;
+          const progress = groupProgressInfo(group);
+          if (progress.kind === "failed") bucket.progress.failed += 1;
+          else if (progress.kind === "warn") bucket.progress.warn += 1;
+          else if (progress.kind === "done") bucket.progress.done += 1;
+          else if (progress.kind === "running") bucket.progress.running += 1;
           else bucket.progress.pending += 1;
         }
 
@@ -3111,12 +3134,12 @@
         const latestStageLabel = stageDisplayName(latestStageCode);
         const latestAttemptLabel = String(latestGroup.attempt || "attempt:0").replace(/^attempt:/, "");
         const latestProgress = summarizeGroupProgress(latestGroup);
-        const latestBadgeClass = latestProgress.startsWith("실패") ? "failed" : (latestProgress === "완료" ? "done" : "running");
+        const latestBadgeClass = groupProgressBadgeClass(latestGroup);
 
         const roleCards = Array.from(roleMap.values())
           .sort((a, b) => {
-            const aTotal = a.progress.running + a.progress.done + a.progress.failed + a.progress.pending;
-            const bTotal = b.progress.running + b.progress.done + b.progress.failed + b.progress.pending;
+            const aTotal = a.progress.running + a.progress.done + a.progress.warn + a.progress.failed + a.progress.pending;
+            const bTotal = b.progress.running + b.progress.done + b.progress.warn + b.progress.failed + b.progress.pending;
             return bTotal - aTotal;
           });
 
@@ -3129,7 +3152,7 @@
             <header class="task-log-head">
               <div class="task-log-title">
                 <strong>${esc(actorDisplayName(role.actor))}</strong>
-                <span class="hint">진행중 ${role.progress.running} · 완료 ${role.progress.done} · 실패 ${role.progress.failed}</span>
+                <span class="hint">진행중 ${role.progress.running} · 완료 ${role.progress.done} · 주의 ${role.progress.warn} · 실패 ${role.progress.failed}</span>
               </div>
             </header>
             <p class="hint">${esc(workflowText)}</p>
@@ -3150,7 +3173,7 @@
             const stageLabel = stageDisplayName(stageCode);
             const attemptLabel = String(group.attempt || "attempt:0").replace(/^attempt:/, "");
             const progress = summarizeGroupProgress(group);
-            const badgeClass = progress.startsWith("실패") ? "failed" : (progress === "완료" ? "done" : "running");
+            const badgeClass = groupProgressBadgeClass(group);
             const latestLines = (group.entries || []).slice(-3);
             const linesHtml = latestLines.map((entry) => {
               const type = classifyLogEntry(entry);
@@ -3340,6 +3363,7 @@
               .filter((value, index, arr) => arr.indexOf(value) === index);
             const lastGroup = attemptInfo.groups[attemptInfo.groups.length - 1] || { entries: [] };
             const progress = summarizeGroupProgress(lastGroup);
+            const badgeClass = groupProgressBadgeClass(lastGroup);
             const label = attemptInfo.roundLabel || `시도 ${attemptNumber}`;
             const chips = stageNames
               .slice(0, 6)
@@ -3348,7 +3372,7 @@
             return `<article class="debug-flow-card">
               <div class="debug-flow-head">
                 <strong>${esc(label)}</strong>
-                <span class="badge status-${progress.startsWith("실패") ? "failed" : (progress === "완료" ? "done" : "running")}">${esc(progress)}</span>
+                <span class="badge status-${badgeClass}">${esc(progress)}</span>
               </div>
               <p class="hint">그룹 ${attemptInfo.groups.length}개 · 단계 ${stageNames.length}개</p>
               <div class="workflow-kpis">${chips || `<span class="workflow-kpi">단계 기록 없음</span>`}</div>

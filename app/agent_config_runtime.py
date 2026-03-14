@@ -136,6 +136,8 @@ def collect_agent_cli_status(command_config_path: Path) -> Dict[str, Any]:
     return {
         "gemini": check_one_cli("gemini", templates),
         "codex": check_one_cli("codex", templates),
+        "git": check_one_cli("git", templates),
+        "gh": check_one_cli("gh", templates),
     }
 
 

@@ -218,22 +218,22 @@ class SummaryRuntime:
     ) -> str:
         """Generate one-line commit summary using configured helper routes."""
 
+        summary = self._prepare_commit_summary_with_template(
+            job=job,
+            repository_path=repository_path,
+            stage_name=stage_name,
+            commit_type=commit_type,
+            log_path=log_path,
+        )
+        if self.is_usable_commit_summary(summary):
+            return summary
+
         summary = self._prepare_commit_summary_with_helper(
             job=job,
             repository_path=repository_path,
             stage_name=stage_name,
             commit_type=commit_type,
             changed_paths=changed_paths,
-            log_path=log_path,
-        )
-        if self.is_usable_commit_summary(summary):
-            return summary
-
-        summary = self._prepare_commit_summary_with_template(
-            job=job,
-            repository_path=repository_path,
-            stage_name=stage_name,
-            commit_type=commit_type,
             log_path=log_path,
         )
         if self.is_usable_commit_summary(summary):
@@ -359,14 +359,14 @@ class SummaryRuntime:
                     "pr_summary_path": str(self.docs_file(repository_path, "PR_SUMMARY.md")),
                 },
                 cwd=repository_path,
-                log_writer=self.actor_log_writer(log_path, "TECH_WRITER"),
+                log_writer=self.actor_log_writer(log_path, "COMMIT_SUMMARY"),
             )
         except Exception as error:  # noqa: BLE001
             self.append_actor_log(
                 log_path,
-                "TECH_WRITER",
+                "COMMIT_SUMMARY",
                 "Commit summary route unavailable; using deterministic fallback: "
-                f"{summarize_optional_route_error(error, actor='TECH_WRITER')}",
+                f"{summarize_optional_route_error(error, actor='COMMIT_SUMMARY')}",
             )
             return ""
 

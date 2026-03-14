@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -49,6 +49,28 @@ def create_app(
 
     static_dir = Path(__file__).parent / "static"
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
+    @app.middleware("http")
+    async def enforce_https_middleware(request: Request, call_next):
+        """Optionally reject non-HTTPS requests outside local health checks."""
+
+        if not resolved_settings.enforce_https or request.url.path == "/healthz":
+            return await call_next(request)
+
+        scheme = str(request.url.scheme or "").lower()
+        if resolved_settings.trust_x_forwarded_proto:
+            forwarded = str(request.headers.get("x-forwarded-proto", "") or "").split(",")[0].strip().lower()
+            if forwarded:
+                scheme = forwarded
+        if scheme != "https":
+            return JSONResponse(
+                {
+                    "status": "https_required",
+                    "detail": "HTTPS is required for this endpoint.",
+                },
+                status_code=426,
+            )
+        return await call_next(request)
 
     app.include_router(webhook_router)
     app.include_router(dashboard_router)

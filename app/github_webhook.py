@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from app.config import AppSettings
 from app.dependencies import get_settings, get_store
 from app.models import JobRecord, JobStage, JobStatus, utc_now_iso
+from app.patch_service_runtime import PatchServiceRuntime
 from app.store import JobStore
 from app.workflow_resolution import (
     list_known_workflow_ids,
@@ -77,6 +78,21 @@ async def receive_github_issue_webhook(
 
     if action != "labeled" or label_name != "agent:run":
         return {"accepted": False, "reason": "label_condition_not_met"}
+
+    patch_gate = PatchServiceRuntime(
+        store=store,
+        patch_lock_file=settings.patch_lock_file,
+        api_service_name=settings.patch_api_service_name,
+        worker_service_name=settings.patch_worker_service_name,
+        utc_now_iso=utc_now_iso,
+    ).read_patch_lock_payload()
+    if patch_gate.get("active"):
+        return {
+            "accepted": False,
+            "reason": "patch_in_progress",
+            "patch_run_id": str(patch_gate.get("patch_run_id") or ""),
+            "message": str(patch_gate.get("message") or "패치 진행 중이라 새 작업을 받을 수 없습니다."),
+        }
 
     issue = payload.get("issue") or {}
     issue_number = int(issue.get("number", 0))
